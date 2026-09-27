@@ -1,0 +1,3 @@
+{"question": "A baker makes 12 loaves each hour for 6 hours, then sells all but 9 of them. How many loaves did she sell?", "answer": "She makes 12 * 6 = 72 loaves.\nShe sells 72 - 9 = 63 loaves.\n#### 63"}
+{"question": "Tom has 3 boxes with 14 marbles each. He gives away 10 marbles. How many marbles does he have left?", "answer": "3 * 14 = 42 marbles. 42 - 10 = 32.\n#### 32"}
+{"question": "A train travels 1,250 kilometers in 5 hours. What is its average speed in kilometers per hour?", "answer": "1250 / 5 = 250\n#### 250"}

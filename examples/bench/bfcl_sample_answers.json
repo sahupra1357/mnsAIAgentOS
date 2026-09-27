@@ -1,0 +1,2 @@
+{"id": "simple_0", "ground_truth": [{"weather.get_current": {"city": ["Pune"], "unit": ["celsius", ""]}}]}
+{"id": "parallel_0", "ground_truth": [{"convert_currency": {"amount": [10, 10.0], "from_currency": ["USD"], "to_currency": ["EUR"]}}, {"convert_currency": {"amount": [25, 25.0], "from_currency": ["USD"], "to_currency": ["INR"]}}]}

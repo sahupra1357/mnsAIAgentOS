@@ -19,6 +19,7 @@ litellm = ["litellm>=1.50,<2"]
 
 [project.scripts]
 agent-harness = "agent_harness.cli:main"
+agent-harness-bench = "agent_harness.bench.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -28,3 +29,11 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
 
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Pinned explicitly so newer ruff releases (whose defaults differ) cannot
+# silently change the CI gate. Widen deliberately in its own change.
+select = ["E4", "E7", "E9", "F"]

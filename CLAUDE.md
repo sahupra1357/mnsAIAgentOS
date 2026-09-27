@@ -236,6 +236,16 @@ Order matters: 6.1 is the foundation for most of the rest.
 15. Usage display: `status`/API endpoint showing per-run tokens, cost, cache-hit rate,
     and steps against the budget.
 
+## Validation
+
+`docs/VALIDATION.md` describes six stages: static, unit, scenarios, smoke, benchmarks,
+and gates.
+- **CI:** `.github/workflows/ci.yml` runs the offline stages.
+- **Live stages:** `agent-harness-bench pipeline examples/validation.toml`.
+- **Code:** `src/agent_harness/bench/`.
+- **Tests:** never download datasets or call live models in `tests/`. Use the
+  synthetic samples in `examples/bench/`.
+
 ## Skills (read before editing the matching area)
 
 | Area                                          | Skill                                           |
