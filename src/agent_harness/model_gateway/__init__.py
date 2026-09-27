@@ -12,6 +12,7 @@ from .errors import (
 )
 from .fake import ScriptedModelClient
 from .gateway import BUILTIN_ADAPTERS, AdapterFactory, ModelGateway
+from .litellm_client import LiteLLMClient, classify_litellm_error
 from .llama_cpp import LlamaCppClient
 from .modal import ModalClient
 from .ollama import OllamaClient
@@ -38,6 +39,7 @@ __all__ = [
     "HttpTransport",
     "HttpTransportError",
     "HttpTransportTimeout",
+    "LiteLLMClient",
     "LlamaCppClient",
     "MalformedResponseError",
     "ModalClient",
@@ -52,4 +54,5 @@ __all__ = [
     "ScriptedModelClient",
     "StdlibHttpTransport",
     "ThrottlingError",
+    "classify_litellm_error",
 ]

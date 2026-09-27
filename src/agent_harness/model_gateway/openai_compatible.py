@@ -53,6 +53,9 @@ class OpenAICompatibleClient:
     """
 
     supports_native_api: ClassVar[bool] = False
+    # False for clients that do not talk to an HTTP server directly (doctor
+    # then skips the health and model-list probes).
+    supports_http_probes: ClassVar[bool] = True
 
     def __init__(
         self,

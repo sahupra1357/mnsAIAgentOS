@@ -75,7 +75,11 @@ async def diagnose(
         checks.append(
             DiagnosticCheck("credentials", CheckStatus.OK, "all configured variables are set")
         )
-        if transport is not None:
+        if transport is not None and not http_client.supports_http_probes:
+            checks.append(
+                DiagnosticCheck("health", CheckStatus.SKIP, "adapter has no HTTP endpoint to probe")
+            )
+        elif transport is not None:
             health = await _check_health(http_client, transport)
             checks.append(health)
             if health.status is CheckStatus.FAIL:

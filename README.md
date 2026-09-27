@@ -205,6 +205,40 @@ It exits 1 if any check fails.
   strong = "modal"
   ```
 
+## LiteLLM (optional)
+
+LiteLLM is opt-in for each profile. Only profiles with `adapter = "litellm"` use it;
+every other profile keeps calling its server directly, and without such a profile the
+package is never imported.
+
+```bash
+pip install -e '.[litellm]'
+```
+
+```toml
+[models.claude]
+adapter = "litellm"
+model = "anthropic/claude-sonnet-5"     # LiteLLM provider/model name
+api_key_env = "ANTHROPIC_API_KEY"       # passed as api_key
+# endpoint = "https://gateway/v1"       # optional, passed as api_base
+# headers_env = { X-Team = "TEAM_ID" }  # passed as extra_headers
+
+[models.modal]
+fallback = ["claude"]                   # use it only when Modal keeps failing
+```
+
+**How it behaves inside the harness:**
+- **Retries:** LiteLLM's own retries are turned off. The profile's `max_retries`, the
+  harness retry budget, and fallback apply as with every other adapter.
+- **Errors:** LiteLLM errors are mapped to the harness error types (auth, throttling,
+  timeout, context window, provider).
+- **Cost:** comes from LiteLLM's per-call cost, unless the profile sets `pricing`.
+- **Everything else works as usual:** context trimming, cached tokens, streaming,
+  telemetry, routes, and `doctor`.
+
+Alternatively, run the LiteLLM Proxy yourself and point an ordinary
+`openai_compatible` profile at it.
+
 ## Context Window
 
 Profiles that set `context_window` get a bounded view of the history on every model call.

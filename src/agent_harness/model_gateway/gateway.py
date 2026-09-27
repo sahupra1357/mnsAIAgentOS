@@ -9,6 +9,7 @@ from agent_harness.config import HarnessConfig, ModelProfile
 from agent_harness.domain import ModelClient
 
 from .errors import ModelConfigurationError
+from .litellm_client import LiteLLMClient
 from .llama_cpp import LlamaCppClient
 from .modal import ModalClient
 from .ollama import OllamaClient
@@ -23,6 +24,7 @@ BUILTIN_ADAPTERS: Mapping[str, type[OpenAICompatibleClient]] = {
     "ollama": OllamaClient,
     "llama_cpp": LlamaCppClient,
     "modal": ModalClient,
+    "litellm": LiteLLMClient,
 }
 
 

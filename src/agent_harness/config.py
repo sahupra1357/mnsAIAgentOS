@@ -26,6 +26,8 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _RESERVED_HEADERS = frozenset({"authorization", "content-type", "accept", "content-length", "host"})
 SUPPORTED_SERVERS = frozenset({"vllm", "sglang"})
 SUPPORTED_API_MODES = frozenset({"openai", "native"})
+# Adapters that can reach hosted providers without an explicit endpoint URL.
+ENDPOINT_OPTIONAL_ADAPTERS = frozenset({"litellm"})
 _ENV_PREFIX = "AGENT_HARNESS_MODEL__"
 _ROUTE_ENV_PREFIX = "AGENT_HARNESS_ROUTE__"
 _PROFILE_FIELDS = {
@@ -107,7 +109,7 @@ class ModelProfile:
             raise ConfigError("model profile adapter must not be empty")
         if not self.model.strip():
             raise ConfigError("model profile model must not be empty")
-        if not self.endpoint.strip():
+        if not self.endpoint.strip() and self.adapter not in ENDPOINT_OPTIONAL_ADAPTERS:
             raise ConfigError("model profile endpoint must not be empty")
         if self.timeout_seconds <= 0:
             raise ConfigError("model profile timeout_seconds must be greater than zero")
@@ -411,7 +413,10 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
     unknown = set(raw) - allowed
     if unknown:
         raise ConfigError(f"unknown fields in models.{name}: {', '.join(sorted(unknown))}")
-    missing = [field for field in ("adapter", "model", "endpoint") if field not in raw]
+    required = ["adapter", "model"]
+    if raw.get("adapter") not in ENDPOINT_OPTIONAL_ADAPTERS:
+        required.append("endpoint")
+    missing = [field for field in required if field not in raw]
     if missing:
         raise ConfigError(f"models.{name} is missing: {', '.join(missing)}")
     parameters = raw.get("parameters", {})
@@ -433,7 +438,11 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
         return ModelProfile(
             adapter=_required_string(raw["adapter"], f"models.{name}.adapter"),
             model=_required_string(raw["model"], f"models.{name}.model"),
-            endpoint=_required_string(raw["endpoint"], f"models.{name}.endpoint"),
+            endpoint=(
+                _required_string(raw["endpoint"], f"models.{name}.endpoint")
+                if "endpoint" in raw
+                else ""
+            ),
             api_key_env=_optional_string(raw.get("api_key_env"), f"models.{name}.api_key_env"),
             timeout_seconds=float(raw.get("timeout_seconds", 60.0)),
             max_retries=int(raw.get("max_retries", 2)),
