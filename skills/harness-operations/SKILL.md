@@ -36,6 +36,16 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
   - Ollama native mode does not stream.
   - CLI: `run --stream` and `--telemetry-file`.
 
+- 4c is implemented: items 5 and 6.
+  - `RunQueue` protocol with enqueue/claim/renew/release, implemented by both stores.
+    SQLite: a `run_queue` table, with claims inside `BEGIN IMMEDIATE`.
+  - `worker.py`: `Worker` with a heartbeat. A lost lease cancels local execution.
+    Unsettled runs are requeued; poison runs are dropped after N failures.
+  - `api.py`: framework-free ASGI `HarnessAPI` with bearer auth, whose lifespan hosts
+    workers, and `create_api(app)`.
+  - CLI: `serve` (uvicorn, `[api]` extra) and `worker`.
+- Remaining for 4d: items 7 (artifacts), 8 (memory), 9 (evaluation runner).
+
 ## 1. Durable tool idempotency
 - Add intent-level store methods: `get_tool_result(key)` / `put_tool_result(key, fingerprint, result)`.
 - SQLite: a new table keyed by the idempotency key, written in the same transaction as

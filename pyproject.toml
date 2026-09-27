@@ -13,6 +13,7 @@ authors = [{name = "Agent Harness contributors"}]
 
 [project.optional-dependencies]
 otel = ["opentelemetry-api>=1.20"]
+api = ["uvicorn>=0.30"]
 
 [project.scripts]
 agent-harness = "agent_harness.cli:main"
