@@ -1,0 +1,16 @@
+# Scripted: runs offline in CI. `agent-harness eval --live` sends the same prompt to a real model.
+name = "calculator_multiplication"
+prompt = "Use the calculator to multiply 6 by 7, then state the result."
+
+[[model]]
+tool_calls = [{ name = "calculator", arguments = { operation = "multiply", left = 6, right = 7 } }]
+
+[[model]]
+content = "6 multiplied by 7 is 42."
+
+[expect]
+status = "completed"
+tool_calls = ["calculator"]
+output_contains = ["42"]
+max_steps = 3
+events_include = ["tool_responded"]

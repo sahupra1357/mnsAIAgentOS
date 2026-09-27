@@ -34,6 +34,7 @@ from urllib.parse import parse_qs
 
 from agent_harness.config import ConfigError, HarnessConfig
 from agent_harness.domain import (
+    ArtifactStore,
     HarnessError,
     Message,
     Role,
@@ -54,6 +55,7 @@ Send = Callable[[Mapping[str, Any]], Awaitable[None]]
 MAX_TEXT_CHARS = 100_000
 _ID = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"
 _RUN_ROUTE = re.compile(rf"^/runs/(?P<run_id>{_ID})(?P<rest>/.*)?$")
+_ARTIFACT_ROUTE = re.compile(r"^/artifacts/(?P<artifact_id>[0-9a-f]{64})$")
 _BUDGET_FIELDS = {"max_steps", "max_wall_seconds", "max_tokens", "max_cost_usd"}
 
 
@@ -79,6 +81,7 @@ class HarnessAPI:
         stream_poll_seconds: float = 0.5,
         max_body_bytes: int = 1_000_000,
         shutdown_grace_seconds: float = 10.0,
+        artifacts: ArtifactStore | None = None,
     ) -> None:
         if auth_token is not None and len(auth_token) < 16:
             raise ValueError("API auth token must be at least 16 characters")
@@ -93,6 +96,7 @@ class HarnessAPI:
         self._stream_poll = stream_poll_seconds
         self._max_body = max_body_bytes
         self._grace = shutdown_grace_seconds
+        self._artifacts = artifacts
         self._stop = asyncio.Event()
         self._worker_tasks: list[asyncio.Task[None]] = []
 
@@ -159,6 +163,10 @@ class HarnessAPI:
             return
         if path == "/runs" and method == "POST":
             await _json(send, 202, await self._create_run(await self._body(receive)))
+            return
+        artifact = _ARTIFACT_ROUTE.match(path)
+        if artifact is not None and method == "GET":
+            await self._send_artifact(send, artifact["artifact_id"])
             return
         match = _RUN_ROUTE.match(path)
         if match is None:
@@ -317,6 +325,23 @@ class HarnessAPI:
                 await send({"type": "http.response.body", "body": f"event: end\ndata: {end}\n\n".encode()})
                 return
             await asyncio.sleep(self._stream_poll)
+
+    async def _send_artifact(self, send: Send, artifact_id: str) -> None:
+        data = await self._artifacts.get(artifact_id) if self._artifacts else None
+        if data is None:
+            raise ApiError(404, "unknown artifact")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"cache-control", b"no-store"),
+                    (b"content-length", str(len(data)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": data})
 
     async def _cancel(self, send: Send, run_id: str) -> None:
         await self._load(run_id)
@@ -492,4 +517,5 @@ def create_api(
         run_versions=app.run_versions,
         default_system_prompt=CODING_AGENT_SYSTEM_PROMPT if app.config.coding.enabled else None,
         workers=workers,
+        artifacts=app.artifacts,
     )

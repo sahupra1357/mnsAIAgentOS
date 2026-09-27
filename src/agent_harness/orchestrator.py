@@ -15,6 +15,8 @@ from agent_harness.telemetry import NoopTelemetry, sanitize_attributes
 from agent_harness.versioning import system_prompt_sha256, tools_sha256
 from agent_harness.domain import (
     ApprovalRequest,
+    ArtifactRef,
+    ArtifactStore,
     ContextBuilder,
     ContextView,
     ModelClient,
@@ -99,6 +101,8 @@ class AgentOrchestrator:
         telemetry: TelemetrySink | None = None,
         stream_listener: StreamListener | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        artifacts: ArtifactStore | None = None,
+        artifact_threshold_bytes: int = 16_384,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -110,6 +114,16 @@ class AgentOrchestrator:
         self._telemetry: TelemetrySink = telemetry or NoopTelemetry()
         self._stream_listener = stream_listener
         self._monotonic = monotonic
+        if artifact_threshold_bytes < 1024:
+            raise ValueError("artifact_threshold_bytes must be at least 1024")
+        self._artifacts = artifacts
+        self._artifact_threshold = artifact_threshold_bytes
+
+    @property
+    def context_builder(self) -> ContextBuilder:
+        """The builder that shapes each model call's view of the history."""
+
+        return self._context
 
     async def create_run(
         self,
@@ -741,9 +755,10 @@ class AgentOrchestrator:
             and spec.idempotent
             and attempt < self._settings.max_tool_attempts
         )
+        artifact: ArtifactRef | None = None
         if not should_retry:
-            self._append_tool_message(run, result)
-        await self._record_tool_result(run, events, result, attempt=attempt)
+            artifact = await self._append_tool_result(run, result)
+        await self._record_tool_result(run, events, result, attempt=attempt, artifact=artifact)
 
         if should_retry:
             await self._execute_tool(run, events, call)
@@ -781,31 +796,62 @@ class AgentOrchestrator:
         result: ToolResult,
         *,
         attempt: int,
+        artifact: ArtifactRef | None = None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "call_id": result.call_id,
+            "tool": result.name,
+            "attempt": attempt,
+            "status": result.status.value,
+            "retryable": result.retryable,
+        }
+        if artifact is not None:
+            payload["artifact_id"] = artifact.id
+            payload["artifact_size"] = artifact.size
         await self._checkpoint(
             run,
             events,
             RunEvent(
                 run_id=run.id,
                 type=EventType.TOOL_RESPONDED,
-                payload={
-                    "call_id": result.call_id,
-                    "tool": result.name,
-                    "attempt": attempt,
-                    "status": result.status.value,
-                    "retryable": result.retryable,
-                },
+                payload=payload,
                 step=run.step_count,
                 created_at=self._clock(),
             ),
         )
 
-    def _append_tool_message(self, run: RunRecord, result: ToolResult) -> None:
-        content = result.model_message or json.dumps(
-            {"status": result.status.value, "output": result.output},
-            separators=(",", ":"),
-            sort_keys=True,
+    async def _append_tool_result(
+        self, run: RunRecord, result: ToolResult
+    ) -> ArtifactRef | None:
+        """Append a tool result, moving an oversized one into the artifact store.
+
+        Artifacts are content-addressed, so repeating this after a crash yields
+        the same reference and the same message.
+        """
+
+        content = _tool_message_content(result)
+        encoded = content.encode("utf-8")
+        if self._artifacts is None or len(encoded) <= self._artifact_threshold:
+            self._append_tool_message(run, result, content)
+            return None
+        artifact = await self._artifacts.put(encoded, "text/plain; charset=utf-8")
+        head = self._artifact_threshold // 4
+        tail = self._artifact_threshold // 8
+        preview = (
+            content[:head]
+            + f"\n[... output truncated: the full {artifact.size}-byte result is stored as "
+            + f"artifact {artifact.id}; page through it with the read_artifact tool "
+            + "(id, offset, length) if available ...]\n"
+            + content[-tail:]
         )
+        self._append_tool_message(run, result, preview)
+        return artifact
+
+    def _append_tool_message(
+        self, run: RunRecord, result: ToolResult, content: str | None = None
+    ) -> None:
+        if content is None:
+            content = _tool_message_content(result)
         run.messages.append(
             Message(
                 role=Role.TOOL,
@@ -1050,6 +1096,14 @@ def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
             and latest.payload.get("ok") is False
             and latest.payload.get("retryable") is True
         )
+    )
+
+
+def _tool_message_content(result: ToolResult) -> str:
+    return result.model_message or json.dumps(
+        {"status": result.status.value, "output": result.output},
+        separators=(",", ":"),
+        sort_keys=True,
     )
 
 

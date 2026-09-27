@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from .domain import HarnessError, Message, Role, RunBudget, RunRecord
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
 from .api import create_api
+from .evals import load_scenarios, run_scenario, summarize
 from .telemetry import JsonLinesTelemetry
 from .worker import Worker
 
@@ -85,6 +87,15 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--workers", type=int, default=1, help="concurrent workers")
     worker.add_argument("--lease-seconds", type=float, default=60.0)
     worker.add_argument("--poll-seconds", type=float, default=1.0)
+
+    evaluate = subcommands.add_parser(
+        "eval", help="run scenario evaluations (scripted by default, --live for real models)"
+    )
+    _common_runtime_arguments(evaluate)
+    evaluate.add_argument("scenarios", type=Path, help="scenario TOML file or directory")
+    evaluate.add_argument("--live", action="store_true", help="use configured model profiles")
+    evaluate.add_argument("--model-profile", help="profile or route for live scenarios")
+    evaluate.add_argument("--report", type=Path, help="write a JSON report here")
 
     doctor = subcommands.add_parser(
         "doctor",
@@ -310,6 +321,41 @@ async def _worker_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _eval_command(args: argparse.Namespace) -> int:
+    scenarios = load_scenarios(args.scenarios)
+    with tempfile.TemporaryDirectory() as scratch:
+        args.database = Path(scratch, "eval.sqlite3")
+        app = _build(args)
+        async with app:
+            config = app.config
+            results = [
+                await run_scenario(
+                    scenario,
+                    tools=app.tools,
+                    live_models=app.models if args.live else None,
+                    live_profile=lambda name: config.resolve_model_name(
+                        args.model_profile or name
+                    ),
+                    context=app.orchestrator.context_builder,
+                )
+                for scenario in scenarios
+            ]
+    for result in results:
+        print(
+            f"[{result.outcome.upper():>4}] {result.name}: status={result.status} "
+            f"steps={result.steps} tokens={result.tokens} {result.duration_seconds:.2f}s"
+        )
+        for failure in result.failures:
+            print(f"       - {failure}")
+    report = summarize(results)
+    print(
+        "passed={pass} failed={fail} skipped={skip}".format(**report["summary"]), file=sys.stderr
+    )
+    if args.report:
+        args.report.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    return 1 if report["summary"]["fail"] else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -327,6 +373,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_serve_command(args))
         if args.command == "worker":
             return asyncio.run(_worker_command(args))
+        if args.command == "eval":
+            return asyncio.run(_eval_command(args))
     except (ConfigError, HarnessError, KeyError, ValueError) as exc:
         print(f"agent-harness: {exc}", file=sys.stderr)
         return 2
