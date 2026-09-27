@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, AsyncIterator, Mapping, Protocol, Sequence
 
 
 JsonObject = dict[str, Any]
@@ -234,6 +234,50 @@ class ContextBuilder(Protocol):
         *,
         model_profile: str,
     ) -> ContextView: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ModelStreamEvent:
+    """One streamed increment: text to display, or the final response.
+
+    Text increments are ephemeral previews; only the final ``response`` is
+    checkpointed. A retried call may therefore re-send text already shown.
+    """
+
+    text: str = ""
+    response: "ModelResponse | None" = None
+
+
+class StreamingModelClient(Protocol):
+    def stream(self, request: "ModelRequest") -> AsyncIterator[ModelStreamEvent]: ...
+
+
+class StreamListener(Protocol):
+    """Receives streamed assistant text as it arrives. Must not raise."""
+
+    def on_text(self, run_id: str, step: int, text: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TelemetryRecord:
+    """A sanitized observation: never message content, arguments, or secrets.
+
+    ``kind`` is ``"event"`` (a persisted run event), ``"model_call"``, or
+    ``"tool_call"``. The run ID doubles as the trace ID.
+    """
+
+    kind: str
+    name: str
+    run_id: str
+    step: int
+    timestamp: datetime
+    duration_seconds: float | None = None
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+    span_id: str | None = None
+
+
+class TelemetrySink(Protocol):
+    def record(self, record: TelemetryRecord) -> None: ...
 
 
 class ModelClient(Protocol):

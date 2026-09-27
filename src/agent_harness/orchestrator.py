@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,11 +11,17 @@ from typing import Any
 from uuid import uuid4
 
 from agent_harness.context import FullHistoryContextBuilder
+from agent_harness.telemetry import NoopTelemetry, sanitize_attributes
 from agent_harness.versioning import system_prompt_sha256, tools_sha256
 from agent_harness.domain import (
     ApprovalRequest,
     ContextBuilder,
     ContextView,
+    ModelClient,
+    ModelStreamEvent,
+    StreamListener,
+    TelemetryRecord,
+    TelemetrySink,
     EventType,
     FinishReason,
     Message,
@@ -89,6 +96,9 @@ class AgentOrchestrator:
         clock: Callable[[], datetime] = utc_now,
         context: ContextBuilder | None = None,
         fallbacks: FallbackLookup | None = None,
+        telemetry: TelemetrySink | None = None,
+        stream_listener: StreamListener | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -97,6 +107,9 @@ class AgentOrchestrator:
         self._clock = clock
         self._context = context or FullHistoryContextBuilder()
         self._fallbacks = fallbacks
+        self._telemetry: TelemetrySink = telemetry or NoopTelemetry()
+        self._stream_listener = stream_listener
+        self._monotonic = monotonic
 
     async def create_run(
         self,
@@ -147,6 +160,7 @@ class AgentOrchestrator:
             created_at=now,
         )
         await self._store.create_run(run, event)
+        self._emit_event(run, event)
         return run
 
     async def run(self, run_id: str) -> RunRecord:
@@ -368,36 +382,56 @@ class AgentOrchestrator:
             attempt = 1
 
         view: ContextView | None = None
+        started = self._monotonic()
+        streamed = False
         try:
             client = self._models.resolve(run.model_profile)
             specs = tuple(self._tools.specs())
             view = self._context.build(run.messages, specs, model_profile=run.model_profile)
-            response = await client.complete(
-                ModelRequest(
-                    messages=view.messages,
-                    tools=specs,
-                    metadata={"run_id": run.id, "step": str(run.step_count)},
-                )
+            request = ModelRequest(
+                messages=view.messages,
+                tools=specs,
+                metadata={"run_id": run.id, "step": str(run.step_count)},
             )
+            streamed = self._should_stream(client)
+            if streamed:
+                response = await self._consume_stream(client, request, run)
+            else:
+                response = await client.complete(request)
             _validate_model_response(response)
-        except RetryableModelError as exc:
+        except BaseException as exc:
+            self._emit_model_call(run, attempt, started, streamed, error=exc)
+            if not isinstance(exc, Exception):
+                raise
+            await self._handle_model_error(run, events, exc, attempt)
+            return
+        self._emit_model_call(run, attempt, started, streamed, response=response)
+        await self._accept_model_response(run, events, response, attempt, view)
+
+    async def _handle_model_error(
+        self, run: RunRecord, events: list[RunEvent], exc: Exception, attempt: int
+    ) -> None:
+        if isinstance(exc, RetryableModelError):
             await self._record_model_error(run, events, exc, retryable=True, attempt=attempt)
             if self._model_attempts_exhausted(events, run.step_count):
                 await self._fallback_or_fail(run, events)
             return
-        except PermanentModelError as exc:
-            await self._record_model_error(run, events, exc, retryable=False, attempt=attempt)
+        await self._record_model_error(run, events, exc, retryable=False, attempt=attempt)
+        if isinstance(exc, PermanentModelError):
             await self._fail(run, events, _safe_error(exc))
-            return
-        except (TypeError, ValueError) as exc:
-            await self._record_model_error(run, events, exc, retryable=False, attempt=attempt)
+        elif isinstance(exc, (TypeError, ValueError)):
             await self._fail(run, events, f"malformed model response: {_safe_error(exc)}")
-            return
-        except Exception as exc:  # Unclassified provider failures are not retryable.
-            await self._record_model_error(run, events, exc, retryable=False, attempt=attempt)
+        else:  # Unclassified provider failures are not retryable.
             await self._fail(run, events, f"model failure: {_safe_error(exc)}")
-            return
 
+    async def _accept_model_response(
+        self,
+        run: RunRecord,
+        events: list[RunEvent],
+        response: ModelResponse,
+        attempt: int,
+        view: ContextView | None,
+    ) -> None:
         usage_tokens = response.usage.total_tokens
         if usage_tokens is not None:
             run.consumed_tokens += usage_tokens
@@ -639,6 +673,7 @@ class AgentOrchestrator:
             await self._record_tool_request(run, events, call, spec, attempt)
 
         idempotency_key = f"{run.id}:{run.step_count}:{call.id}"
+        tool_started = self._monotonic()
         try:
             result = await self._tools.execute(
                 call,
@@ -662,6 +697,25 @@ class AgentOrchestrator:
                 output={"error": _safe_error(exc)},
                 retryable=False,
             )
+        self._emit(
+            TelemetryRecord(
+                kind="tool_call",
+                name="tool.execute",
+                run_id=run.id,
+                step=run.step_count,
+                timestamp=self._clock(),
+                duration_seconds=self._monotonic() - tool_started,
+                attributes={
+                    "tool": call.name,
+                    "call_id": call.id,
+                    "status": result.status.value,
+                    "risk": spec.risk.value,
+                    "attempt": attempt,
+                    "retryable": result.retryable,
+                },
+                span_id=uuid4().hex[:16],
+            )
+        )
 
         if result.status is ToolResultStatus.APPROVAL_REQUIRED:
             run.status = RunStatus.AWAITING_INPUT
@@ -856,6 +910,98 @@ class AgentOrchestrator:
             run.version = expected_version
             raise
         event_log.extend(events)
+        for event in events:
+            self._emit_event(run, event)
+
+    def _emit_event(self, run: RunRecord, event: RunEvent) -> None:
+        self._emit(
+            TelemetryRecord(
+                kind="event",
+                name=event.type.value,
+                run_id=event.run_id,
+                step=event.step,
+                timestamp=event.created_at,
+                attributes={
+                    **sanitize_attributes(event.payload),
+                    "run_status": run.status.value,
+                },
+            )
+        )
+
+    def _emit(self, record: TelemetryRecord) -> None:
+        try:
+            self._telemetry.record(record)
+        except Exception:  # noqa: BLE001 - telemetry must never break a run
+            pass
+
+    def _emit_model_call(
+        self,
+        run: RunRecord,
+        attempt: int,
+        started: float,
+        streamed: bool,
+        *,
+        response: ModelResponse | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        attributes: dict[str, Any] = {
+            "model_profile": run.model_profile,
+            "attempt": attempt,
+            "ok": response is not None,
+            "streamed": streamed,
+        }
+        if response is not None:
+            attributes.update(
+                finish_reason=response.finish_reason.value,
+                tool_call_count=len(response.tool_calls),
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                cached_input_tokens=response.usage.cached_input_tokens,
+                cost_usd=response.usage.cost_usd,
+                provider_request_id=response.provider_request_id,
+            )
+        if error is not None:
+            attributes["error_category"] = str(
+                getattr(error, "category", type(error).__name__)
+            )
+            attributes["retryable"] = isinstance(error, RetryableModelError)
+        self._emit(
+            TelemetryRecord(
+                kind="model_call",
+                name="model.complete",
+                run_id=run.id,
+                step=run.step_count,
+                timestamp=self._clock(),
+                duration_seconds=self._monotonic() - started,
+                attributes=attributes,
+                span_id=uuid4().hex[:16],
+            )
+        )
+
+    def _should_stream(self, client: ModelClient) -> bool:
+        return (
+            self._stream_listener is not None
+            and callable(getattr(client, "stream", None))
+            and getattr(client, "supports_streaming", True) is True
+        )
+
+    async def _consume_stream(
+        self, client: ModelClient, request: ModelRequest, run: RunRecord
+    ) -> ModelResponse:
+        final: ModelResponse | None = None
+        stream = getattr(client, "stream")
+        event: ModelStreamEvent
+        async for event in stream(request):
+            if event.text and self._stream_listener is not None:
+                try:
+                    self._stream_listener.on_text(run.id, run.step_count, event.text)
+                except Exception:  # noqa: BLE001 - display problems must not fail runs
+                    pass
+            if event.response is not None:
+                final = event.response
+        if final is None:
+            raise ValueError("model stream ended without a final response")
+        return final
 
 
 def _pending_tool_calls(messages: Sequence[Message]) -> tuple[ToolCall, ...]:

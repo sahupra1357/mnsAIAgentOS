@@ -7,7 +7,7 @@ import json
 import os
 import time
 from dataclasses import replace
-from typing import Any, Awaitable, Callable, ClassVar, Mapping
+from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Mapping
 
 from agent_harness.config import ModelProfile
 from agent_harness.domain import (
@@ -15,6 +15,7 @@ from agent_harness.domain import (
     Message,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     RetryableModelError,
     ToolCall,
     ToolSpec,
@@ -127,6 +128,61 @@ class OpenAICompatibleClient:
         metadata["cost_estimated"] = True
         metadata["latency_seconds"] = round(latency_seconds, 3)
         return replace(response, usage=replace(response.usage, cost_usd=cost), metadata=metadata)
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[ModelStreamEvent]:
+        """Stream text increments, then yield the final normalized response.
+
+        Uses server-sent events when the transport supports ``post_stream``,
+        otherwise falls back to one non-streamed completion. Streaming requests
+        are not retried here: text may already have been shown, so the
+        orchestrator's attempt budget decides whether to retry the whole call.
+        """
+
+        post_stream = getattr(self._transport, "post_stream", None)
+        if post_stream is None:
+            response = await self.complete(request)
+            if response.content:
+                yield ModelStreamEvent(text=response.content)
+            yield ModelStreamEvent(response=response)
+            return
+        if request.timeout_seconds is not None and request.timeout_seconds <= 0:
+            raise ModelConfigurationError("model request timeout_seconds must be greater than zero")
+        if request.max_output_tokens is not None and request.max_output_tokens <= 0:
+            raise ModelConfigurationError("model request max_output_tokens must be greater than zero")
+        payload = self._build_payload(request)
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+        headers = self.request_headers()
+        headers["Accept"] = "text/event-stream"
+        timeout = self._effective_timeout(request)
+        started = self._monotonic()
+        accumulator = _StreamAccumulator()
+        try:
+            async with asyncio.timeout(timeout):
+                streamed = await post_stream(self._completion_url(), payload, headers, timeout)
+            self._raise_for_status(HttpResponse(streamed.status, streamed.headers, streamed.body))
+            async for line in streamed.lines:
+                data = _sse_data(line)
+                if data is None:
+                    continue
+                if data == "[DONE]":
+                    break
+                text = accumulator.add(json.loads(data))
+                if text:
+                    yield ModelStreamEvent(text=text)
+        except (HttpTransportTimeout, TimeoutError) as exc:
+            raise ModelTimeoutError(f"model stream timed out: {exc}") from exc
+        except HttpTransportError as exc:
+            raise RetryableProviderError(f"model stream failed: {exc}") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise MalformedResponseError(f"malformed model stream: {exc}") from exc
+        response = self._normalize_raw(accumulator.as_completion(), streamed.headers)
+        self._warm = True
+        yield ModelStreamEvent(response=self._with_cost(response, self._monotonic() - started))
 
     def request_headers(self, *, json_body: bool = True) -> dict[str, str]:
         """Resolve request headers, reading credentials from the environment now.
@@ -272,6 +328,12 @@ class OpenAICompatibleClient:
     def _normalize(self, response: HttpResponse) -> ModelResponse:
         try:
             raw = json.loads(response.body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MalformedResponseError(f"malformed model response: {exc}") from exc
+        return self._normalize_raw(raw, response.headers)
+
+    def _normalize_raw(self, raw: Any, headers: Mapping[str, str]) -> ModelResponse:
+        try:
             if not isinstance(raw, dict):
                 raise ValueError("root is not an object")
             raw = self._preprocess_response(raw)
@@ -288,7 +350,7 @@ class OpenAICompatibleClient:
             tool_calls = _parse_tool_calls(message.get("tool_calls", []))
             usage = _parse_usage(raw.get("usage"))
             finish_reason = _finish_reason(choice.get("finish_reason"))
-            provider_request_id = _header(response.headers, "x-request-id")
+            provider_request_id = _header(headers, "x-request-id")
             if provider_request_id is None:
                 provider_request_id = _optional_nonempty_string(raw.get("id"))
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -394,6 +456,89 @@ def _optional_nonnegative_int(value: Any, name: str) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
     return value
+
+
+class _StreamAccumulator:
+    """Assemble OpenAI-style ``chat.completion.chunk`` deltas into one completion."""
+
+    def __init__(self) -> None:
+        self._content: list[str] = []
+        self._tool_calls: dict[int, dict[str, Any]] = {}
+        self._finish_reason: Any = None
+        self._extra: dict[str, Any] = {}
+
+    def add(self, chunk: Any) -> str:
+        if not isinstance(chunk, dict):
+            raise ValueError("stream chunk must be an object")
+        for key in ("id", "model", "usage", "timings"):
+            if chunk.get(key) is not None:
+                self._extra[key] = chunk[key]
+        choices = chunk.get("choices") or []
+        if not isinstance(choices, list) or not choices:
+            return ""
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ValueError("stream choice must be an object")
+        if choice.get("finish_reason") is not None:
+            self._finish_reason = choice["finish_reason"]
+        delta = choice.get("delta") or {}
+        if not isinstance(delta, dict):
+            raise ValueError("stream delta must be an object")
+        for position, fragment in enumerate(delta.get("tool_calls") or []):
+            self._add_tool_fragment(position, fragment)
+        text = delta.get("content")
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            raise ValueError("stream delta content must be a string")
+        self._content.append(text)
+        return text
+
+    def _add_tool_fragment(self, position: int, fragment: Any) -> None:
+        if not isinstance(fragment, dict):
+            raise ValueError("stream tool call must be an object")
+        index = fragment.get("index", position)
+        entry = self._tool_calls.setdefault(
+            index, {"type": "function", "function": {"name": "", "arguments": ""}}
+        )
+        if fragment.get("id"):
+            entry["id"] = fragment["id"]
+        function = fragment.get("function") or {}
+        if function.get("name"):
+            entry["function"]["name"] = function["name"]
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            entry["function"]["arguments"] += arguments
+        elif isinstance(arguments, dict):
+            entry["function"]["arguments"] = json.dumps(arguments)
+
+    def as_completion(self) -> dict[str, Any]:
+        tool_calls = []
+        for index in sorted(self._tool_calls):
+            entry = self._tool_calls[index]
+            if not entry["function"]["arguments"]:
+                entry["function"]["arguments"] = "{}"
+            tool_calls.append(entry)
+        completion: dict[str, Any] = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "".join(self._content) or None,
+                        "tool_calls": tool_calls,
+                    },
+                    "finish_reason": self._finish_reason,
+                }
+            ]
+        }
+        completion.update(self._extra)
+        return completion
+
+
+def _sse_data(line: bytes) -> str | None:
+    text = line.decode("utf-8").strip()
+    if not text.startswith("data:"):
+        return None
+    return text[len("data:") :].strip()
 
 
 def _lenient_nonnegative_int(value: Any) -> int | None:

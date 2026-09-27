@@ -38,6 +38,11 @@ class OllamaClient(OpenAICompatibleClient):
         return f"{self.api_root_url()}/v1/models"
 
     @property
+    def supports_streaming(self) -> bool:
+        # Native /api/chat streams NDJSON, not server-sent events.
+        return not self._native
+
+    @property
     def _native(self) -> bool:
         return self._profile.api_mode == "native"
 

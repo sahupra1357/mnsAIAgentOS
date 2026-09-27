@@ -321,6 +321,42 @@ Read-only tools may run automatically. Side-effecting tools require an idempoten
 
 The included `echo` and `calculator` tools are deterministic examples. In production, isolate untrusted tools out of process and back side-effect idempotency with durable storage or the downstream service.
 
+## Telemetry and Streaming
+
+Stream the answer as it is generated, and write sanitized telemetry:
+
+```bash
+.venv/bin/agent-harness run --config models.toml --stream \
+  --telemetry-file telemetry.jsonl "Explain the failing test"
+```
+
+**What gets recorded.** Each JSON line is one of:
+- a persisted run `event`;
+- a `model_call` (profile, attempt, ok, tokens, cached tokens, cost, latency,
+  error category);
+- a `tool_call` (tool, status, risk, attempt, latency).
+
+The run ID is the trace ID. Records never contain prompts, message content, tool
+arguments or outputs, or credentials.
+
+**Programmatic use.** Pass a sink to `build_application(telemetry=...)` or
+`AgentOrchestrator(telemetry=...)`:
+
+| Sink                                                                | What it does                                              |
+|---------------------------------------------------------------------|-----------------------------------------------------------|
+| `JsonLinesTelemetry(stream)`                                        | Writes one JSON line per record.                          |
+| `MetricsTelemetry()`                                                | In-process counters, `cache_hit_rate(profile=...)`, `snapshot()`. |
+| `MultiTelemetry([...])`                                             | Sends records to several sinks.                           |
+| `OpenTelemetryTelemetry()` (`pip install -e '.[otel]'`; configure the SDK/exporter as usual) | Spans plus duration, token, and cost metrics. |
+
+A failing sink never affects a run.
+
+**Streaming details.** Streaming uses server-sent events on any OpenAI-compatible
+server. Pass a `StreamListener` to `build_application(stream_listener=...)` to receive
+text increments. Streamed text is a preview: only the final assembled response is
+checkpointed, and a retried call may show text again. Ollama's `api_mode = "native"`
+does not stream.
+
 ## Budgets and Durability
 
 Each run can limit:
