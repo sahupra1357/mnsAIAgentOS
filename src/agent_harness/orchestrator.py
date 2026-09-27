@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 from agent_harness.context import FullHistoryContextBuilder
+from agent_harness.versioning import system_prompt_sha256, tools_sha256
 from agent_harness.domain import (
     ApprovalRequest,
     ContextBuilder,
@@ -105,6 +106,7 @@ class AgentOrchestrator:
         budget: RunBudget | None = None,
         run_id: str | None = None,
         route: str | None = None,
+        versions: Mapping[str, str] | None = None,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted."""
 
@@ -126,7 +128,15 @@ class AgentOrchestrator:
             created_at=now,
             updated_at=now,
         )
-        payload = {"model_profile": model_profile}
+        recorded_versions = {
+            "system_prompt_sha256": system_prompt_sha256(initial_messages),
+            "tools_sha256": tools_sha256(tuple(self._tools.specs())),
+        }
+        for key, value in (versions or {}).items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValueError("versions must map strings to strings")
+            recorded_versions[key] = value
+        payload: dict[str, Any] = {"model_profile": model_profile, "versions": recorded_versions}
         if route is not None:
             _validate_identifier(route, "route")
             payload["route"] = route
@@ -149,6 +159,8 @@ class AgentOrchestrator:
         events = list(await self._store.list_events(run_id))
         if run.status.is_terminal or run.status is RunStatus.AWAITING_INPUT:
             return run
+        if run.status is RunStatus.RUNNING:
+            await self._record_config_drift(run, events)
 
         if run.status is RunStatus.QUEUED:
             now = self._clock()
@@ -408,6 +420,8 @@ class AgentOrchestrator:
             "cost_usd": response.usage.cost_usd,
             "provider_request_id": response.provider_request_id,
         }
+        if response.usage.cached_input_tokens is not None:
+            payload["cached_input_tokens"] = response.usage.cached_input_tokens
         if response.metadata.get("cost_estimated") is True:
             payload["cost_estimated"] = True
         if view is not None and view.modified:
@@ -468,6 +482,34 @@ class AgentOrchestrator:
                 run_id=run.id,
                 type=EventType.MODEL_RESPONDED,
                 payload=payload,
+                step=run.step_count,
+                created_at=self._clock(),
+            ),
+        )
+
+    async def _record_config_drift(self, run: RunRecord, events: list[RunEvent]) -> None:
+        """Record once when a resumed run's tool definitions differ from creation."""
+
+        created = next((e for e in events if e.type is EventType.RUN_CREATED), None)
+        versions = created.payload.get("versions") if created is not None else None
+        if not isinstance(versions, Mapping):
+            return
+        recorded = versions.get("tools_sha256")
+        current = tools_sha256(tuple(self._tools.specs()))
+        if recorded is None or recorded == current:
+            return
+        latest = next(
+            (e for e in reversed(events) if e.type is EventType.CONFIG_DRIFT), None
+        )
+        if latest is not None and latest.payload.get("current") == current:
+            return
+        await self._checkpoint(
+            run,
+            events,
+            RunEvent(
+                run_id=run.id,
+                type=EventType.CONFIG_DRIFT,
+                payload={"field": "tools_sha256", "recorded": recorded, "current": current},
                 step=run.step_count,
                 created_at=self._clock(),
             ),

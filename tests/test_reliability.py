@@ -495,7 +495,8 @@ fallback = ["small"]
         )
         run = await orchestrator.create_run(model_profile="big", route="strong", messages=[USER])
         created = (await store.list_events(run.id))[0]
-        self.assertEqual(created.payload, {"model_profile": "big", "route": "strong"})
+        self.assertEqual(created.payload["model_profile"], "big")
+        self.assertEqual(created.payload["route"], "strong")
 
     def test_cli_profiles_lists_routes_and_fallbacks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

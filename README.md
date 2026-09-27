@@ -332,6 +332,26 @@ Each run can limit:
 
 Run state and boundary events are checkpointed after accepted model and tool results. SQLite checkpoints update the run snapshot and append events atomically, using a version field to reject concurrent stale writes.
 
+**Durable tool results.** Successful tool results are stored in the run database
+(`tool_results` table), keyed by tool name and idempotency key
+(`run_id:step:call_id`). If a worker crashes after a tool ran but before its result was
+checkpointed, the resumed run gets the stored result instead of running the tool again.
+Reusing a key with different arguments is rejected. A crash *during* a tool's execution
+can still repeat it, so external services should also honor the idempotency key.
+
+**Versions.** Every run records, in its `run_created` event:
+- `system_prompt_sha256`
+- `tools_sha256`
+- `profile_sha256` (the profile's non-secret settings)
+- `harness_version`
+
+If a run is resumed with different tool definitions, a `config_drift` event records the
+old and new hashes.
+
+**Cached tokens.** `Usage.cached_input_tokens` reports prompt tokens served from the
+server's prefix cache (when the server reports it), and is included in `model_responded`
+events.
+
 ## Development
 
 Run the complete suite without network access:

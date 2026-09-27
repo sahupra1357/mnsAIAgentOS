@@ -5,7 +5,7 @@ from __future__ import annotations
 import operator
 from typing import Any
 
-from agent_harness.domain import JsonObject, ToolRisk, ToolSpec
+from agent_harness.domain import IdempotencyStore, JsonObject, ToolRisk, ToolSpec
 
 from .registry import ToolRegistry
 from .runtime import ToolRuntime
@@ -71,7 +71,13 @@ def register_example_tools(registry: ToolRegistry) -> None:
     )
 
 
-def create_default_runtime(*, max_output_bytes: int = 65_536) -> ToolRuntime:
+def create_default_runtime(
+    *,
+    max_output_bytes: int = 65_536,
+    idempotency_store: IdempotencyStore | None = None,
+) -> ToolRuntime:
     registry = ToolRegistry()
     register_example_tools(registry)
-    return ToolRuntime(registry, max_output_bytes=max_output_bytes)
+    return ToolRuntime(
+        registry, max_output_bytes=max_output_bytes, idempotency_store=idempotency_store
+    )

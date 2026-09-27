@@ -300,6 +300,8 @@ class OpenAICompatibleClient:
             metadata["provider_model"] = provider_model
         cached_input_tokens = self._cached_input_tokens(raw)
         if cached_input_tokens is not None:
+            usage = replace(usage, cached_input_tokens=cached_input_tokens)
+            # Kept for callers written against Phase 1; prefer usage.cached_input_tokens.
             metadata["cached_input_tokens"] = cached_input_tokens
         if self._preserve_raw_response:
             metadata["raw_response"] = raw

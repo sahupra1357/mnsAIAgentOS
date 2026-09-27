@@ -103,8 +103,11 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   own context (`OLLAMA_CONTEXT_LENGTH`) must also be at least that large, or the server
   truncates silently. See `skills/context-management/SKILL.md`.
 - `ModelResolver.resolve` is synchronous; `Execution.md` shows `await` but the code does not.
-- Tool idempotency results are cached in-process only (`ToolRuntime`), so they do not
-  survive a restart.
+- **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
+  `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
+  handler succeeds but *before* the checkpoint no longer repeats the side effect. A
+  crash *during* the handler still can, so downstream services should honor the
+  idempotency key too.
 
 ## Implementation roadmap
 
@@ -165,7 +168,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
    exhaustion, with an event recording the switch.
 5. Add capability routing: named routes (`fast`, `strong`) that map to profiles.
 
-**Phase 4 – Operations** [harness-operations]
+**Phase 4 – Operations** [harness-operations] — split into stacked PRs: 4a (items 1, 2, 10) on `phase-4a-durability-versioning`; 4b (4, 3); 4c (5–9)
 1. Store tool idempotency results durably in the run store (SQLite table), not only in
    process memory.
 2. Record prompt and config versions on each run: hashes of the system prompt, tool

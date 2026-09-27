@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from agent_harness.domain import (
+    IdempotencyStore,
     JsonObject,
     ToolCall,
     ToolResult,
@@ -42,6 +43,7 @@ class ToolRuntime:
         *,
         policy: ToolPolicy | None = None,
         max_output_bytes: int = 65_536,
+        idempotency_store: IdempotencyStore | None = None,
     ) -> None:
         if max_output_bytes <= 0:
             raise ValueError("max_output_bytes must be greater than zero")
@@ -51,6 +53,12 @@ class ToolRuntime:
         self._idempotency_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._idempotency_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._idempotency_lock = asyncio.Lock()
+        self._idempotency_store = idempotency_store
+
+    def attach_idempotency_store(self, store: IdempotencyStore) -> None:
+        """Back the in-process result cache with durable storage."""
+
+        self._idempotency_store = store
 
     def specs(self) -> tuple[ToolSpec, ...]:
         return self._registry.specs()
@@ -126,6 +134,10 @@ class ToolRuntime:
         key_lock = await self._lock_for(cache_key)
         async with key_lock:
             cached = self._idempotency_results.get(cache_key)
+            if cached is None and self._idempotency_store is not None:
+                cached = await self._idempotency_store.get_tool_result(*cache_key)
+                if cached is not None:
+                    self._idempotency_results[cache_key] = cached
             if cached is not None:
                 cached_fingerprint, cached_result = cached
                 if cached_fingerprint != fingerprint:
@@ -140,6 +152,10 @@ class ToolRuntime:
             result = await self._invoke(call, registered.spec.timeout_seconds, registered.handler)
             if result.status is ToolResultStatus.SUCCESS:
                 self._idempotency_results[cache_key] = (fingerprint, result)
+                if self._idempotency_store is not None:
+                    await self._idempotency_store.put_tool_result(
+                        cache_key[0], cache_key[1], fingerprint, result
+                    )
             return result
 
     async def _lock_for(self, cache_key: tuple[str, str]) -> asyncio.Lock:
