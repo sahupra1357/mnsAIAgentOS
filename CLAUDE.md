@@ -193,7 +193,8 @@ and add network-free tests. Each item's details are in the skill in brackets.
    `num_retries=0` (the harness owns retries) and cost taken from LiteLLM's response
    cost when present.
 
-**Phase 6 – Interactive and extensibility features** [interactive-extensibility]
+**Phase 6 – Interactive and extensibility features** [interactive-extensibility] — split into PRs that each target `main`:
+6a (items 1, 2, 15) on `phase-6a-conversation-control`; 6b (3, 5, 6, 7); 6c (4, 8); 6d (9, 10, 11, 13, 14); 6e (12)
 Order matters: 6.1 is the foundation for most of the rest.
 1. Continue a conversation: `continue_run(run_id, message)` appends a user message to a
    `completed` run and moves it back to `running` (new event `USER_MESSAGE_ADDED`). Add a

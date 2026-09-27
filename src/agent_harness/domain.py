@@ -65,6 +65,8 @@ class EventType(StrEnum):
     BUDGET_EXHAUSTED = "budget_exhausted"
     MODEL_FALLBACK = "model_fallback"
     CONFIG_DRIFT = "config_drift"
+    USER_MESSAGE_ADDED = "user_message_added"
+    STEER_APPLIED = "steer_applied"
 
 
 class ToolRisk(StrEnum):
@@ -346,6 +348,53 @@ class MemoryStore(Protocol):
     async def put(self, text: str, metadata: Mapping[str, str] | None = None) -> MemoryItem: ...
 
     async def search(self, query: str, limit: int = 5) -> Sequence[MemoryItem]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SteerMessage:
+    """A user message queued for a run while it executes."""
+
+    id: str
+    run_id: str
+    content: str
+    created_at: datetime
+
+
+class SteerStore(Protocol):
+    """Append-only steering queue, kept apart from the versioned run snapshot.
+
+    Adding a steer never conflicts with a worker's checkpoints; the orchestrator
+    applies it at the next model-turn boundary and records ``STEER_APPLIED``
+    with the steer ID, which makes application exactly-once.
+    """
+
+    async def add_steer(self, run_id: str, content: str) -> SteerMessage: ...
+
+    async def list_steers(self, run_id: str) -> Sequence[SteerMessage]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RunUsage:
+    """Resource use of a run against its budget (for status displays)."""
+
+    run_id: str
+    status: RunStatus
+    model_profile: str
+    steps: int
+    max_steps: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    total_tokens: int
+    max_tokens: int | None
+    cost_usd: float
+    max_cost_usd: float | None
+    cost_estimated: bool
+    active_seconds: float
+    max_wall_seconds: float
+    model_calls: int
+    tool_calls: int
+    fallbacks: int
 
 
 class RunQueue(Protocol):

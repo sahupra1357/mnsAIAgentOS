@@ -205,6 +205,32 @@ It exits 1 if any check fails.
   strong = "modal"
   ```
 
+## Conversations, Steering, and Status
+
+```bash
+agent-harness run      --config models.toml "Summarize the incident report"   # prints run_id
+agent-harness continue --config models.toml RUN_ID "Now draft the customer email"
+agent-harness steer    --config models.toml RUN_ID "Focus on the billing impact"
+agent-harness cancel   --config models.toml RUN_ID
+agent-harness status   --config models.toml RUN_ID
+```
+
+- **`continue`** reopens a completed run with a follow-up message. The model sees the
+  whole conversation. Budgets are cumulative, so pass `--max-steps` and similar flags
+  to raise them; that is also how a `budget_exhausted` run is continued. Idle time
+  between turns does not count against the wall-clock budget.
+- **`steer`** queues a message for a run that is still working, for example one being
+  executed by a worker or waiting for approval. It is added at the next model turn,
+  after any pending tool results, and exactly once, even across resumes. A steer that
+  arrives while the model is writing its final answer reopens the turn.
+- **`cancel`** works from any process. A worker executing the run stops at its next
+  step boundary instead of crashing.
+- **`status`** shows steps, tokens (including cached), cost, and active time against
+  the budget.
+
+The same actions are available over HTTP: `POST /runs/{id}/messages`,
+`POST /runs/{id}/steer`, `POST /runs/{id}/cancel`, and `GET /runs/{id}/usage`.
+
 ## LiteLLM (optional)
 
 LiteLLM is opt-in for each profile. Only profiles with `adapter = "litellm"` use it;

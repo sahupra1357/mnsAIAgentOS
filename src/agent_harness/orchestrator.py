@@ -17,6 +17,10 @@ from agent_harness.domain import (
     ApprovalRequest,
     ArtifactRef,
     ArtifactStore,
+    ConcurrencyError,
+    RunUsage,
+    SteerMessage,
+    SteerStore,
     ContextBuilder,
     ContextView,
     ModelClient,
@@ -78,6 +82,9 @@ class OrchestratorSettings:
 
 FallbackLookup = Callable[[str], Sequence[str]]
 
+_MAX_CHECKPOINT_CONFLICTS = 5
+MAX_USER_MESSAGE_CHARS = 100_000
+
 
 class AgentOrchestrator:
     """Advance persisted runs through deterministic model and tool boundaries.
@@ -103,6 +110,7 @@ class AgentOrchestrator:
         monotonic: Callable[[], float] = time.monotonic,
         artifacts: ArtifactStore | None = None,
         artifact_threshold_bytes: int = 16_384,
+        steering: SteerStore | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -118,6 +126,7 @@ class AgentOrchestrator:
             raise ValueError("artifact_threshold_bytes must be at least 1024")
         self._artifacts = artifacts
         self._artifact_threshold = artifact_threshold_bytes
+        self._steering = steering
 
     @property
     def context_builder(self) -> ContextBuilder:
@@ -207,37 +216,81 @@ class AgentOrchestrator:
         elif run.status is not RunStatus.RUNNING:
             return await self._fail(run, events, f"cannot execute run in {run.status} state")
 
+        conflicts = 0
         while not run.status.is_terminal:
-            budget_reason = self._budget_reason(run)
-            pending = _pending_tool_calls(run.messages)
-            if budget_reason is not None and pending and budget_reason != "step limit":
-                return await self._exhaust_budget(run, events, budget_reason)
-
-            if pending:
-                for call in pending:
-                    if self._wall_limit_reached(run):
-                        return await self._exhaust_budget(run, events, "wall-clock limit")
-                    await self._execute_tool(run, events, call)
-                    if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
-                        return run
+            # Pick up changes made by other processes (cancel, approvals) at each
+            # step boundary instead of discovering them as a failed checkpoint.
+            run, events = await self._refresh(run, events)
+            if run.status.is_terminal or run.status is RunStatus.AWAITING_INPUT:
+                return run
+            try:
+                settled = await self._advance(run, events)
+            except ConcurrencyError:
+                # Another writer changed the run mid-step. Reload and continue: a
+                # repeated model call is safe, and repeated tool calls reuse their
+                # idempotency key and recorded result.
+                conflicts += 1
+                if conflicts > _MAX_CHECKPOINT_CONFLICTS:
+                    raise
+                stored = await self._store.get_run(run.id)
+                if stored is None:
+                    raise
+                run, events = stored, list(await self._store.list_events(run.id))
                 continue
-
-            if _has_accepted_final_response(run.messages, events):
-                return await self._complete(run, events)
-
-            if _has_pending_model_attempt(events, run.step_count):
-                if self._wall_limit_reached(run):
-                    return await self._exhaust_budget(run, events, "wall-clock limit")
-                await self._perform_model_turn(run, events)
-                continue
-
-            budget_reason = self._budget_reason(run)
-            if budget_reason is not None:
-                return await self._exhaust_budget(run, events, budget_reason)
-
-            await self._perform_model_turn(run, events)
-
+            conflicts = 0
+            if settled:
+                return run
         return run
+
+    async def _refresh(
+        self, run: RunRecord, events: list[RunEvent]
+    ) -> tuple[RunRecord, list[RunEvent]]:
+        stored = await self._store.get_run(run.id)
+        if stored is None or stored.version == run.version:
+            return run, events
+        return stored, list(await self._store.list_events(run.id))
+
+    async def _advance(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Perform one boundary-to-boundary transition; return True once settled."""
+
+        budget_reason = self._budget_reason(run)
+        pending = _pending_tool_calls(run.messages)
+        if budget_reason is not None and pending and budget_reason != "step limit":
+            await self._exhaust_budget(run, events, budget_reason)
+            return True
+
+        if pending:
+            for call in pending:
+                if self._wall_limit_reached(run):
+                    await self._exhaust_budget(run, events, "wall-clock limit")
+                    return True
+                await self._execute_tool(run, events, call)
+                if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
+                    return True
+            return False
+
+        if _has_accepted_final_response(run.messages, events):
+            # A steer that arrived while the model was answering reopens the turn.
+            if await self._apply_steers(run, events):
+                return False
+            await self._complete(run, events)
+            return True
+
+        if _has_pending_model_attempt(events, run.step_count):
+            if self._wall_limit_reached(run):
+                await self._exhaust_budget(run, events, "wall-clock limit")
+                return True
+            await self._perform_model_turn(run, events)
+            return run.status.is_terminal
+
+        budget_reason = self._budget_reason(run)
+        if budget_reason is not None:
+            await self._exhaust_budget(run, events, budget_reason)
+            return True
+
+        await self._apply_steers(run, events)
+        await self._perform_model_turn(run, events)
+        return run.status.is_terminal
 
     async def resume(self, run_id: str) -> RunRecord:
         """Alias that makes recovery intent explicit to application services."""
@@ -334,6 +387,152 @@ class AgentOrchestrator:
         )
         await self._checkpoint(run, events, approval_event, response_event)
         return run
+
+    async def continue_run(
+        self, run_id: str, content: str, *, budget: RunBudget | None = None
+    ) -> RunRecord:
+        """Reopen a finished conversation with a new user message.
+
+        Allowed from ``completed``, and from ``budget_exhausted`` when a larger
+        ``budget`` is supplied. Budgets are cumulative across turns. Time spent
+        idle between turns does not count against the wall-clock budget. The
+        caller then executes the run (``run()`` or a queue worker).
+        """
+
+        _validate_identifier(run_id, "run_id")
+        _validate_user_text(content)
+        run = await self._store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"unknown run: {run_id}")
+        if run.status is RunStatus.BUDGET_EXHAUSTED:
+            if budget is None:
+                raise ValueError("run exhausted its budget; pass a larger budget to continue")
+        elif run.status is not RunStatus.COMPLETED:
+            raise ValueError(f"only completed runs can be continued (run is {run.status.value})")
+        if budget is not None:
+            _validate_budget(budget)
+        events = list(await self._store.list_events(run_id))
+        now = self._clock()
+        if run.started_at is not None and run.completed_at is not None and now > run.completed_at:
+            run.started_at += now - run.completed_at
+        if budget is not None:
+            run.budget = budget
+        reason = self._budget_reason(run)
+        if reason is not None:
+            raise ValueError(f"the run's budget is already exhausted ({reason}); raise it")
+        run.status = RunStatus.RUNNING
+        run.completed_at = None
+        run.error = None
+        run.messages.append(Message(role=Role.USER, content=content))
+        payload: dict[str, Any] = {"chars": len(content)}
+        if budget is not None:
+            payload["budget"] = {
+                "max_steps": budget.max_steps,
+                "max_wall_seconds": budget.max_wall_seconds,
+                "max_tokens": budget.max_tokens,
+                "max_cost_usd": budget.max_cost_usd,
+            }
+        await self._checkpoint(
+            run,
+            events,
+            RunEvent(
+                run_id=run.id,
+                type=EventType.USER_MESSAGE_ADDED,
+                payload=payload,
+                step=run.step_count,
+                created_at=now,
+            ),
+        )
+        return run
+
+    async def steer(self, run_id: str, content: str) -> SteerMessage:
+        """Queue a user message for a run that is still in progress."""
+
+        _validate_identifier(run_id, "run_id")
+        _validate_user_text(content)
+        if self._steering is None:
+            raise ValueError("steering is not configured for this orchestrator")
+        run = await self._store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"unknown run: {run_id}")
+        if run.status.is_terminal:
+            raise ValueError(
+                f"run is {run.status.value}; use continue_run for a finished conversation"
+            )
+        return await self._steering.add_steer(run_id, content)
+
+    async def _apply_steers(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Append queued steer messages not yet applied; True if any were."""
+
+        if self._steering is None:
+            return False
+        applied = {
+            event.payload.get("steer_id")
+            for event in events
+            if event.type is EventType.STEER_APPLIED
+        }
+        pending = [s for s in await self._steering.list_steers(run.id) if s.id not in applied]
+        if not pending:
+            return False
+        now = self._clock()
+        for steer in pending:
+            run.messages.append(Message(role=Role.USER, content=steer.content))
+        await self._checkpoint(
+            run,
+            events,
+            *(
+                RunEvent(
+                    run_id=run.id,
+                    type=EventType.STEER_APPLIED,
+                    payload={"steer_id": steer.id, "chars": len(steer.content)},
+                    step=run.step_count,
+                    created_at=now,
+                )
+                for steer in pending
+            ),
+        )
+        return True
+
+    async def usage(self, run_id: str) -> RunUsage:
+        """Summarize resource use against the run's budget."""
+
+        _validate_identifier(run_id, "run_id")
+        run = await self._store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"unknown run: {run_id}")
+        events = await self._store.list_events(run_id)
+        responded = [
+            e for e in events if e.type is EventType.MODEL_RESPONDED and e.payload.get("ok") is True
+        ]
+
+        def total(key: str) -> int:
+            return sum(v for e in responded if isinstance(v := e.payload.get(key), int))
+
+        if run.started_at is None:
+            active = 0.0
+        else:
+            end = run.completed_at or self._clock()
+            active = max(0.0, (end - run.started_at).total_seconds())
+        return RunUsage(
+            run_id=run.id,
+            status=run.status,
+            model_profile=run.model_profile,
+            steps=run.step_count,
+            max_steps=run.budget.max_steps,
+            input_tokens=total("input_tokens"),
+            output_tokens=total("output_tokens"),
+            cached_input_tokens=total("cached_input_tokens"),
+            total_tokens=run.consumed_tokens,
+            max_tokens=run.budget.max_tokens,
+            cost_usd=run.consumed_cost_usd,
+            max_cost_usd=run.budget.max_cost_usd,
+            cost_estimated=any(e.payload.get("cost_estimated") for e in responded),
+            active_seconds=active,
+            max_wall_seconds=run.budget.max_wall_seconds,
+            model_calls=sum(e.type is EventType.MODEL_REQUESTED for e in events),
+            tool_calls=sum(e.type is EventType.TOOL_REQUESTED for e in events),
+            fallbacks=sum(e.type is EventType.MODEL_FALLBACK for e in events),
+        )
 
     async def cancel(self, run_id: str) -> RunRecord:
         """Persist cancellation unless the run is already terminal."""
@@ -1272,6 +1471,13 @@ def _validate_budget(budget: RunBudget) -> None:
         raise ValueError("max_tokens must be positive when set")
     if budget.max_cost_usd is not None and budget.max_cost_usd <= 0:
         raise ValueError("max_cost_usd must be positive when set")
+
+
+def _validate_user_text(content: str) -> None:
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("message content must be a non-empty string")
+    if len(content) > MAX_USER_MESSAGE_CHARS:
+        raise ValueError(f"message content exceeds {MAX_USER_MESSAGE_CHARS} characters")
 
 
 def _validate_identifier(value: str, field: str) -> None:

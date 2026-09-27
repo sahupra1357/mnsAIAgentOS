@@ -23,6 +23,7 @@ from agent_harness.domain import (
     RunEvent,
     RunRecord,
     RunStatus,
+    SteerMessage,
     ToolCall,
     ToolResult,
     ToolResultStatus,
@@ -89,6 +90,14 @@ class SQLiteRunStore:
 
             CREATE INDEX IF NOT EXISTS run_queue_order
                 ON run_queue(enqueued_sequence);
+
+            CREATE TABLE IF NOT EXISTS steer_messages (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS tool_results (
                 tool_name TEXT NOT NULL,
@@ -216,6 +225,31 @@ class SQLiteRunStore:
                 (run_id,),
             ).fetchall()
         return tuple(_decode_event(row) for row in rows)
+
+    async def add_steer(self, run_id: str, content: str) -> SteerMessage:
+        _validate_identifier(run_id, "run_id")
+        steer = SteerMessage(uuid4().hex, run_id, content, utc_now())
+        async with self._lock:
+            try:
+                self._connection.execute(
+                    "INSERT INTO steer_messages(id, run_id, content, created_at) VALUES (?, ?, ?, ?)",
+                    (steer.id, run_id, content, steer.created_at.isoformat()),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+        return steer
+
+    async def list_steers(self, run_id: str) -> Sequence[SteerMessage]:
+        async with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, run_id, content, created_at FROM steer_messages "
+                "WHERE run_id = ? ORDER BY sequence",
+                (run_id,),
+            ).fetchall()
+        return tuple(
+            SteerMessage(row["id"], row["run_id"], row["content"], datetime.fromisoformat(row["created_at"]))
+            for row in rows
+        )
 
     async def enqueue(self, run_id: str) -> None:
         _validate_identifier(run_id, "run_id")

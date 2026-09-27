@@ -22,6 +22,23 @@ at a boundary and validated there.
 - Nothing grants capability implicitly: installing a plugin or adding a skill never
   enables tools or bypasses approval by itself.
 
+## Status
+
+6a is implemented: items 1, 2, and 15.
+- `AgentOrchestrator.continue_run`, `steer`, `usage`.
+- `SteerStore` (a `steer_messages` table) plus `STEER_APPLIED` / `USER_MESSAGE_ADDED`
+  events.
+- The run loop refreshes at each step boundary and recovers from a mid-step
+  `ConcurrencyError` by reloading (bounded).
+- CLI: `continue`, `steer`, `cancel`, `status`.
+- API: `POST /runs/{id}/messages`, `POST /runs/{id}/steer`, `GET /runs/{id}/usage`.
+
+Deviations from the design below:
+- A steer is durable in its own table instead of a `STEER_QUEUED` event. That event
+  would bump the run version and race the worker.
+- Cancel takes effect at the next step boundary. An in-flight model call is not
+  interrupted, but its response is discarded.
+
 ## 1. Continuing a conversation
 - `continue_run(run_id, message)`: allowed from `completed` (and `budget_exhausted`, if
   budget is also raised explicitly). Appends a user `Message`, emits `USER_MESSAGE_ADDED`,
