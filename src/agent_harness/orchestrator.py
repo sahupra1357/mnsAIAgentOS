@@ -40,16 +40,33 @@ from agent_harness.domain import (
 
 @dataclass(frozen=True, slots=True)
 class OrchestratorSettings:
-    """Bound retry behavior independently from each run's resource budget."""
+    """Bound retry and loop behavior independently from each run's resource budget.
+
+    ``max_model_attempts`` bounds *provider* requests per step and profile,
+    including retries an adapter performs internally, so retry layers never
+    multiply. ``max_identical_tool_calls`` identical calls (same tool and
+    arguments, since the last non-read-only call) run normally; later ones are
+    refused with a warning, and the run fails after ``max_refused_repeats``
+    refusals. Either may be ``None`` to disable repeated-call detection.
+    """
 
     max_model_attempts: int = 3
     max_tool_attempts: int = 3
+    max_identical_tool_calls: int | None = 5
+    max_refused_repeats: int | None = 2
 
     def __post_init__(self) -> None:
         if self.max_model_attempts < 1:
             raise ValueError("max_model_attempts must be at least 1")
         if self.max_tool_attempts < 1:
             raise ValueError("max_tool_attempts must be at least 1")
+        if self.max_identical_tool_calls is not None and self.max_identical_tool_calls < 1:
+            raise ValueError("max_identical_tool_calls must be at least 1")
+        if self.max_refused_repeats is not None and self.max_refused_repeats < 0:
+            raise ValueError("max_refused_repeats must not be negative")
+
+
+FallbackLookup = Callable[[str], Sequence[str]]
 
 
 class AgentOrchestrator:
@@ -70,6 +87,7 @@ class AgentOrchestrator:
         settings: OrchestratorSettings | None = None,
         clock: Callable[[], datetime] = utc_now,
         context: ContextBuilder | None = None,
+        fallbacks: FallbackLookup | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -77,6 +95,7 @@ class AgentOrchestrator:
         self._settings = settings or OrchestratorSettings()
         self._clock = clock
         self._context = context or FullHistoryContextBuilder()
+        self._fallbacks = fallbacks
 
     async def create_run(
         self,
@@ -85,6 +104,7 @@ class AgentOrchestrator:
         messages: Sequence[Message],
         budget: RunBudget | None = None,
         run_id: str | None = None,
+        route: str | None = None,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted."""
 
@@ -106,10 +126,14 @@ class AgentOrchestrator:
             created_at=now,
             updated_at=now,
         )
+        payload = {"model_profile": model_profile}
+        if route is not None:
+            _validate_identifier(route, "route")
+            payload["route"] = route
         event = RunEvent(
             run_id=run.id,
             type=EventType.RUN_CREATED,
-            payload={"model_profile": model_profile},
+            payload=payload,
             created_at=now,
         )
         await self._store.create_run(run, event)
@@ -154,7 +178,7 @@ class AgentOrchestrator:
                     if self._wall_limit_reached(run):
                         return await self._exhaust_budget(run, events, "wall-clock limit")
                     await self._execute_tool(run, events, call)
-                    if run.status is RunStatus.AWAITING_INPUT:
+                    if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
                         return run
                 continue
 
@@ -312,13 +336,18 @@ class AgentOrchestrator:
             and latest.payload.get("ok") is False
             and latest.payload.get("retryable") is True
         )
+        switched = (
+            latest is not None
+            and latest.type is EventType.MODEL_FALLBACK
+            and latest.step == run.step_count
+        )
 
-        if pending_request or retrying:
+        if pending_request or retrying or switched:
             attempt = _model_attempts(events, run.step_count)
-            if retrying:
-                if attempt >= self._settings.max_model_attempts:
-                    await self._fail(run, events, "model retry attempts exhausted")
-                    return
+            if retrying and self._model_attempts_exhausted(events, run.step_count):
+                await self._fallback_or_fail(run, events)
+                return
+            if retrying or switched:
                 attempt += 1
                 await self._record_model_request(run, events, attempt)
         else:
@@ -341,8 +370,8 @@ class AgentOrchestrator:
             _validate_model_response(response)
         except RetryableModelError as exc:
             await self._record_model_error(run, events, exc, retryable=True, attempt=attempt)
-            if attempt >= self._settings.max_model_attempts:
-                await self._fail(run, events, "model retry attempts exhausted")
+            if self._model_attempts_exhausted(events, run.step_count):
+                await self._fallback_or_fail(run, events)
             return
         except PermanentModelError as exc:
             await self._record_model_error(run, events, exc, retryable=False, attempt=attempt)
@@ -379,6 +408,8 @@ class AgentOrchestrator:
             "cost_usd": response.usage.cost_usd,
             "provider_request_id": response.provider_request_id,
         }
+        if response.metadata.get("cost_estimated") is True:
+            payload["cost_estimated"] = True
         if view is not None and view.modified:
             payload["context"] = {
                 "messages_sent": len(view.messages),
@@ -422,28 +453,127 @@ class AgentOrchestrator:
         retryable: bool,
         attempt: int,
     ) -> None:
+        payload: dict[str, Any] = {
+            "ok": False,
+            "retryable": retryable,
+            "attempt": attempt,
+            "error": _safe_error(error),
+        }
+        if isinstance(error, RetryableModelError):
+            payload["provider_attempts"] = max(1, int(error.provider_attempts))
         await self._checkpoint(
             run,
             events,
             RunEvent(
                 run_id=run.id,
                 type=EventType.MODEL_RESPONDED,
+                payload=payload,
+                step=run.step_count,
+                created_at=self._clock(),
+            ),
+        )
+
+    def _model_attempts_exhausted(self, events: Sequence[RunEvent], step: int) -> bool:
+        return _provider_attempts_used(events, step) >= self._settings.max_model_attempts
+
+    async def _fallback_or_fail(self, run: RunRecord, events: list[RunEvent]) -> None:
+        """Switch to the next configured fallback profile, or fail the run."""
+
+        target = self._next_fallback(run, events)
+        if target is None:
+            await self._fail(run, events, "model retry attempts exhausted")
+            return
+        previous = run.model_profile
+        run.model_profile = target
+        await self._checkpoint(
+            run,
+            events,
+            RunEvent(
+                run_id=run.id,
+                type=EventType.MODEL_FALLBACK,
                 payload={
-                    "ok": False,
-                    "retryable": retryable,
-                    "attempt": attempt,
-                    "error": _safe_error(error),
+                    "from": previous,
+                    "to": target,
+                    "reason": "retry attempts exhausted",
                 },
                 step=run.step_count,
                 created_at=self._clock(),
             ),
         )
 
+    def _next_fallback(self, run: RunRecord, events: Sequence[RunEvent]) -> str | None:
+        if self._fallbacks is None:
+            return None
+        original = next(
+            (
+                event.payload.get("model_profile")
+                for event in events
+                if event.type is EventType.RUN_CREATED
+            ),
+            run.model_profile,
+        )
+        if not isinstance(original, str):
+            return None
+        try:
+            chain = tuple(self._fallbacks(original))
+        except KeyError:
+            return None
+        tried = {original, run.model_profile}
+        tried.update(
+            event.payload["to"]
+            for event in events
+            if event.type is EventType.MODEL_FALLBACK and isinstance(event.payload.get("to"), str)
+        )
+        return next((name for name in chain if name not in tried), None)
+
+    async def _refuse_repeated_call(
+        self,
+        run: RunRecord,
+        events: list[RunEvent],
+        call: ToolCall,
+        specs: dict[str, ToolSpec],
+    ) -> bool:
+        """Refuse or stop on identical repeated calls; return True if handled."""
+
+        limit = self._settings.max_identical_tool_calls
+        if limit is None:
+            return False
+        prior = _identical_prior_calls(run.messages, call, specs)
+        if prior < limit:
+            return False
+        refusals = prior - limit
+        max_refusals = self._settings.max_refused_repeats
+        if max_refusals is not None and refusals >= max_refusals:
+            await self._fail(
+                run,
+                events,
+                f"repeated tool call loop: {call.name!r} requested {prior + 1} times "
+                "with identical arguments",
+            )
+            return True
+        result = ToolResult(
+            call_id=call.id,
+            name=call.name,
+            status=ToolResultStatus.POLICY_DENIED,
+            output={"error": "repeated_call", "identical_calls": prior + 1},
+            model_message=(
+                f"Refused: {call.name} was already called {prior} times with identical "
+                "arguments and nothing has changed since, so the result would be the same. "
+                "Use the earlier results or try a different approach."
+            ),
+        )
+        self._append_tool_message(run, result)
+        await self._record_tool_result(run, events, result, attempt=0)
+        return True
+
     async def _execute_tool(
         self, run: RunRecord, events: list[RunEvent], call: ToolCall
     ) -> None:
         specs = {spec.name: spec for spec in self._tools.specs()}
         spec = specs.get(call.name)
+        if spec is not None and not _has_pending_tool_request(events, run.step_count, call.id):
+            if await self._refuse_repeated_call(run, events, call, specs):
+                return
         if spec is None:
             result = ToolResult(
                 call_id=call.id,
@@ -726,12 +856,65 @@ def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
     latest = events[-1]
     return latest.step == step and (
         latest.type is EventType.MODEL_REQUESTED
+        or latest.type is EventType.MODEL_FALLBACK
         or (
             latest.type is EventType.MODEL_RESPONDED
             and latest.payload.get("ok") is False
             and latest.payload.get("retryable") is True
         )
     )
+
+
+def _provider_attempts_used(events: Sequence[RunEvent], step: int) -> int:
+    """Provider requests consumed by the current profile during ``step``."""
+
+    used = 0
+    for event in events:
+        if event.step != step:
+            continue
+        if event.type is EventType.MODEL_FALLBACK:
+            used = 0
+        elif (
+            event.type is EventType.MODEL_RESPONDED
+            and event.payload.get("ok") is False
+            and event.payload.get("retryable") is True
+        ):
+            attempts = event.payload.get("provider_attempts", 1)
+            used += attempts if isinstance(attempts, int) and attempts > 0 else 1
+    return used
+
+
+def _identical_prior_calls(
+    messages: Sequence[Message], call: ToolCall, specs: dict[str, ToolSpec]
+) -> int:
+    """Count earlier identical calls since the last non-read-only tool call."""
+
+    signature = _call_signature(call)
+    # Locate the call by position (latest message offering it): some providers
+    # reuse call IDs such as "call-1" on every step.
+    current = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if any(offered.id == call.id for offered in messages[index].tool_calls)
+        ),
+        len(messages),
+    )
+    count = 0
+    for index, message in enumerate(messages[: current + 1]):
+        for previous in message.tool_calls:
+            if index == current and previous.id == call.id:
+                return count
+            spec = specs.get(previous.name)
+            if spec is not None and spec.risk is not ToolRisk.READ_ONLY:
+                count = 0
+            elif _call_signature(previous) == signature:
+                count += 1
+    return count
+
+
+def _call_signature(call: ToolCall) -> str:
+    return call.name + ":" + json.dumps(call.arguments, sort_keys=True, separators=(",", ":"))
 
 
 def _model_attempts(events: Sequence[RunEvent], step: int) -> int:

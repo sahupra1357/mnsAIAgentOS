@@ -63,6 +63,7 @@ class EventType(StrEnum):
     RUN_FAILED = "run_failed"
     RUN_CANCELLED = "run_cancelled"
     BUDGET_EXHAUSTED = "budget_exhausted"
+    MODEL_FALLBACK = "model_fallback"
 
 
 class ToolRisk(StrEnum):
@@ -273,7 +274,14 @@ class HarnessError(Exception):
 
 
 class RetryableModelError(HarnessError):
-    """A model request failed before an unambiguous response was accepted."""
+    """A model request failed before an unambiguous response was accepted.
+
+    ``provider_attempts`` is how many provider requests were made before this
+    error surfaced (adapters that retry internally set it), so the orchestrator
+    can bound total attempts instead of multiplying retry layers.
+    """
+
+    provider_attempts: int = 1
 
 
 class PermanentModelError(HarnessError):

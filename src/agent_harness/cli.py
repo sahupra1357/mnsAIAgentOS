@@ -28,7 +28,9 @@ def _parser() -> argparse.ArgumentParser:
     _common_runtime_arguments(run)
     run.add_argument("prompt", help="user request to send to the agent")
     run.add_argument("--system", help="optional system instruction")
-    run.add_argument("--model-profile", help="named profile; defaults to the config value")
+    run.add_argument(
+        "--model-profile", help="profile or route name; defaults to the config value"
+    )
     run.add_argument("--max-steps", type=int, default=20)
     run.add_argument("--max-wall-seconds", type=float, default=300.0)
     run.add_argument("--max-tokens", type=int)
@@ -75,7 +77,9 @@ def _common_runtime_arguments(parser: argparse.ArgumentParser) -> None:
 async def _run_command(args: argparse.Namespace) -> int:
     app = build_application(config_path=args.config, database_path=args.database)
     async with app:
-        profile = args.model_profile or app.config.default_model_profile
+        requested = args.model_profile or app.config.default_model_profile
+        profile = app.config.resolve_model_name(requested)
+        route = requested if requested != profile else None
         messages: list[Message] = []
         system = args.system
         if system is None and app.config.coding.enabled:
@@ -85,6 +89,7 @@ async def _run_command(args: argparse.Namespace) -> int:
         messages.append(Message(role=Role.USER, content=args.prompt))
         run = await app.orchestrator.create_run(
             model_profile=profile,
+            route=route,
             messages=messages,
             budget=RunBudget(
                 max_steps=args.max_steps,
@@ -153,13 +158,19 @@ def _list_profiles(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     for name, profile in config.models.items():
         marker = " *" if name == config.default_model_profile else ""
-        print(f"{name}{marker}: {profile.adapter} / {profile.model} @ {profile.endpoint}")
+        fallback = f" (fallback: {', '.join(profile.fallback)})" if profile.fallback else ""
+        print(
+            f"{name}{marker}: {profile.adapter} / {profile.model} @ {profile.endpoint}{fallback}"
+        )
+    for route, target in config.routes.items():
+        marker = " *" if route == config.default_model_profile else ""
+        print(f"route {route}{marker} -> {target}")
     return 0
 
 
 async def _doctor_command(args: argparse.Namespace) -> int:
     config = load_config(args.config)
-    profile = args.model_profile or config.default_model_profile
+    profile = config.resolve_model_name(args.model_profile)
     transport = StdlibHttpTransport()
     client = ModelGateway(config, transport=transport).resolve(profile)
     selected = config.model_profile(profile)
