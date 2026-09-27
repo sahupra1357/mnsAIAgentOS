@@ -9,8 +9,11 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from agent_harness.context import FullHistoryContextBuilder
 from agent_harness.domain import (
     ApprovalRequest,
+    ContextBuilder,
+    ContextView,
     EventType,
     FinishReason,
     Message,
@@ -66,12 +69,14 @@ class AgentOrchestrator:
         store: RunStore,
         settings: OrchestratorSettings | None = None,
         clock: Callable[[], datetime] = utc_now,
+        context: ContextBuilder | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
         self._store = store
         self._settings = settings or OrchestratorSettings()
         self._clock = clock
+        self._context = context or FullHistoryContextBuilder()
 
     async def create_run(
         self,
@@ -321,12 +326,15 @@ class AgentOrchestrator:
             await self._record_model_request(run, events, 1)
             attempt = 1
 
+        view: ContextView | None = None
         try:
             client = self._models.resolve(run.model_profile)
+            specs = tuple(self._tools.specs())
+            view = self._context.build(run.messages, specs, model_profile=run.model_profile)
             response = await client.complete(
                 ModelRequest(
-                    messages=tuple(run.messages),
-                    tools=tuple(self._tools.specs()),
+                    messages=view.messages,
+                    tools=specs,
                     metadata={"run_id": run.id, "step": str(run.step_count)},
                 )
             )
@@ -361,22 +369,30 @@ class AgentOrchestrator:
                 tool_calls=response.tool_calls,
             )
         )
+        payload: dict[str, Any] = {
+            "ok": True,
+            "attempt": attempt,
+            "finish_reason": response.finish_reason.value,
+            "tool_call_count": len(response.tool_calls),
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+            "cost_usd": response.usage.cost_usd,
+            "provider_request_id": response.provider_request_id,
+        }
+        if view is not None and view.modified:
+            payload["context"] = {
+                "messages_sent": len(view.messages),
+                "omitted_messages": view.omitted_messages,
+                "trimmed_tool_outputs": view.trimmed_tool_outputs,
+                "estimated_tokens": view.estimated_tokens,
+            }
         await self._checkpoint(
             run,
             events,
             RunEvent(
                 run_id=run.id,
                 type=EventType.MODEL_RESPONDED,
-                payload={
-                    "ok": True,
-                    "attempt": attempt,
-                    "finish_reason": response.finish_reason.value,
-                    "tool_call_count": len(response.tool_calls),
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                    "cost_usd": response.usage.cost_usd,
-                    "provider_request_id": response.provider_request_id,
-                },
+                payload=payload,
                 step=run.step_count,
                 created_at=self._clock(),
             ),

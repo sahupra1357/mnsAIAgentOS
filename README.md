@@ -164,6 +164,26 @@ Check a profile against a live server:
 
 It exits 1 if any check fails.
 
+## Context Window
+
+Profiles that set `context_window` get a bounded view of the history on every model call.
+The stored run history is never modified.
+
+- **Always kept:** system messages and the first user message.
+- **Tool call pairs:** an assistant tool call always stays together with its tool results.
+- **Large tool outputs:** shortened in the view to head + tail (default 16,000 characters).
+- **Trimming:** when the estimate reaches 85% of the input budget, the oldest turns are
+  omitted until it falls to 60%, and a short notice records the omission. Trimming in
+  chunks keeps the prompt prefix stable between trims, so vLLM, SGLang, and llama.cpp
+  keep reusing their prefix cache.
+- **Input budget:** `context_window` minus the output reserve (`parameters.max_tokens`,
+  default 1024) and the tool definitions.
+- **Too large to fit:** if the system prompt, first user message, and latest turn alone
+  do not fit, the run fails with `ContextWindowExceededError`. It does not send a
+  truncated request.
+
+Tune the behavior with `build_application(..., context_policy=ContextPolicy(...))`.
+
 ## Programmatic Composition
 
 The default application uses SQLite, the configured model gateway, and the example tools:

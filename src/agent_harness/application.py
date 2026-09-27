@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .coding import create_coding_tool_runtime
 from .config import HarnessConfig, load_config
+from .context import BudgetedContextBuilder, ContextPolicy, limits_from_profiles
 from .model_gateway import ModelGateway
 from .orchestrator import AgentOrchestrator, OrchestratorSettings
 from .persistence import SQLiteRunStore
@@ -40,6 +41,7 @@ def build_application(
     database_path: str | PathLike[str],
     tools: ToolRuntime | None = None,
     settings: OrchestratorSettings | None = None,
+    context_policy: ContextPolicy | None = None,
 ) -> HarnessApplication:
     """Compose the default local application from replaceable implementations."""
 
@@ -60,6 +62,9 @@ def build_application(
         tools=tool_runtime,
         store=store,
         settings=settings,
+        context=BudgetedContextBuilder(
+            limits_from_profiles(config.models), policy=context_policy
+        ),
     )
     return HarnessApplication(
         config=config,

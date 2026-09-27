@@ -198,6 +198,40 @@ class ApprovalRequest:
     requested_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ContextView:
+    """The bounded message sequence sent to a model for one call.
+
+    The run's stored messages stay authoritative; a view may omit old turns or
+    shorten tool outputs, and reports what it changed.
+    """
+
+    messages: tuple[Message, ...]
+    estimated_tokens: int | None = None
+    omitted_messages: int = 0
+    trimmed_tool_outputs: int = 0
+
+    @property
+    def modified(self) -> bool:
+        return self.omitted_messages > 0 or self.trimmed_tool_outputs > 0
+
+
+class ContextBuilder(Protocol):
+    """Build the per-call view of a run's history.
+
+    Implementations must be deterministic functions of their inputs so that a
+    resumed run sends the same view.
+    """
+
+    def build(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec],
+        *,
+        model_profile: str,
+    ) -> ContextView: ...
+
+
 class ModelClient(Protocol):
     async def complete(self, request: ModelRequest) -> ModelResponse: ...
 
@@ -244,6 +278,10 @@ class RetryableModelError(HarnessError):
 
 class PermanentModelError(HarnessError):
     """A model request should not be retried without configuration changes."""
+
+
+class ContextWindowExceededError(PermanentModelError):
+    """Even the minimum required context does not fit the model's window."""
 
 
 class ConcurrencyError(HarnessError):
