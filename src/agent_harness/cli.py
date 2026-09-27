@@ -15,6 +15,7 @@ from .config import ConfigError, load_config
 from .domain import HarnessError, Message, Role, RunBudget, RunRecord
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
+from .telemetry import JsonLinesTelemetry
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,6 +36,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-wall-seconds", type=float, default=300.0)
     run.add_argument("--max-tokens", type=int)
     run.add_argument("--max-cost-usd", type=float)
+    run.add_argument(
+        "--stream", action="store_true", help="print assistant text as it is generated"
+    )
 
     resume = subcommands.add_parser("resume", help="resume a durable run by ID")
     _common_runtime_arguments(resume)
@@ -72,10 +76,41 @@ def _common_runtime_arguments(parser: argparse.ArgumentParser) -> None:
         default=Path("agent-harness.sqlite3"),
         help="durable SQLite run database",
     )
+    parser.add_argument(
+        "--telemetry-file",
+        type=Path,
+        help="append sanitized JSON-lines telemetry (events, model and tool calls) here",
+    )
+
+
+class _StdoutStream:
+    """Print streamed assistant text; remembers whether anything was shown."""
+
+    def __init__(self) -> None:
+        self.printed = False
+
+    def on_text(self, run_id: str, step: int, text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        self.printed = True
+
+
+def _build(args: argparse.Namespace, *, stream: _StdoutStream | None = None) -> HarnessApplication:
+    telemetry_path: Path | None = getattr(args, "telemetry_file", None)
+    telemetry = None
+    if telemetry_path is not None:
+        telemetry = JsonLinesTelemetry(telemetry_path.open("a", encoding="utf-8"))
+    return build_application(
+        config_path=args.config,
+        database_path=args.database,
+        telemetry=telemetry,
+        stream_listener=stream,
+    )
 
 
 async def _run_command(args: argparse.Namespace) -> int:
-    app = build_application(config_path=args.config, database_path=args.database)
+    stream = _StdoutStream() if args.stream else None
+    app = _build(args, stream=stream)
     async with app:
         requested = args.model_profile or app.config.default_model_profile
         profile = app.config.resolve_model_name(requested)
@@ -100,18 +135,18 @@ async def _run_command(args: argparse.Namespace) -> int:
             ),
         )
         completed = await app.orchestrator.run(run.id)
-        return await _print_result(app, completed)
+        return await _print_result(app, completed, streamed=stream is not None and stream.printed)
 
 
 async def _resume_command(args: argparse.Namespace) -> int:
-    app = build_application(config_path=args.config, database_path=args.database)
+    app = _build(args)
     async with app:
         completed = await app.orchestrator.resume(args.run_id)
         return await _print_result(app, completed)
 
 
 async def _approve_command(args: argparse.Namespace) -> int:
-    app = build_application(config_path=args.config, database_path=args.database)
+    app = _build(args)
     async with app:
         pending = await app.orchestrator.pending_approval(args.run_id)
         if pending is None:
@@ -127,7 +162,9 @@ async def _approve_command(args: argparse.Namespace) -> int:
         return await _print_result(app, resumed)
 
 
-async def _print_result(app: HarnessApplication, run: RunRecord) -> int:
+async def _print_result(
+    app: HarnessApplication, run: RunRecord, *, streamed: bool = False
+) -> int:
     print(f"run_id={run.id} status={run.status.value}", file=sys.stderr)
     if run.error:
         print(f"error={run.error}", file=sys.stderr)
@@ -148,10 +185,13 @@ async def _print_result(app: HarnessApplication, run: RunRecord) -> int:
                 file=sys.stderr,
             )
         return 3
-    for message in reversed(run.messages):
-        if message.role is Role.ASSISTANT and not message.tool_calls:
-            print(message.content)
-            break
+    if streamed:
+        print()  # the answer was already written as it streamed
+    else:
+        for message in reversed(run.messages):
+            if message.role is Role.ASSISTANT and not message.tool_calls:
+                print(message.content)
+                break
     return 0 if run.status.value == "completed" else 1
 
 

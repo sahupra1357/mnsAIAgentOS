@@ -19,6 +19,8 @@ from .openai_compatible import OpenAICompatibleClient
 from .transport import (
     HttpGetTransport,
     HttpResponse,
+    HttpStreamResponse,
+    HttpStreamTransport,
     HttpTransport,
     HttpTransportError,
     HttpTransportTimeout,
@@ -31,6 +33,8 @@ __all__ = [
     "BUILTIN_ADAPTERS",
     "HttpGetTransport",
     "HttpResponse",
+    "HttpStreamResponse",
+    "HttpStreamTransport",
     "HttpTransport",
     "HttpTransportError",
     "HttpTransportTimeout",

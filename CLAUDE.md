@@ -168,7 +168,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
    exhaustion, with an event recording the switch.
 5. Add capability routing: named routes (`fast`, `strong`) that map to profiles.
 
-**Phase 4 – Operations** [harness-operations] — split into stacked PRs: 4a (items 1, 2, 10) on `phase-4a-durability-versioning`; 4b (4, 3); 4c (5–9)
+**Phase 4 – Operations** [harness-operations] — split into stacked PRs: 4a (items 1, 2, 10) on `phase-4a-durability-versioning`; 4b (items 3, 4) on `phase-4b-telemetry-streaming`; 4c (items 5–9)
 1. Store tool idempotency results durably in the run store (SQLite table), not only in
    process memory.
 2. Record prompt and config versions on each run: hashes of the system prompt, tool

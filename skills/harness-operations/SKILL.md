@@ -23,6 +23,19 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
   not the orchestrator, executes the handler. This covers a crash after the handler but
   before the checkpoint, which is the case that matters.
 
+- 4b is implemented: items 3 and 4.
+  - `domain.py`: `TelemetryRecord`/`TelemetrySink`, `ModelStreamEvent`/
+    `StreamListener`.
+  - `telemetry.py`: sinks `Noop`, `JsonLines`, `Metrics` (cache-hit rate),
+    `Multi`, and `OpenTelemetry` (lazy `opentelemetry-api`, `[otel]` extra).
+  - The orchestrator emits an `event` record for every persisted event, plus
+    `model_call` and `tool_call` records with durations. Emission is guarded, so it
+    cannot break a run.
+  - `OpenAICompatibleClient.stream()` parses SSE through `StdlibHttpTransport.post_stream`.
+    It is not retried at the adapter level; the orchestrator's attempt budget applies.
+  - Ollama native mode does not stream.
+  - CLI: `run --stream` and `--telemetry-file`.
+
 ## 1. Durable tool idempotency
 - Add intent-level store methods: `get_tool_result(key)` / `put_tool_result(key, fingerprint, result)`.
 - SQLite: a new table keyed by the idempotency key, written in the same transaction as
