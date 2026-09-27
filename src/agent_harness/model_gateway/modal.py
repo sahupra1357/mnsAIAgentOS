@@ -9,14 +9,12 @@ cold-start timeout.
 
 from __future__ import annotations
 
-import asyncio
-from typing import Mapping
+from typing import Any
 
 from agent_harness.config import ModelProfile
 
 from .errors import ModelConfigurationError
-from .openai_compatible import OpenAICompatibleClient, Sleep
-from .transport import HttpTransport
+from .openai_compatible import OpenAICompatibleClient
 
 
 DEFAULT_MODAL_COLD_START_TIMEOUT_SECONDS = 600.0
@@ -24,15 +22,7 @@ MODAL_PROXY_HEADERS = ("Modal-Key", "Modal-Secret")
 
 
 class ModalClient(OpenAICompatibleClient):
-    def __init__(
-        self,
-        profile: ModelProfile,
-        *,
-        transport: HttpTransport | None = None,
-        environ: Mapping[str, str] | None = None,
-        sleep: Sleep = asyncio.sleep,
-        preserve_raw_response: bool = False,
-    ) -> None:
+    def __init__(self, profile: ModelProfile, **options: Any) -> None:
         if not profile.api_key_env:
             raise ModelConfigurationError(
                 "modal profiles require api_key_env for the inference server's bearer key"
@@ -44,13 +34,7 @@ class ModalClient(OpenAICompatibleClient):
                 "modal profiles require headers_env entries for proxy auth: "
                 + ", ".join(missing)
             )
-        super().__init__(
-            profile,
-            transport=transport,
-            environ=environ,
-            sleep=sleep,
-            preserve_raw_response=preserve_raw_response,
-        )
+        super().__init__(profile, **options)
 
     @property
     def server(self) -> str:

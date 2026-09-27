@@ -164,6 +164,47 @@ Check a profile against a live server:
 
 It exits 1 if any check fails.
 
+## Retries, Cost, Fallback, and Routes
+
+- **One retry budget:** `OrchestratorSettings.max_model_attempts` (default 3) counts
+  every provider request in a step, including the adapter's own `max_retries`, so
+  retries never multiply. Only retryable errors (timeouts, throttling, 5xx) are retried.
+- **Fallback:** when retryable failures exhaust that budget, the run switches to the
+  next profile in the original profile's `fallback` list. It records a
+  `model_fallback` event and stays on that profile. Permanent errors (auth,
+  configuration, malformed output) never fall back.
+
+  ```toml
+  [models.modal]
+  fallback = ["llamacpp", "ollama"]
+  ```
+
+- **Cost:** add `pricing` to a profile, and each response gets an estimated
+  `cost_usd`, so `--max-cost-usd` works.
+
+  ```toml
+  [models.modal.pricing]
+  gpu_usd_per_second = 0.0003        # your GPU's rate; latency includes cold start
+  # input_usd_per_million_tokens = 0.2
+  # output_usd_per_million_tokens = 0.6
+  ```
+
+- **Repeated calls:** after 5 identical calls to the same tool (since the last
+  side-effecting call), further identical calls are refused with an explanation to the
+  model. After 2 refusals the run fails. Tune this with
+  `OrchestratorSettings(max_identical_tool_calls=..., max_refused_repeats=...)`, or
+  disable it with `None`.
+- **Routes:** name capabilities instead of profiles. A route can be used anywhere a
+  profile name is accepted, including `default_model_profile` and `--model-profile`.
+  The run stores the resolved profile and records the route. Environment override:
+  `AGENT_HARNESS_ROUTE__FAST=ollama`.
+
+  ```toml
+  [routes]
+  fast = "llamacpp"
+  strong = "modal"
+  ```
+
 ## Context Window
 
 Profiles that set `context_window` get a bounded view of the history on every model call.

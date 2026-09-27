@@ -65,6 +65,7 @@ def build_application(
         context=BudgetedContextBuilder(
             limits_from_profiles(config.models), policy=context_policy
         ),
+        fallbacks=models.fallback_profiles,
     )
     return HarnessApplication(
         config=config,

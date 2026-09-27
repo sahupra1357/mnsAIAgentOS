@@ -2,6 +2,11 @@
 # AGENT_HARNESS_DEFAULT_MODEL_PROFILE or --model-profile.
 default_model_profile = "local"
 
+# Capability routes: use a route name anywhere a profile name is accepted.
+[routes]
+fast = "llamacpp"
+strong = "modal"
+
 # Any server exposing an OpenAI-compatible /chat/completions endpoint can be
 # used: a hosted provider, vLLM, llama.cpp server, Ollama's compatible API, etc.
 [models.local]
@@ -77,8 +82,15 @@ context_window = 32768
 Modal-Key = "MODAL_PROXY_TOKEN_ID"
 Modal-Secret = "MODAL_PROXY_TOKEN_SECRET"
 
+# If Modal keeps failing after retries, continue the run on a local server.
+# fallback = ["llamacpp", "ollama"]
+
 [models.modal.parameters]
 temperature = 0.2
+
+# Estimated cost per request, so --max-cost-usd works. Use your GPU's actual rate.
+# [models.modal.pricing]
+# gpu_usd_per_second = 0.0003
 
 # Enable repository coding tools by setting enabled = true. The default Docker
 # backend has no network and pauses before writes, commands, commits, or PRs.

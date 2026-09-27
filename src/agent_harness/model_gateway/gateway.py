@@ -55,11 +55,17 @@ class ModelGateway:
         self._factories = defaults
         self._clients: dict[str, ModelClient] = {}
 
+    def fallback_profiles(self, profile: str) -> tuple[str, ...]:
+        return self._config.fallback_profiles(profile)
+
     @property
     def default_profile(self) -> str:
         return self._config.default_model_profile
 
     def resolve(self, profile: str) -> ModelClient:
+        """Return the client for a profile or route name."""
+
+        profile = self._config.routes.get(profile, profile)
         if profile in self._clients:
             return self._clients[profile]
         try:

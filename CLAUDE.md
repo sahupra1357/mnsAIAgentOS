@@ -82,15 +82,22 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 
 ## Known pitfalls in the current code
 
-- **Retries multiply.** `OpenAICompatibleClient` retries `max_retries` times, and the
-  orchestrator also retries `max_model_attempts` (default 3). A timeout can therefore
-  produce up to `(max_retries+1) × 3` HTTP calls. Consider this when setting Modal
-  cold-start timeouts.
+- **One retry budget (Phase 3).** `OrchestratorSettings.max_model_attempts` bounds
+  *provider requests* per step and profile. Adapters set
+  `RetryableModelError.provider_attempts`, so adapter retries count against the same
+  budget instead of multiplying. With `max_retries = 2`, the adapter's three attempts
+  exhaust the default budget of 3, and the next fallback profile (if any) is used.
 - **Model timeouts (fixed in Phase 1).** `ModelRequest.timeout_seconds` now defaults to
   `None`, which means "use the profile's timeout". Previously a hidden 60 s default
   capped every profile.
-- **Cost budget is inert.** No adapter sets `Usage.cost_usd`, so `max_cost_usd` never
-  triggers. Local models are free; Modal is billed per GPU-second.
+- **Cost is estimated (Phase 3).** Profiles with `pricing` get `Usage.cost_usd` from
+  token prices and/or `gpu_usd_per_second × request latency`, which includes retries
+  and cold start and is an upper bound under concurrency. Without `pricing`, cost stays
+  unknown and `max_cost_usd` cannot trigger.
+- **Repeated-call detection (Phase 3).** More than `max_identical_tool_calls` (5)
+  identical calls since the last non-read-only call are refused, and the run fails
+  after `max_refused_repeats` (2) refusals. Polling tools may need these raised, or set
+  to `None`.
 - **Context window (added in Phase 2).** Only profiles with `context_window` are trimmed;
   others still send the full history. For Ollama's OpenAI-compatible mode, the server's
   own context (`OLLAMA_CONTEXT_LENGTH`) must also be at least that large, or the server
@@ -147,7 +154,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
    sliding window each step; then append-only again. No timestamps or run IDs in the
    system prompt. Tool specs in a fixed order with canonical JSON.
 
-**Phase 3 – Reliability and cost** [durable-agent-orchestration, model-gateway]
+**Phase 3 – Reliability and cost** [durable-agent-orchestration, model-gateway] — implemented on `phase-3-reliability-cost`
 1. Retry in one place only: the adapter retries transport errors, and the orchestrator
    retries only after the adapter gives up (or make adapter retries 0 by default).
 2. Add cost estimation: per-token prices or Modal GPU-seconds × rate → `Usage.cost_usd`,

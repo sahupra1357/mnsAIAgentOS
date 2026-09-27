@@ -27,6 +27,7 @@ _RESERVED_HEADERS = frozenset({"authorization", "content-type", "accept", "conte
 SUPPORTED_SERVERS = frozenset({"vllm", "sglang"})
 SUPPORTED_API_MODES = frozenset({"openai", "native"})
 _ENV_PREFIX = "AGENT_HARNESS_MODEL__"
+_ROUTE_ENV_PREFIX = "AGENT_HARNESS_ROUTE__"
 _PROFILE_FIELDS = {
     "ADAPTER": "adapter",
     "MODEL": "model",
@@ -165,11 +166,16 @@ def _validated_headers_env(raw: Mapping[str, str]) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class HarnessConfig:
-    """Validated application configuration."""
+    """Validated application configuration.
+
+    ``routes`` map capability names (e.g. ``fast``, ``strong``) to profile
+    names; anywhere a profile name is accepted, a route name may be used.
+    """
 
     models: Mapping[str, ModelProfile]
     default_model_profile: str
     coding: CodingAgentConfig = field(default_factory=CodingAgentConfig)
+    routes: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         copied = dict(self.models)
@@ -178,7 +184,16 @@ class HarnessConfig:
         for name in copied:
             if not _PROFILE_NAME.fullmatch(name):
                 raise ConfigError(f"invalid model profile name: {name!r}")
-        if self.default_model_profile not in copied:
+        routes = dict(self.routes)
+        for route, target in routes.items():
+            if not isinstance(route, str) or not _PROFILE_NAME.fullmatch(route):
+                raise ConfigError(f"invalid route name: {route!r}")
+            if route in copied:
+                raise ConfigError(f"route {route!r} conflicts with a model profile name")
+            if target not in copied:
+                raise ConfigError(f"route {route!r} points to unknown profile {target!r}")
+        object.__setattr__(self, "routes", MappingProxyType(routes))
+        if self.default_model_profile not in copied and self.default_model_profile not in routes:
             raise ConfigError(
                 f"default model profile {self.default_model_profile!r} is not configured"
             )
@@ -195,11 +210,22 @@ class HarnessConfig:
     def model_profile(self, name: str | None = None) -> ModelProfile:
         """Return a named profile, or the configured default."""
 
+        return self.models[self.resolve_model_name(name)]
+
+    def resolve_model_name(self, name: str | None = None) -> str:
+        """Resolve a profile or route name (or the default) to a profile name."""
+
         selected = name or self.default_model_profile
-        try:
-            return self.models[selected]
-        except KeyError as exc:
-            raise ConfigError(f"unknown model profile: {selected!r}") from exc
+        if selected in self.models:
+            return selected
+        if selected in self.routes:
+            return self.routes[selected]
+        raise ConfigError(f"unknown model profile or route: {selected!r}")
+
+    def fallback_profiles(self, name: str) -> tuple[str, ...]:
+        """The ordered fallback chain configured for a profile."""
+
+        return self.models[name].fallback
 
 
 def load_config(
@@ -258,10 +284,17 @@ def load_config(
         coding = parse_coding_config(coding_raw)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    raw_routes = dict(raw.get("routes", {}) or {})
+    if not all(isinstance(value, str) for value in raw_routes.values()):
+        raise ConfigError("routes must map route names to profile name strings")
+    for key, value in env.items():
+        if key.startswith(_ROUTE_ENV_PREFIX) and key != _ROUTE_ENV_PREFIX:
+            raw_routes[key[len(_ROUTE_ENV_PREFIX) :].lower()] = value
     return HarnessConfig(
         models=profiles,
         default_model_profile=default,
         coding=coding,
+        routes=raw_routes,
     )
 
 

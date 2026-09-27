@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
+from dataclasses import replace
 from typing import Any, Awaitable, Callable, ClassVar, Mapping
 
 from agent_harness.config import ModelProfile
@@ -19,6 +21,7 @@ from agent_harness.domain import (
     Usage,
 )
 
+from .cost import estimate_cost_usd
 from .errors import (
     AuthenticationError,
     MalformedResponseError,
@@ -58,6 +61,7 @@ class OpenAICompatibleClient:
         environ: Mapping[str, str] | None = None,
         sleep: Sleep = asyncio.sleep,
         preserve_raw_response: bool = False,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if profile.api_mode != "openai" and not self.supports_native_api:
             raise ModelConfigurationError(
@@ -69,6 +73,7 @@ class OpenAICompatibleClient:
         self._sleep = sleep
         self._preserve_raw_response = preserve_raw_response
         self._warm = False
+        self._monotonic = monotonic
 
     @property
     def profile(self) -> ModelProfile:
@@ -85,37 +90,43 @@ class OpenAICompatibleClient:
 
         timeout = self._effective_timeout(request)
         attempts = self._profile.max_retries + 1
+        started = self._monotonic()
         for attempt in range(attempts):
+            cause: BaseException | None = None
             try:
                 async with asyncio.timeout(timeout):
                     response = await self._transport.post_json(url, payload, headers, timeout)
                 self._raise_for_status(response)
                 normalized = self._normalize(response)
                 self._warm = True
-                return normalized
-            except (ThrottlingError, RetryableProviderError, ModelTimeoutError):
-                if attempt + 1 >= attempts:
-                    raise
-                delay = self._profile.retry_backoff_seconds * (2**attempt)
-                if delay:
-                    await self._sleep(delay)
+                return self._with_cost(normalized, self._monotonic() - started)
+            except (ThrottlingError, RetryableProviderError, ModelTimeoutError) as exc:
+                error: RetryableModelError = exc
             except (HttpTransportTimeout, TimeoutError) as exc:
-                error: RetryableModelError = ModelTimeoutError(
-                    f"model request timed out: {exc}"
-                )
-                if attempt + 1 >= attempts:
-                    raise error from exc
-                delay = self._profile.retry_backoff_seconds * (2**attempt)
-                if delay:
-                    await self._sleep(delay)
+                error, cause = ModelTimeoutError(f"model request timed out: {exc}"), exc
             except HttpTransportError as exc:
-                error = RetryableProviderError(f"model transport failed: {exc}")
-                if attempt + 1 >= attempts:
-                    raise error from exc
-                delay = self._profile.retry_backoff_seconds * (2**attempt)
-                if delay:
-                    await self._sleep(delay)
+                error, cause = RetryableProviderError(f"model transport failed: {exc}"), exc
+            if attempt + 1 >= attempts:
+                # Tell the orchestrator how many provider requests this consumed.
+                error.provider_attempts = attempt + 1
+                if cause is None:
+                    raise error
+                raise error from cause
+            delay = self._profile.retry_backoff_seconds * (2**attempt)
+            if delay:
+                await self._sleep(delay)
         raise AssertionError("unreachable retry loop")
+
+    def _with_cost(self, response: ModelResponse, latency_seconds: float) -> ModelResponse:
+        if response.usage.cost_usd is not None:
+            return response
+        cost = estimate_cost_usd(self._profile.pricing, response.usage, latency_seconds)
+        if cost is None:
+            return response
+        metadata = dict(response.metadata)
+        metadata["cost_estimated"] = True
+        metadata["latency_seconds"] = round(latency_seconds, 3)
+        return replace(response, usage=replace(response.usage, cost_usd=cost), metadata=metadata)
 
     def request_headers(self, *, json_body: bool = True) -> dict[str, str]:
         """Resolve request headers, reading credentials from the environment now.
