@@ -11,9 +11,13 @@ from .errors import (
     ThrottlingError,
 )
 from .fake import ScriptedModelClient
-from .gateway import AdapterFactory, ModelGateway
+from .gateway import BUILTIN_ADAPTERS, AdapterFactory, ModelGateway
+from .llama_cpp import LlamaCppClient
+from .modal import ModalClient
+from .ollama import OllamaClient
 from .openai_compatible import OpenAICompatibleClient
 from .transport import (
+    HttpGetTransport,
     HttpResponse,
     HttpTransport,
     HttpTransportError,
@@ -24,15 +28,20 @@ from .transport import (
 __all__ = [
     "AdapterFactory",
     "AuthenticationError",
+    "BUILTIN_ADAPTERS",
+    "HttpGetTransport",
     "HttpResponse",
     "HttpTransport",
     "HttpTransportError",
     "HttpTransportTimeout",
+    "LlamaCppClient",
     "MalformedResponseError",
+    "ModalClient",
     "ModelConfigurationError",
     "ModelErrorCategory",
     "ModelGateway",
     "ModelTimeoutError",
+    "OllamaClient",
     "OpenAICompatibleClient",
     "ProviderError",
     "RetryableProviderError",

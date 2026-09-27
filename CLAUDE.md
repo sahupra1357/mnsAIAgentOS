@@ -86,6 +86,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   orchestrator also retries `max_model_attempts` (default 3). A timeout can therefore
   produce up to `(max_retries+1) × 3` HTTP calls. Consider this when setting Modal
   cold-start timeouts.
+- **Model timeouts (fixed in Phase 1).** `ModelRequest.timeout_seconds` now defaults to
+  `None`, which means "use the profile's timeout". Previously a hidden 60 s default
+  capped every profile.
 - **Cost budget is inert.** No adapter sets `Usage.cost_usd`, so `max_cost_usd` never
   triggers. Local models are free; Modal is billed per GPU-second.
 - **No context-window control.** Every model call sends the full message history.
@@ -105,7 +108,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
 1. Commit `CLAUDE.md`, `.claude/`, and the new skills. Remove their lines from
    `.git/info/exclude`, and add `.mypy_cache/`/`.ruff_cache/` to `.gitignore`.
 
-**Phase 1 – Model sources** [llm-providers, model-gateway]
+**Phase 1 – Model sources** [llm-providers, model-gateway] — implemented on `phase-1-model-sources`
 1. Add optional `ModelProfile` fields with defaults: `headers_env`, `context_window`,
    `cold_start_timeout_seconds`, `pricing`, `fallback`, `server` (Modal only).
 2. Refactor `OpenAICompatibleClient` so subclasses can add headers and normalization

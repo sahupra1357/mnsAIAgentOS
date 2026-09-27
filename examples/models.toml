@@ -27,6 +27,59 @@ retry_backoff_seconds = 0.25
 [models.hosted.parameters]
 temperature = 0.2
 
+# --- Ollama -----------------------------------------------------------------
+# `ollama serve`, then `ollama pull qwen2.5-coder:7b`. The OpenAI-compatible
+# endpoint cannot set the context length; either start the server with
+# OLLAMA_CONTEXT_LENGTH=8192 or set api_mode = "native" so context_window is
+# sent as options.num_ctx.
+[models.ollama]
+adapter = "ollama"
+model = "qwen2.5-coder:7b"
+endpoint = "http://127.0.0.1:11434/v1"
+api_mode = "openai"
+context_window = 8192
+timeout_seconds = 180
+max_retries = 1
+
+[models.ollama.parameters]
+temperature = 0.2
+
+# --- llama.cpp ----------------------------------------------------------------
+# llama-server -m model.gguf --jinja -c 16384 --port 8080
+# --jinja is required for tool calls. `model` is a label; the server runs one model.
+[models.llamacpp]
+adapter = "llama_cpp"
+model = "local-gguf"
+endpoint = "http://127.0.0.1:8080/v1"
+context_window = 16384
+timeout_seconds = 180
+max_retries = 1
+
+[models.llamacpp.parameters]
+temperature = 0.2
+
+# --- Modal (vLLM or SGLang) ----------------------------------------------------
+# Deploy with examples/modal/vllm_server.py or examples/modal/sglang_server.py.
+# Both auth layers are required: the server's bearer key and Modal proxy auth.
+# The first request after scale-to-zero uses cold_start_timeout_seconds.
+[models.modal]
+adapter = "modal"
+server = "vllm"            # or "sglang"
+model = "Qwen/Qwen2.5-7B-Instruct"
+endpoint = "https://WORKSPACE--agent-harness-vllm-serve.modal.run/v1"
+api_key_env = "MODAL_LLM_API_KEY"
+timeout_seconds = 120
+cold_start_timeout_seconds = 600
+max_retries = 1
+context_window = 32768
+
+[models.modal.headers_env]
+Modal-Key = "MODAL_PROXY_TOKEN_ID"
+Modal-Secret = "MODAL_PROXY_TOKEN_SECRET"
+
+[models.modal.parameters]
+temperature = 0.2
+
 # Enable repository coding tools by setting enabled = true. The default Docker
 # backend has no network and pauses before writes, commands, commits, or PRs.
 [coding]
