@@ -139,8 +139,11 @@ Two routes. Prefer the first; it needs no harness code:
    OpenAI-compatible endpoint, so use a normal `adapter = "openai_compatible"` profile
    pointing at it (`api_key_env` = the proxy master/virtual key). LiteLLM then handles
    Anthropic, Gemini, Bedrock, Azure, Vertex, Cohere, and others.
-2. **`adapter = "litellm"`** (Phase 5): in-process `litellm.acompletion`, behind an
-   optional `[litellm]` extra and imported lazily so the core stays stdlib-only. Rules:
+2. **`adapter = "litellm"`** (implemented in Phase 5, `model_gateway/litellm_client.py`):
+   in-process `litellm.acompletion`, behind an optional `[litellm]` extra and imported
+   lazily so the core stays stdlib-only. It is opt-in per profile, and `endpoint` is
+   optional for these profiles. `supports_http_probes = False`, so `doctor` skips the
+   health and model-list checks. Rules:
    pass `num_retries=0` (the harness owns retries); map LiteLLM exceptions onto
    `ThrottlingError`/`ModelTimeoutError`/`AuthenticationError`/etc.; take `cost_usd`
    from LiteLLM's computed response cost when present; normalize into `ModelResponse`

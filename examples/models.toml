@@ -92,6 +92,13 @@ temperature = 0.2
 # [models.modal.pricing]
 # gpu_usd_per_second = 0.0003
 
+# --- LiteLLM (optional; pip install -e '.[litellm]') ------------------------------
+# Only profiles with adapter = "litellm" use LiteLLM; everything else stays direct.
+# [models.claude]
+# adapter = "litellm"
+# model = "anthropic/claude-sonnet-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+
 # Enable repository coding tools by setting enabled = true. The default Docker
 # backend has no network and pauses before writes, commands, commits, or PRs.
 [coding]

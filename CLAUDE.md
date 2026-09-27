@@ -188,7 +188,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
 10. Add an optional `Usage.cached_input_tokens` field (default `None`), persisted in
     events, plus a per-run and per-profile cache-hit-rate metric in telemetry.
 
-**Phase 5 – Optional LiteLLM SDK adapter** [llm-providers]
+**Phase 5 – Optional LiteLLM SDK adapter** [llm-providers] — implemented on `phase-5-litellm`
 1. Add `adapter = "litellm"` behind an optional `[litellm]` extra, imported lazily, with
    `num_retries=0` (the harness owns retries) and cost taken from LiteLLM's response
    cost when present.
