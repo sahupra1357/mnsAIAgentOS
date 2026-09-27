@@ -120,6 +120,50 @@ AGENT_HARNESS_MODEL__<PROFILE>__PARAMETERS
 
 `PARAMETERS` is a JSON object. Environment profile names are normalized to lowercase.
 
+## Ollama, llama.cpp, and Modal
+
+Built-in adapters: `openai_compatible`, `ollama`, `llama_cpp`, and `modal`.
+`examples/models.toml` has a working profile for each.
+
+| Adapter     | Server                                  | Notes                                                                                     |
+|-------------|-----------------------------------------|-------------------------------------------------------------------------------------------|
+| `ollama`    | `ollama serve`                          | Handles tool calls without IDs. `api_mode = "native"` uses `/api/chat` and sends `context_window` as `num_ctx`. |
+| `llama_cpp` | `llama-server -m model.gguf --jinja -c N` | `--jinja` is required for tool calls. 503 while loading is retried.                        |
+| `modal`     | vLLM or SGLang on Modal (`server = "vllm"` or `"sglang"`) | Requires both the server bearer key (`api_key_env`) and Modal proxy auth (`headers_env` for `Modal-Key` and `Modal-Secret`). The first request uses `cold_start_timeout_seconds` (default 600). |
+
+Deploy scripts for Modal are in `examples/modal/`. They keep prefix caching on, turn
+on cached-token reporting, and set container options that keep a run on one warm KV
+cache.
+
+Extra profile fields (all optional):
+
+```toml
+headers_env = { X-Header = "ENV_VAR_NAME" }  # values read from the environment per request
+context_window = 32768
+cold_start_timeout_seconds = 600
+server = "vllm"            # modal: vllm | sglang
+api_mode = "openai"        # ollama: openai | native
+pricing = { gpu_usd_per_second = 0.0 }       # validated now, used by cost estimation later
+fallback = ["llamacpp"]    # validated now, used by fallback routing later
+```
+
+Check a profile against a live server:
+
+```bash
+.venv/bin/agent-harness doctor --config models.toml --model-profile modal
+```
+
+`doctor` checks, in order:
+1. The credential variables are set.
+2. The server's health endpoint responds.
+3. The configured model is listed.
+4. A plain completion works.
+5. A structured tool call works. A tool call returned as plain text means the server's
+   tool-call parser is missing.
+6. A repeated prompt is served from the prefix cache.
+
+It exits 1 if any check fails.
+
 ## Programmatic Composition
 
 The default application uses SQLite, the configured model gateway, and the example tools:

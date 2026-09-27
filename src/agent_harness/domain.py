@@ -127,7 +127,8 @@ class ModelRequest:
     tools: tuple[ToolSpec, ...] = ()
     temperature: float | None = None
     max_output_tokens: int | None = None
-    timeout_seconds: float = 60.0
+    # None defers to the selected model profile's configured timeout.
+    timeout_seconds: float | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
 
 

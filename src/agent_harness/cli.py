@@ -13,6 +13,8 @@ from .application import HarnessApplication, build_application
 from .coding import CODING_AGENT_SYSTEM_PROMPT
 from .config import ConfigError, load_config
 from .domain import HarnessError, Message, Role, RunBudget, RunRecord
+from .model_gateway import ModelGateway, StdlibHttpTransport
+from .model_gateway.diagnostics import CheckStatus, diagnose
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -48,6 +50,15 @@ def _parser() -> argparse.ArgumentParser:
     decision.add_argument("--allow", action="store_true", help="allow the pending call")
     decision.add_argument("--deny", action="store_true", help="deny the pending call")
     approve.add_argument("--call-id", help="call ID when more than one approval is pending")
+
+    doctor = subcommands.add_parser(
+        "doctor",
+        help="check that a model profile's server is reachable and usable (live requests)",
+    )
+    doctor.add_argument("--config", type=Path, required=True)
+    doctor.add_argument("--model-profile", help="named profile; defaults to the config value")
+    doctor.add_argument("--skip-tools", action="store_true", help="skip the tool-call check")
+    doctor.add_argument("--skip-cache", action="store_true", help="skip the prefix-cache check")
     return parser
 
 
@@ -146,6 +157,24 @@ def _list_profiles(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _doctor_command(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    profile = args.model_profile or config.default_model_profile
+    transport = StdlibHttpTransport()
+    client = ModelGateway(config, transport=transport).resolve(profile)
+    selected = config.model_profile(profile)
+    print(f"profile={profile} adapter={selected.adapter} model={selected.model}")
+    checks = await diagnose(
+        client,
+        transport=transport,
+        check_tools=not args.skip_tools,
+        check_cache=not args.skip_cache,
+    )
+    for check in checks:
+        print(f"[{check.status.value.upper():>4}] {check.name}: {check.detail}")
+    return 1 if any(check.status is CheckStatus.FAIL for check in checks) else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -157,6 +186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _list_profiles(args)
         if args.command == "approve":
             return asyncio.run(_approve_command(args))
+        if args.command == "doctor":
+            return asyncio.run(_doctor_command(args))
     except (ConfigError, HarnessError, KeyError, ValueError) as exc:
         print(f"agent-harness: {exc}", file=sys.stderr)
         return 2

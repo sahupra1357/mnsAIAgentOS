@@ -9,11 +9,29 @@ from agent_harness.config import HarnessConfig, ModelProfile
 from agent_harness.domain import ModelClient
 
 from .errors import ModelConfigurationError
+from .llama_cpp import LlamaCppClient
+from .modal import ModalClient
+from .ollama import OllamaClient
 from .openai_compatible import OpenAICompatibleClient
 from .transport import HttpTransport
 
 
 AdapterFactory = Callable[[ModelProfile], ModelClient]
+
+BUILTIN_ADAPTERS: Mapping[str, type[OpenAICompatibleClient]] = {
+    "openai_compatible": OpenAICompatibleClient,
+    "ollama": OllamaClient,
+    "llama_cpp": LlamaCppClient,
+    "modal": ModalClient,
+}
+
+
+def _http_factory(
+    client_type: type[OpenAICompatibleClient],
+    transport: HttpTransport | None,
+    environ: Mapping[str, str] | None,
+) -> AdapterFactory:
+    return lambda profile: client_type(profile, transport=transport, environ=environ)
 
 
 class ModelGateway:
@@ -28,9 +46,8 @@ class ModelGateway:
         environ: Mapping[str, str] | None = None,
     ) -> None:
         defaults: dict[str, AdapterFactory] = {
-            "openai_compatible": lambda profile: OpenAICompatibleClient(
-                profile, transport=transport, environ=environ
-            )
+            name: _http_factory(client_type, transport, environ)
+            for name, client_type in BUILTIN_ADAPTERS.items()
         }
         if adapter_factories:
             defaults.update(adapter_factories)

@@ -98,7 +98,7 @@ branch on a provider name. Read `skills/model-gateway/SKILL.md` as well.
 - `doctor` checks caching by sending an identical prompt twice and reporting cached tokens.
 - The harness side (a fixed prefix) is covered in `skills/context-management/SKILL.md`.
 
-## Profile shape (target)
+## Profile shape (implemented; see `examples/models.toml`)
 
 ```toml
 [models.ollama]
@@ -119,12 +119,12 @@ adapter = "modal"
 server = "vllm"            # or "sglang"
 model = "Qwen/Qwen2.5-7B-Instruct"
 endpoint = "https://WORKSPACE--APP-serve.modal.run/v1"
-api_key_env = "MODAL_VLLM_API_KEY"
+api_key_env = "MODAL_LLM_API_KEY"
 timeout_seconds = 300
 context_window = 32768
 [models.modal.headers_env]
-Modal-Key = "MODAL_PROXY_KEY"
-Modal-Secret = "MODAL_PROXY_SECRET"
+Modal-Key = "MODAL_PROXY_TOKEN_ID"
+Modal-Secret = "MODAL_PROXY_TOKEN_SECRET"
 [models.modal.pricing]
 gpu_usd_per_second = 0.0
 ```
@@ -149,6 +149,19 @@ Two routes. Prefer the first; it needs no harness code:
 Caveats: translation is lossy for provider-specific features (prompt caching,
 extended thinking, citations). Tool calling still depends on the model. Neither route
 must appear in the orchestrator.
+
+## Where it lives
+
+- `model_gateway/openai_compatible.py`: base client and hooks (`request_headers`,
+  `api_base_url`, `health_url`, `models_url`, `_preprocess_response`,
+  `_cached_input_tokens`, `_cold_start_timeout`).
+- `model_gateway/ollama.py`, `llama_cpp.py`, `modal.py`: provider subclasses.
+- `model_gateway/diagnostics.py`: `diagnose()`, used by `agent-harness doctor`.
+- `examples/modal/vllm_server.py`, `examples/modal/sglang_server.py`: deploy scripts.
+- `tests/test_providers.py`: fake-transport tests for all of the above.
+
+Cached-token counts are currently exposed as `ModelResponse.metadata["cached_input_tokens"]`.
+Phase 4 promotes this to `Usage.cached_input_tokens`.
 
 ## Testing
 

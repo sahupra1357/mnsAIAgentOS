@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, ClassVar, Mapping
 
 from agent_harness.config import ModelProfile
 from agent_harness.domain import (
@@ -41,7 +41,14 @@ Sleep = Callable[[float], Awaitable[None]]
 
 
 class OpenAICompatibleClient:
-    """Normalized model client for ``/chat/completions`` APIs."""
+    """Normalized model client for ``/chat/completions`` APIs.
+
+    Provider adapters subclass this and override the small hooks below
+    (URLs, payload, response preprocessing, cold-start allowance) rather than
+    re-implementing retries, credential handling, or normalization.
+    """
+
+    supports_native_api: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -52,37 +59,40 @@ class OpenAICompatibleClient:
         sleep: Sleep = asyncio.sleep,
         preserve_raw_response: bool = False,
     ) -> None:
+        if profile.api_mode != "openai" and not self.supports_native_api:
+            raise ModelConfigurationError(
+                f"adapter {profile.adapter!r} does not support api_mode {profile.api_mode!r}"
+            )
         self._profile = profile
         self._transport = transport or StdlibHttpTransport()
         self._environ = os.environ if environ is None else environ
         self._sleep = sleep
         self._preserve_raw_response = preserve_raw_response
+        self._warm = False
+
+    @property
+    def profile(self) -> ModelProfile:
+        return self._profile
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        if request.timeout_seconds <= 0:
+        if request.timeout_seconds is not None and request.timeout_seconds <= 0:
             raise ModelConfigurationError("model request timeout_seconds must be greater than zero")
         if request.max_output_tokens is not None and request.max_output_tokens <= 0:
             raise ModelConfigurationError("model request max_output_tokens must be greater than zero")
         payload = self._build_payload(request)
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if self._profile.api_key_env:
-            api_key = self._environ.get(self._profile.api_key_env)
-            if not api_key:
-                raise ModelConfigurationError(
-                    f"credential environment variable {self._profile.api_key_env!r} is not set"
-                )
-            headers["Authorization"] = f"Bearer {api_key}"
+        headers = self.request_headers()
+        url = self._completion_url()
 
-        timeout = min(request.timeout_seconds, self._profile.timeout_seconds)
+        timeout = self._effective_timeout(request)
         attempts = self._profile.max_retries + 1
         for attempt in range(attempts):
             try:
                 async with asyncio.timeout(timeout):
-                    response = await self._transport.post_json(
-                        self._completion_url(), payload, headers, timeout
-                    )
+                    response = await self._transport.post_json(url, payload, headers, timeout)
                 self._raise_for_status(response)
-                return self._normalize(response)
+                normalized = self._normalize(response)
+                self._warm = True
+                return normalized
             except (ThrottlingError, RetryableProviderError, ModelTimeoutError):
                 if attempt + 1 >= attempts:
                     raise
@@ -107,11 +117,82 @@ class OpenAICompatibleClient:
                     await self._sleep(delay)
         raise AssertionError("unreachable retry loop")
 
+    def request_headers(self, *, json_body: bool = True) -> dict[str, str]:
+        """Resolve request headers, reading credentials from the environment now.
+
+        Error messages name the missing variable, never a credential value.
+        """
+
+        headers = {"Accept": "application/json"}
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        if self._profile.api_key_env:
+            api_key = self._environ.get(self._profile.api_key_env)
+            if not api_key:
+                raise ModelConfigurationError(
+                    f"credential environment variable {self._profile.api_key_env!r} is not set"
+                )
+            headers["Authorization"] = f"Bearer {api_key}"
+        for header, env_name in self._profile.headers_env.items():
+            value = self._environ.get(env_name)
+            if not value:
+                raise ModelConfigurationError(
+                    f"credential environment variable {env_name!r} for header "
+                    f"{header!r} is not set"
+                )
+            headers[header] = value
+        return headers
+
+    def api_base_url(self) -> str:
+        """The OpenAI-compatible base URL, normally ending in ``/v1``."""
+
+        endpoint = self._profile.endpoint.rstrip("/")
+        suffix = "/chat/completions"
+        if endpoint.endswith(suffix):
+            return endpoint[: -len(suffix)]
+        return endpoint
+
+    def health_url(self) -> str:
+        """A cheap GET that succeeds once the server can serve requests."""
+
+        return f"{self.api_base_url()}/models"
+
+    def models_url(self) -> str:
+        """A GET returning an OpenAI-style ``{"data": [{"id": ...}]}`` list."""
+
+        return f"{self.api_base_url()}/models"
+
+    def _effective_timeout(self, request: ModelRequest) -> float:
+        timeout = self._profile.timeout_seconds
+        if request.timeout_seconds is not None:
+            timeout = min(timeout, request.timeout_seconds)
+        cold_start = self._cold_start_timeout()
+        if not self._warm and cold_start is not None:
+            timeout = max(timeout, cold_start)
+        return timeout
+
+    def _cold_start_timeout(self) -> float | None:
+        return self._profile.cold_start_timeout_seconds
+
     def _completion_url(self) -> str:
         endpoint = self._profile.endpoint.rstrip("/")
         if endpoint.endswith("/chat/completions"):
             return endpoint
         return f"{endpoint}/chat/completions"
+
+    def _preprocess_response(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Repair known provider quirks before strict validation."""
+
+        return raw
+
+    def _cached_input_tokens(self, raw: Mapping[str, Any]) -> int | None:
+        usage = raw.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        details = usage.get("prompt_tokens_details")
+        if not isinstance(details, dict):
+            return None
+        return _lenient_nonnegative_int(details.get("cached_tokens"))
 
     def _build_payload(self, request: ModelRequest) -> dict[str, object]:
         payload: dict[str, object] = dict(self._profile.parameters)
@@ -182,6 +263,7 @@ class OpenAICompatibleClient:
             raw = json.loads(response.body)
             if not isinstance(raw, dict):
                 raise ValueError("root is not an object")
+            raw = self._preprocess_response(raw)
             choices = raw.get("choices")
             if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
                 raise ValueError("choices must contain at least one object")
@@ -205,6 +287,9 @@ class OpenAICompatibleClient:
         provider_model = raw.get("model")
         if isinstance(provider_model, str):
             metadata["provider_model"] = provider_model
+        cached_input_tokens = self._cached_input_tokens(raw)
+        if cached_input_tokens is not None:
+            metadata["cached_input_tokens"] = cached_input_tokens
         if self._preserve_raw_response:
             metadata["raw_response"] = raw
         return ModelResponse(
@@ -296,6 +381,12 @@ def _optional_nonnegative_int(value: Any, name: str) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
     return value
+
+
+def _lenient_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:

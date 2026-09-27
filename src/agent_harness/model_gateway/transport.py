@@ -27,6 +27,17 @@ class HttpTransport(Protocol):
     ) -> HttpResponse: ...
 
 
+class HttpGetTransport(Protocol):
+    """Optional capability used by health checks and diagnostics."""
+
+    async def get(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        timeout_seconds: float,
+    ) -> HttpResponse: ...
+
+
 class HttpTransportError(Exception):
     """The HTTP exchange failed before receiving a response."""
 
@@ -49,6 +60,14 @@ class StdlibHttpTransport:
             self._post_json, url, payload, headers, timeout_seconds
         )
 
+    async def get(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        timeout_seconds: float,
+    ) -> HttpResponse:
+        return await asyncio.to_thread(self._send, url, None, headers, timeout_seconds, "GET")
+
     @staticmethod
     def _post_json(
         url: str,
@@ -57,7 +76,17 @@ class StdlibHttpTransport:
         timeout_seconds: float,
     ) -> HttpResponse:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        http_request = request.Request(url, data=body, headers=dict(headers), method="POST")
+        return StdlibHttpTransport._send(url, body, headers, timeout_seconds, "POST")
+
+    @staticmethod
+    def _send(
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        timeout_seconds: float,
+        method: str,
+    ) -> HttpResponse:
+        http_request = request.Request(url, data=body, headers=dict(headers), method=method)
         try:
             with request.urlopen(http_request, timeout=timeout_seconds) as response:
                 return HttpResponse(
