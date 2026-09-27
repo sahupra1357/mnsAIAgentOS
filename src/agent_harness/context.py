@@ -1,0 +1,248 @@
+"""Context-window management: bounded, deterministic, prefix-cache-friendly views.
+
+``BudgetedContextBuilder`` never mutates stored messages. It groups history into
+units that must stay together (an assistant tool-call message plus its tool
+results), then replays the history unit by unit with hysteresis: when the
+estimate crosses a high-water mark, the oldest units are omitted until it falls
+to a low-water mark. Between trims every view extends the previous one, so
+self-hosted servers keep reusing their KV cache, and because the replay depends
+only on the messages, a resumed run rebuilds exactly the same view.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+
+from agent_harness.domain import (
+    ContextView,
+    ContextWindowExceededError,
+    Message,
+    Role,
+    ToolSpec,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ContextLimits:
+    """Token limits for one model profile."""
+
+    context_window: int
+    output_reserve_tokens: int = 1024
+
+    def __post_init__(self) -> None:
+        if self.context_window <= 0:
+            raise ValueError("context_window must be greater than zero")
+        if self.output_reserve_tokens < 0:
+            raise ValueError("output_reserve_tokens must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextPolicy:
+    """Estimation and trimming parameters.
+
+    The character-based estimate is deliberately conservative (3.5 characters
+    per token undercounts characters for most tokenizers) and is not calibrated
+    from reported usage: calibration would change past trim decisions and break
+    both resume determinism and prefix stability.
+    """
+
+    high_water_ratio: float = 0.85
+    low_water_ratio: float = 0.60
+    chars_per_token: float = 3.5
+    message_overhead_tokens: int = 8
+    max_tool_output_chars: int | None = 16_000
+
+    def __post_init__(self) -> None:
+        if not 0 < self.low_water_ratio < self.high_water_ratio <= 1:
+            raise ValueError("require 0 < low_water_ratio < high_water_ratio <= 1")
+        if self.chars_per_token <= 0:
+            raise ValueError("chars_per_token must be greater than zero")
+        if self.message_overhead_tokens < 0:
+            raise ValueError("message_overhead_tokens must not be negative")
+        if self.max_tool_output_chars is not None and self.max_tool_output_chars < 200:
+            raise ValueError("max_tool_output_chars must be at least 200")
+
+
+class FullHistoryContextBuilder:
+    """Send the complete history unchanged (the default)."""
+
+    def build(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec],
+        *,
+        model_profile: str,
+    ) -> ContextView:
+        return ContextView(messages=tuple(messages))
+
+
+LimitsLookup = Callable[[str], ContextLimits | None]
+
+
+class BudgetedContextBuilder:
+    """Fit history into each profile's context window.
+
+    Profiles without limits get the full, unmodified history.
+    """
+
+    def __init__(
+        self,
+        limits: Mapping[str, ContextLimits] | LimitsLookup,
+        *,
+        policy: ContextPolicy | None = None,
+    ) -> None:
+        if callable(limits):
+            self._lookup: LimitsLookup = limits
+        else:
+            table = dict(limits)
+            self._lookup = table.get
+        self._policy = policy or ContextPolicy()
+
+    def build(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec],
+        *,
+        model_profile: str,
+    ) -> ContextView:
+        limits = self._lookup(model_profile)
+        if limits is None:
+            return ContextView(messages=tuple(messages))
+
+        prepared: list[Message] = []
+        trimmed_outputs = 0
+        for message in messages:
+            shortened = self._trim_tool_output(message)
+            trimmed_outputs += shortened is not message
+            prepared.append(shortened)
+
+        head_end = _pinned_head_end(prepared)
+        head = prepared[:head_end]
+        units = _group_units(prepared[head_end:])
+
+        budget = limits.context_window - limits.output_reserve_tokens - self._tools_tokens(tools)
+        head_tokens = sum(self._message_tokens(message) for message in head)
+        if budget <= 0 or head_tokens > budget:
+            raise ContextWindowExceededError(
+                f"context window {limits.context_window} cannot hold the output reserve, "
+                f"tool definitions, and pinned instructions for profile {model_profile!r}"
+            )
+        high_water = math.floor(budget * self._policy.high_water_ratio)
+        low_water = math.floor(budget * self._policy.low_water_ratio)
+
+        unit_tokens = [sum(self._message_tokens(m) for m in unit) for unit in units]
+        total = head_tokens
+        cut = 0
+        for index, tokens in enumerate(unit_tokens):
+            total += tokens
+            if total > high_water:
+                # Never omit the newest unit: the model must see the latest turn.
+                while cut < index and total > low_water:
+                    total -= unit_tokens[cut]
+                    cut += 1
+
+        omitted = sum(len(unit) for unit in units[:cut])
+        if omitted and head:
+            notice = (
+                f"\n\n[Context note: {omitted} earlier messages were omitted "
+                "to fit the model's context window.]"
+            )
+            head[-1] = replace(head[-1], content=head[-1].content + notice)
+            total += self._text_tokens(notice)
+        if total > budget:
+            raise ContextWindowExceededError(
+                f"estimated {total} tokens exceed the {budget}-token input budget for "
+                f"profile {model_profile!r} even after omitting older turns"
+            )
+
+        kept = [message for unit in units[cut:] for message in unit]
+        return ContextView(
+            messages=tuple(head + kept),
+            estimated_tokens=total,
+            omitted_messages=omitted,
+            trimmed_tool_outputs=trimmed_outputs,
+        )
+
+    def _trim_tool_output(self, message: Message) -> Message:
+        limit = self._policy.max_tool_output_chars
+        if limit is None or message.role is not Role.TOOL or len(message.content) <= limit:
+            return message
+        removed = len(message.content) - limit
+        marker = f"\n[... {removed} characters truncated ...]\n"
+        keep_head = limit // 2
+        keep_tail = limit - keep_head
+        content = message.content[:keep_head] + marker + message.content[-keep_tail:]
+        return replace(message, content=content)
+
+    def _text_tokens(self, text: str) -> int:
+        return math.ceil(len(text) / self._policy.chars_per_token)
+
+    def _message_tokens(self, message: Message) -> int:
+        tokens = self._policy.message_overhead_tokens + self._text_tokens(message.content)
+        for call in message.tool_calls:
+            arguments = json.dumps(call.arguments, separators=(",", ":"), sort_keys=True)
+            tokens += self._text_tokens(call.name) + self._text_tokens(arguments)
+        return tokens
+
+    def _tools_tokens(self, tools: Sequence[ToolSpec]) -> int:
+        if not tools:
+            return 0
+        serialized = json.dumps(
+            [
+                {"name": t.name, "description": t.description, "parameters": t.input_schema}
+                for t in tools
+            ],
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return self._text_tokens(serialized)
+
+
+def _pinned_head_end(messages: Sequence[Message]) -> int:
+    """Index after the leading system messages and the first user message."""
+
+    for index, message in enumerate(messages):
+        if message.role is Role.USER:
+            return index + 1
+        if message.role is not Role.SYSTEM:
+            return index
+    return len(messages)
+
+
+def _group_units(messages: Sequence[Message]) -> list[list[Message]]:
+    """Group messages so a tool-call message is never split from its results."""
+
+    units: list[list[Message]] = []
+    for message in messages:
+        # Tool results never start a unit, so a cut can never orphan one.
+        if message.role is Role.TOOL and units:
+            units[-1].append(message)
+        else:
+            units.append([message])
+    return units
+
+
+def limits_from_profiles(
+    profiles: Mapping[str, object],
+    *,
+    default_output_reserve_tokens: int = 1024,
+) -> dict[str, ContextLimits]:
+    """Derive limits from model profiles that declare ``context_window``.
+
+    The output reserve is the profile's ``parameters.max_tokens`` when set.
+    """
+
+    limits: dict[str, ContextLimits] = {}
+    for name, profile in profiles.items():
+        window = getattr(profile, "context_window", None)
+        if window is None:
+            continue
+        parameters = getattr(profile, "parameters", {}) or {}
+        reserve = parameters.get("max_tokens")
+        if not isinstance(reserve, int) or isinstance(reserve, bool) or reserve <= 0:
+            reserve = default_output_reserve_tokens
+        limits[name] = ContextLimits(context_window=window, output_reserve_tokens=reserve)
+    return limits

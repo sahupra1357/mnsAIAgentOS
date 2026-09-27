@@ -91,9 +91,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   capped every profile.
 - **Cost budget is inert.** No adapter sets `Usage.cost_usd`, so `max_cost_usd` never
   triggers. Local models are free; Modal is billed per GPU-second.
-- **No context-window control.** Every model call sends the full message history.
-  Local models (Ollama especially) have small default contexts and silently truncate.
-  See `skills/context-management/SKILL.md`.
+- **Context window (added in Phase 2).** Only profiles with `context_window` are trimmed;
+  others still send the full history. For Ollama's OpenAI-compatible mode, the server's
+  own context (`OLLAMA_CONTEXT_LENGTH`) must also be at least that large, or the server
+  truncates silently. See `skills/context-management/SKILL.md`.
 - `ModelResolver.resolve` is synchronous; `Execution.md` shows `await` but the code does not.
 - Tool idempotency results are cached in-process only (`ToolRuntime`), so they do not
   survive a restart.
@@ -135,7 +136,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
     SGLang's equivalent; verify the field against the deployed version). `doctor` sends the
     same prompt twice and reports whether the second call hit the cache.
 
-**Phase 2 – Context window** [context-management]
+**Phase 2 – Context window** [context-management] — steps 1, 2, 4 implemented on `phase-2-context-window`; step 3 (summarization) deferred
 1. Add the `ContextBuilder` protocol, and inject it with a default that sends
    everything (today's behavior).
 2. Add a `BudgetedContextBuilder`: token estimate, keep system and first user message,

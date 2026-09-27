@@ -46,6 +46,31 @@ prefix, so the context view must keep its prefix stable:
 - After a trim, the new view is itself append-only until the next high-water mark.
 - Test that consecutive views between trims are strict prefixes of each other.
 
+## Implementation (Phase 2)
+
+- `domain.py`: `ContextView` (messages + stats), the `ContextBuilder` protocol, and
+  `ContextWindowExceededError` (a `PermanentModelError`, so the run fails with an event
+  and no retry).
+- `context.py`:
+  - `FullHistoryContextBuilder` (the orchestrator default).
+  - `BudgetedContextBuilder` (limits per profile, plus a `ContextPolicy`).
+  - `limits_from_profiles` (`context_window`, with reserve = `parameters.max_tokens`
+    or 1024).
+- `application.py` wires `BudgetedContextBuilder` from config. The orchestrator
+  builds the view inside the model-call `try` and adds a `context` stats block to
+  `MODEL_RESPONDED` only when the view differs from the history.
+- **Hysteresis without stored state:** the builder replays units from the start on every
+  call (O(n)). The trim point is therefore a pure function of the messages: resume is
+  exact, and views between trims are strict extensions of the previous view.
+- **Units:** tool results always attach to the preceding unit, so a cut can never orphan
+  one. The pinned head is the leading system messages plus the first user message.
+- **Omission notice:** appended to the first user message only while messages are
+  omitted. It avoids consecutive same-role messages that strict chat templates reject.
+- **Deliberately not done:**
+  - No usage-based calibration of the estimate: it would change past trim decisions.
+  - No summarization yet: it needs a persisted summary event and budget accounting,
+    and is deferred.
+
 ## Testing
 
 Use scripted models and assert what was sent (`ScriptedModelClient.requests`): pairing
