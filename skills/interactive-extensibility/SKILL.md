@@ -39,6 +39,24 @@ Deviations from the design below:
 - Cancel takes effect at the next step boundary. An in-flight model call is not
   interrupted, but its response is discarded.
 
+6b is implemented: items 3, 5, 6, and 7.
+- `hooks.py`: `HookRunner`, `CallableHook`, `CommandHook` (argv, JSON I/O, timeout,
+  output limit), fail-closed for guarding events.
+- `permissions.py`: rule parser, `PermissionPolicy`, and the `exit_plan` spec.
+- `RunRecord.mode`, `set_mode`, the `MODE_CHANGED` / `HOOK_DECIDED` events, and
+  `resolve_approval(feedback=, mode=)`.
+- Pipeline in `_execute_tool`: pre_tool hook → permissions on the final arguments →
+  record the decision in `TOOL_REQUESTED` (replayed on resume) → ask/approval →
+  execute → post_tool hook.
+- State checks skip annotation events (`HOOK_DECIDED`, `MODE_CHANGED`, `CONFIG_DRIFT`).
+- Config: `[permissions]` and `[[hooks]]`. CLI: `run --mode`,
+  `approve --feedback/--mode`, `mode`. API: `mode` on create, approval
+  feedback/mode, and `POST /runs/{id}/mode`.
+
+Not implemented:
+- `pre_compact`: the harness builds per-call views instead of compacting history.
+- `subagent_stop`: comes with subagents in 6c.
+
 ## 1. Continuing a conversation
 - `continue_run(run_id, message)`: allowed from `completed` (and `budget_exhausted`, if
   budget is also raised explicitly). Appends a user `Message`, emits `USER_MESSAGE_ADDED`,

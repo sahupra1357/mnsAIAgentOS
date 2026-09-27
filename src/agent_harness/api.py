@@ -11,7 +11,7 @@ Endpoints (all JSON; every route except ``/healthz`` requires
 
     GET  /healthz
     GET  /profiles
-    POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?}
+    POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?, "mode"?}
     GET  /runs/{id}
     GET  /runs/{id}/events?after=N
     GET  /runs/{id}/events/stream?after=N   (server-sent events)
@@ -21,7 +21,8 @@ Endpoints (all JSON; every route except ``/healthz`` requires
     GET  /runs/{id}/usage
     POST /runs/{id}/resume
     GET  /runs/{id}/approval
-    POST /runs/{id}/approval        {"call_id", "decision": "allow" | "deny"}
+    POST /runs/{id}/approval        {"call_id", "decision", "feedback"?, "mode"?}
+    POST /runs/{id}/mode            {"mode": "default" | "accept_edits" | "plan" | "bypass"}
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from agent_harness.domain import (
     ArtifactStore,
     HarnessError,
     Message,
+    PermissionMode,
     Role,
     RunBudget,
     RunQueue,
@@ -184,6 +186,7 @@ class HarnessAPI:
             ("POST", "/messages"): lambda: self._continue(send, run_id, receive),
             ("POST", "/steer"): lambda: self._steer(send, run_id, receive),
             ("GET", "/usage"): lambda: self._send_usage(send, run_id),
+            ("POST", "/mode"): lambda: self._set_mode(send, run_id, receive),
             ("POST", "/resume"): lambda: self._resume(send, run_id),
             ("GET", "/approval"): lambda: self._send_approval(send, run_id),
             ("POST", "/approval"): lambda: self._decide(send, run_id, receive),
@@ -244,7 +247,7 @@ class HarnessAPI:
         }
 
     async def _create_run(self, body: dict[str, Any]) -> dict[str, Any]:
-        unknown = set(body) - {"prompt", "system", "model_profile", "budget"}
+        unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         prompt = _required_text(body.get("prompt"), "prompt")
@@ -263,6 +266,7 @@ class HarnessAPI:
             messages=messages,
             budget=_budget(body.get("budget")),
             versions=self._run_versions(profile) if self._run_versions else None,
+            mode=_mode(body.get("mode")),
         )
         await self._queue.enqueue(run.id)
         return {"id": run.id, "status": run.status.value, "model_profile": profile}
@@ -396,6 +400,19 @@ class HarnessAPI:
         payload["status"] = usage.status.value
         await _json(send, 200, payload)
 
+    async def _set_mode(self, send: Send, run_id: str, receive: Receive) -> None:
+        body = await self._body(receive)
+        if set(body) != {"mode"}:
+            raise ApiError(400, 'body must be {"mode": ...}')
+        await self._load(run_id)
+        target = _mode(body["mode"])
+        assert target is not None
+        try:
+            run = await self._orchestrator.set_mode(run_id, target)
+        except ValueError as exc:
+            raise ApiError(409, str(exc)) from exc
+        await _json(send, 200, {"id": run.id, "mode": run.mode.value})
+
     async def _cancel(self, send: Send, run_id: str) -> None:
         await self._load(run_id)
         run = await self._orchestrator.cancel(run_id)
@@ -416,6 +433,7 @@ class HarnessAPI:
             return None
         return {
             "call_id": pending.call_id,
+            "kind": pending.kind,
             "tool": pending.tool_name,
             "risk": pending.risk.value,
             "arguments": dict(pending.arguments),
@@ -431,7 +449,7 @@ class HarnessAPI:
 
     async def _decide(self, send: Send, run_id: str, receive: Receive) -> None:
         body = await self._body(receive)
-        unknown = set(body) - {"call_id", "decision"}
+        unknown = set(body) - {"call_id", "decision", "feedback", "mode"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         decision = body.get("decision")
@@ -446,11 +464,29 @@ class HarnessAPI:
             raise ApiError(409, "run has no pending approval")
         if pending.call_id != call_id:
             raise ApiError(409, f"pending call ID is {pending.call_id!r}")
-        run = await self._orchestrator.resolve_approval(
-            run_id, call_id=call_id, approved=decision == "allow"
-        )
+        feedback = _text(body.get("feedback"), "feedback", required=False)
+        try:
+            run = await self._orchestrator.resolve_approval(
+                run_id,
+                call_id=call_id,
+                approved=decision == "allow",
+                feedback=feedback,
+                mode=_mode(body.get("mode")),
+            )
+        except ValueError as exc:
+            raise ApiError(409, str(exc)) from exc
         await self._queue.enqueue(run_id)
         await _json(send, 202, {"id": run.id, "status": run.status.value, "decision": decision})
+
+
+def _mode(value: Any) -> PermissionMode | None:
+    if value is None:
+        return None
+    try:
+        return PermissionMode(value)
+    except ValueError as exc:
+        modes = ", ".join(mode.value for mode in PermissionMode)
+        raise ApiError(400, f"mode must be one of: {modes}") from exc
 
 
 def _required_text(value: Any, field: str) -> str:

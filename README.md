@@ -231,6 +231,53 @@ agent-harness status   --config models.toml RUN_ID
 The same actions are available over HTTP: `POST /runs/{id}/messages`,
 `POST /runs/{id}/steer`, `POST /runs/{id}/cancel`, and `GET /runs/{id}/usage`.
 
+## Permissions, Modes, Plan Mode, and Hooks
+
+```toml
+[permissions]
+mode = "default"                          # default | accept_edits | plan | bypass
+allow = ["read_file", "run_command(argv.0=pytest)"]
+ask   = ["read_file(path=*.env)"]
+deny  = ["run_command(argv.0=rm)", "git_*(force=true)"]
+edit_tools = ["apply_patch"]              # what accept_edits auto-allows
+
+[[hooks]]
+event = "pre_tool"                        # session_start | user_prompt | pre_model | post_model
+matcher = "run_command"                   #   | pre_tool | post_tool | stop
+command = ["python3", "hooks/check_command.py"]   # argv, never a shell
+timeout_seconds = 10
+# on_error = "deny"                       # guarding events fail closed by default
+```
+
+**Order of evaluation.** Deny rules win. Then the mode applies:
+- `plan`: read-only tools only;
+- `bypass`: everything allowed;
+- `accept_edits`: the edit tools are allowed.
+
+After that, `ask` rules pause for approval and `allow` rules skip the approval pause.
+Anything left unmatched falls back to each tool's risk policy. "Allow" never skips
+argument validation, workspace boundaries, or command guardrails.
+
+**Plan mode.** Run with `agent-harness run --mode plan ...`. The model investigates
+with read-only tools and then calls `exit_plan`, which pauses the run for approval:
+- `agent-harness approve RUN_ID --allow --mode accept_edits` approves the plan and
+  switches mode;
+- `--deny --feedback "..."` sends the feedback to the model to revise the plan.
+
+`agent-harness mode RUN_ID bypass` changes a run's mode at any time.
+
+**Hooks.** A hook receives JSON on stdin and may print JSON on stdout:
+`{"decision": "allow" | "deny" | "modify" | "continue", "reason", "arguments",
+"content", "context"}`.
+- `pre_tool` can deny a call, or rewrite its arguments; permission rules are then
+  checked against the rewritten call.
+- `user_prompt` can reject or rewrite a prompt.
+- Other events can add context.
+- `stop` can ask the model to keep working, a bounded number of times.
+
+Every decision is recorded as a `hook_decided` event. A resumed run replays the
+recorded decisions; it does not re-run the hooks.
+
 ## LiteLLM (optional)
 
 LiteLLM is opt-in for each profile. Only profiles with `adapter = "litellm"` use it;

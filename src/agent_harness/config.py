@@ -194,6 +194,66 @@ class MemoryConfig:
             raise ConfigError(f"invalid memory.namespace: {self.namespace!r}")
 
 
+_PERMISSION_MODES = {"default", "accept_edits", "plan", "bypass"}
+_HOOK_EVENTS = {
+    "session_start", "user_prompt", "pre_model", "post_model", "pre_tool", "post_tool", "stop",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionsConfig:
+    """Default permission mode and allow/ask/deny rules (see permissions.py)."""
+
+    mode: str = "default"
+    allow: tuple[str, ...] = ()
+    ask: tuple[str, ...] = ()
+    deny: tuple[str, ...] = ()
+    edit_tools: tuple[str, ...] = ("apply_patch",)
+
+    def __post_init__(self) -> None:
+        from agent_harness.permissions import PermissionRule, PermissionRuleError
+
+        if self.mode not in _PERMISSION_MODES:
+            raise ConfigError(f"permissions.mode must be one of {sorted(_PERMISSION_MODES)}")
+        for name in ("allow", "ask", "deny", "edit_tools"):
+            values = getattr(self, name)
+            if isinstance(values, str) or not all(isinstance(v, str) for v in values):
+                raise ConfigError(f"permissions.{name} must be a list of strings")
+            object.__setattr__(self, name, tuple(values))
+        for rule in (*self.allow, *self.ask, *self.deny):
+            try:
+                PermissionRule.parse(rule)
+            except PermissionRuleError as exc:
+                raise ConfigError(str(exc)) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class HookConfig:
+    """An external hook command (structured argv; JSON on stdin and stdout)."""
+
+    event: str
+    command: tuple[str, ...]
+    name: str = ""
+    matcher: str = "*"
+    timeout_seconds: float = 10.0
+    on_error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.event not in _HOOK_EVENTS:
+            raise ConfigError(f"hook event must be one of {sorted(_HOOK_EVENTS)}")
+        if isinstance(self.command, str) or not self.command or not all(
+            isinstance(part, str) and part for part in self.command
+        ):
+            raise ConfigError("hook command must be a non-empty list of strings (argv, no shell)")
+        object.__setattr__(self, "command", tuple(self.command))
+        if self.timeout_seconds <= 0 or self.timeout_seconds > 600:
+            raise ConfigError("hook timeout_seconds must be in (0, 600]")
+        if self.on_error not in {None, "allow", "deny"}:
+            raise ConfigError('hook on_error must be "allow" or "deny"')
+        if not self.name:
+            object.__setattr__(self, "name", f"{self.event}:{self.command[0]}")
+
+
 @dataclass(frozen=True, slots=True)
 class HarnessConfig:
     """Validated application configuration.
@@ -208,6 +268,8 @@ class HarnessConfig:
     routes: Mapping[str, str] = field(default_factory=dict)
     artifacts: ArtifactsConfig = field(default_factory=ArtifactsConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
+    hooks: tuple[HookConfig, ...] = ()
 
     def __post_init__(self) -> None:
         copied = dict(self.models)
@@ -329,7 +391,36 @@ def load_config(
         routes=raw_routes,
         artifacts=_parse_section(raw, "artifacts", ArtifactsConfig),
         memory=_parse_section(raw, "memory", MemoryConfig),
+        permissions=_parse_permissions(raw.get("permissions")),
+        hooks=_parse_hooks(raw.get("hooks")),
     )
+
+
+def _parse_permissions(raw: Any) -> PermissionsConfig:
+    if raw is None:
+        return PermissionsConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("permissions must be a TOML table")
+    unknown = set(raw) - set(PermissionsConfig.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"unknown fields in permissions: {', '.join(sorted(unknown))}")
+    return PermissionsConfig(**raw)
+
+
+def _parse_hooks(raw: Any) -> tuple[HookConfig, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ConfigError("hooks must be an array of tables ([[hooks]])")
+    hooks = []
+    for item in raw:
+        unknown = set(item) - set(HookConfig.__dataclass_fields__)
+        if unknown:
+            raise ConfigError(f"unknown fields in hooks: {', '.join(sorted(unknown))}")
+        if "timeout_seconds" in item:
+            item = {**item, "timeout_seconds": float(item["timeout_seconds"])}
+        hooks.append(HookConfig(**item))
+    return tuple(hooks)
 
 
 def _parse_section(raw: Mapping[str, Any], name: str, section_type: Any) -> Any:
