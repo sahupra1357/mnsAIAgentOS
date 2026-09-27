@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from datetime import datetime
 from enum import Enum
@@ -38,7 +40,8 @@ class SQLiteRunStore:
     advance a given snapshot from a particular version.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, lease_clock: Callable[[], float] = time.time) -> None:
+        self._lease_clock = lease_clock
         self.path = str(path)
         if not self.path:
             raise ValueError("SQLite path must not be empty")
@@ -76,6 +79,16 @@ class SQLiteRunStore:
             BEGIN
                 SELECT RAISE(ABORT, 'run events are append-only');
             END;
+
+            CREATE TABLE IF NOT EXISTS run_queue (
+                run_id TEXT PRIMARY KEY REFERENCES runs(id),
+                enqueued_sequence INTEGER NOT NULL,
+                worker_id TEXT,
+                lease_expires_at REAL NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS run_queue_order
+                ON run_queue(enqueued_sequence);
 
             CREATE TABLE IF NOT EXISTS tool_results (
                 tool_name TEXT NOT NULL,
@@ -203,6 +216,83 @@ class SQLiteRunStore:
                 (run_id,),
             ).fetchall()
         return tuple(_decode_event(row) for row in rows)
+
+    async def enqueue(self, run_id: str) -> None:
+        _validate_identifier(run_id, "run_id")
+        async with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                exists = self._connection.execute(
+                    "SELECT 1 FROM runs WHERE id = ?", (run_id,)
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(f"unknown run: {run_id}")
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO run_queue(run_id, enqueued_sequence)
+                    VALUES (?, (SELECT COALESCE(MAX(enqueued_sequence), 0) + 1 FROM run_queue))
+                    """,
+                    (run_id,),
+                )
+                self._connection.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+
+    async def claim(self, worker_id: str, lease_seconds: float) -> str | None:
+        """Atomically lease the oldest unleased (or lease-expired) run."""
+
+        _validate_identifier(worker_id, "worker_id")
+        async with self._lock:
+            now = self._lease_clock()
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    """
+                    SELECT run_id FROM run_queue
+                    WHERE worker_id IS NULL OR lease_expires_at <= ?
+                    ORDER BY enqueued_sequence LIMIT 1
+                    """,
+                    (now,),
+                ).fetchone()
+                if row is not None:
+                    self._connection.execute(
+                        "UPDATE run_queue SET worker_id = ?, lease_expires_at = ? WHERE run_id = ?",
+                        (worker_id, now + lease_seconds, row["run_id"]),
+                    )
+                self._connection.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+        return row["run_id"] if row is not None else None
+
+    async def renew(self, run_id: str, worker_id: str, lease_seconds: float) -> bool:
+        async with self._lock:
+            now = self._lease_clock()
+            cursor = self._connection.execute(
+                """
+                UPDATE run_queue SET lease_expires_at = ?
+                WHERE run_id = ? AND worker_id = ? AND lease_expires_at > ?
+                """,
+                (now + lease_seconds, run_id, worker_id, now),
+            )
+            return cursor.rowcount == 1
+
+    async def release(self, run_id: str, worker_id: str, *, requeue: bool = False) -> None:
+        async with self._lock:
+            if requeue:
+                self._connection.execute(
+                    """
+                    UPDATE run_queue SET worker_id = NULL, lease_expires_at = 0
+                    WHERE run_id = ? AND worker_id = ?
+                    """,
+                    (run_id, worker_id),
+                )
+            else:
+                self._connection.execute(
+                    "DELETE FROM run_queue WHERE run_id = ? AND worker_id = ?",
+                    (run_id, worker_id),
+                )
 
     async def get_tool_result(
         self, tool_name: str, idempotency_key: str

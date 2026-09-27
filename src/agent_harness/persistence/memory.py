@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
+import time
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
 from typing import Sequence
@@ -19,12 +22,57 @@ class InMemoryRunStore:
     its events and replaces the snapshot while holding one lock.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, lease_clock: Callable[[], float] = time.time) -> None:
+        self._lease_clock = lease_clock
+        self._queue: dict[str, tuple[int, str | None, float]] = {}
+        self._queue_order = itertools.count()
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[RunEvent]] = {}
         self._event_ids: set[str] = set()
         self._tool_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._lock = asyncio.Lock()
+
+    async def enqueue(self, run_id: str) -> None:
+        _validate_identifier(run_id, "run_id")
+        async with self._lock:
+            if run_id not in self._runs:
+                raise KeyError(f"unknown run: {run_id}")
+            if run_id not in self._queue:
+                self._queue[run_id] = (next(self._queue_order), None, 0.0)
+
+    async def claim(self, worker_id: str, lease_seconds: float) -> str | None:
+        _validate_identifier(worker_id, "worker_id")
+        async with self._lock:
+            now = self._lease_clock()
+            available = [
+                (order, run_id)
+                for run_id, (order, holder, expires) in self._queue.items()
+                if holder is None or expires <= now
+            ]
+            if not available:
+                return None
+            order, run_id = min(available)
+            self._queue[run_id] = (order, worker_id, now + lease_seconds)
+            return run_id
+
+    async def renew(self, run_id: str, worker_id: str, lease_seconds: float) -> bool:
+        async with self._lock:
+            entry = self._queue.get(run_id)
+            now = self._lease_clock()
+            if entry is None or entry[1] != worker_id or entry[2] <= now:
+                return False
+            self._queue[run_id] = (entry[0], worker_id, now + lease_seconds)
+            return True
+
+    async def release(self, run_id: str, worker_id: str, *, requeue: bool = False) -> None:
+        async with self._lock:
+            entry = self._queue.get(run_id)
+            if entry is None or entry[1] != worker_id:
+                return
+            if requeue:
+                self._queue[run_id] = (entry[0], None, 0.0)
+            else:
+                del self._queue[run_id]
 
     async def get_tool_result(
         self, tool_name: str, idempotency_key: str

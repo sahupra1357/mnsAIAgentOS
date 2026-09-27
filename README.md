@@ -321,6 +321,39 @@ Read-only tools may run automatically. Side-effecting tools require an idempoten
 
 The included `echo` and `calculator` tools are deterministic examples. In production, isolate untrusted tools out of process and back side-effect idempotency with durable storage or the downstream service.
 
+## HTTP API and Workers
+
+Runs can be submitted over HTTP and executed by queue workers. Many workers,
+in-process or in separate processes, can share one SQLite database. Each claimed run
+is leased: a worker renews the lease while it works, and if the worker dies, the lease
+expires and another worker resumes the run from its last checkpoint.
+
+```bash
+pip install -e '.[api]'                        # uvicorn
+export AGENT_HARNESS_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+.venv/bin/agent-harness serve --config models.toml --workers 2        # API + in-process workers
+.venv/bin/agent-harness worker --config models.toml --workers 4       # optional extra worker processes
+```
+
+| Method and path | Purpose |
+|---|---|
+| `GET /healthz` | Liveness (no auth) |
+| `GET /profiles` | Profiles (adapter, model, context window, fallback) and routes |
+| `POST /runs` | `{"prompt", "system"?, "model_profile"?, "budget"?}` → `202 {"id", ...}` (queued) |
+| `GET /runs/{id}` | Status, usage, error, final `output`, and `pending_approval` |
+| `GET /runs/{id}/events?after=N` | Event log from index N |
+| `GET /runs/{id}/events/stream?after=N` | Server-sent events until the run completes or pauses |
+| `POST /runs/{id}/cancel` | Cancel |
+| `POST /runs/{id}/resume` | Re-enqueue an interrupted run |
+| `GET /runs/{id}/approval` | The pending tool call, with its arguments |
+| `POST /runs/{id}/approval` | `{"call_id", "decision": "allow" \| "deny"}`, then re-enqueue |
+
+All routes except `/healthz` require `Authorization: Bearer $AGENT_HARNESS_API_TOKEN`.
+`--insecure-no-auth` is accepted only with a loopback `--host`. Inputs are validated at
+the boundary: unknown fields, oversized text, and out-of-range budgets are rejected. A
+run that keeps raising unexpected errors is removed from the queue after 3 attempts;
+it can be resumed explicitly after investigation.
+
 ## Telemetry and Streaming
 
 Stream the answer as it is generated, and write sanitized telemetry:

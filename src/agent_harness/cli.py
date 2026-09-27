@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import os
+import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,7 +18,9 @@ from .config import ConfigError, load_config
 from .domain import HarnessError, Message, Role, RunBudget, RunRecord
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
+from .api import create_api
 from .telemetry import JsonLinesTelemetry
+from .worker import Worker
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -56,6 +61,30 @@ def _parser() -> argparse.ArgumentParser:
     decision.add_argument("--allow", action="store_true", help="allow the pending call")
     decision.add_argument("--deny", action="store_true", help="deny the pending call")
     approve.add_argument("--call-id", help="call ID when more than one approval is pending")
+
+    serve = subcommands.add_parser(
+        "serve", help="serve the HTTP API with in-process queue workers (needs the [api] extra)"
+    )
+    _common_runtime_arguments(serve)
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--workers", type=int, default=1, help="in-process queue workers")
+    serve.add_argument(
+        "--token-env",
+        default="AGENT_HARNESS_API_TOKEN",
+        help="environment variable holding the API bearer token",
+    )
+    serve.add_argument(
+        "--insecure-no-auth",
+        action="store_true",
+        help="disable API auth (only allowed on a loopback host)",
+    )
+
+    worker = subcommands.add_parser("worker", help="process queued runs until interrupted")
+    _common_runtime_arguments(worker)
+    worker.add_argument("--workers", type=int, default=1, help="concurrent workers")
+    worker.add_argument("--lease-seconds", type=float, default=60.0)
+    worker.add_argument("--poll-seconds", type=float, default=1.0)
 
     doctor = subcommands.add_parser(
         "doctor",
@@ -227,6 +256,60 @@ async def _doctor_command(args: argparse.Namespace) -> int:
     return 1 if any(check.status is CheckStatus.FAIL for check in checks) else 0
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _api_token(args: argparse.Namespace) -> str | None:
+    if args.insecure_no_auth:
+        if args.host not in _LOOPBACK_HOSTS:
+            raise ValueError("--insecure-no-auth is only allowed with a loopback --host")
+        return None
+    token = os.environ.get(args.token_env)
+    if not token:
+        raise ValueError(
+            f"set {args.token_env} to an API bearer token (or use --insecure-no-auth on loopback)"
+        )
+    return token
+
+
+async def _serve_command(args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise ValueError("serve requires uvicorn: pip install 'agent-harness[api]'") from exc
+    token = _api_token(args)
+    app = _build(args)
+    async with app:
+        api = create_api(app, auth_token=token, worker_count=args.workers)
+        server = uvicorn.Server(
+            uvicorn.Config(api, host=args.host, port=args.port, lifespan="on", log_level="info")
+        )
+        await server.serve()
+    return 0
+
+
+async def _worker_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signame in ("SIGINT", "SIGTERM"):
+        with contextlib.suppress(NotImplementedError, AttributeError):
+            loop.add_signal_handler(getattr(signal, signame), stop.set)
+    async with app:
+        workers = [
+            Worker(
+                app.orchestrator,
+                app.store,
+                lease_seconds=args.lease_seconds,
+                poll_interval_seconds=args.poll_seconds,
+            )
+            for _ in range(args.workers)
+        ]
+        print(f"workers={','.join(w.worker_id for w in workers)} waiting for runs", file=sys.stderr)
+        await asyncio.gather(*(worker.run_forever(stop) for worker in workers))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -240,6 +323,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_approve_command(args))
         if args.command == "doctor":
             return asyncio.run(_doctor_command(args))
+        if args.command == "serve":
+            return asyncio.run(_serve_command(args))
+        if args.command == "worker":
+            return asyncio.run(_worker_command(args))
     except (ConfigError, HarnessError, KeyError, ValueError) as exc:
         print(f"agent-harness: {exc}", file=sys.stderr)
         return 2

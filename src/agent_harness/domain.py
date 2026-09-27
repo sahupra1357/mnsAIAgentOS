@@ -317,6 +317,24 @@ class IdempotencyStore(Protocol):
     ) -> None: ...
 
 
+class RunQueue(Protocol):
+    """Work queue of run IDs with exclusive, expiring worker leases.
+
+    A claimed run belongs to one worker until its lease expires; an expired
+    lease makes the run claimable again, and durable resume semantics make
+    re-execution safe. ``release`` only acts when the caller still holds the
+    lease, so a worker that lost its lease cannot disturb the new holder.
+    """
+
+    async def enqueue(self, run_id: str) -> None: ...
+
+    async def claim(self, worker_id: str, lease_seconds: float) -> str | None: ...
+
+    async def renew(self, run_id: str, worker_id: str, lease_seconds: float) -> bool: ...
+
+    async def release(self, run_id: str, worker_id: str, *, requeue: bool = False) -> None: ...
+
+
 class RunStore(Protocol):
     async def create_run(self, run: RunRecord, event: RunEvent) -> None: ...
 
