@@ -19,6 +19,7 @@ litellm = ["litellm>=1.50,<2"]
 
 [project.scripts]
 agent-harness = "agent_harness.cli:main"
+agent-harness-bench = "agent_harness.bench.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

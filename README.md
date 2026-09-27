@@ -574,6 +574,22 @@ old and new hashes.
 server's prefix cache (when the server reports it), and is included in `model_responded`
 events.
 
+## Validation
+
+See [`docs/VALIDATION.md`](docs/VALIDATION.md). CI runs these stages offline on every
+PR: lint, types, unit tests, and scripted scenarios. With your model servers and
+downloaded public datasets you can also run:
+- live `doctor` smoke checks;
+- benchmarks: GSM8K (agent loop and tools), BFCL (tool-calling accuracy per provider),
+  HumanEval (coding in the Docker sandbox), and generic Q&A;
+- regression gates against saved baselines.
+
+```bash
+agent-harness-bench suites
+agent-harness-bench run --suite gsm8k --data datasets/gsm8k/test.jsonl --config models.toml --model-profile ollama --limit 200
+agent-harness-bench pipeline examples/validation.toml --update-baselines
+```
+
 ## Development
 
 Run the complete suite without network access:

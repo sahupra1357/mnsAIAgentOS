@@ -1,0 +1,46 @@
+# Validation pipeline plan: agent-harness-bench pipeline examples/validation.toml
+# Paths are relative to this file. Replace the sample datasets with the public
+# datasets you download (see docs/VALIDATION.md) and raise `limit`.
+
+[pipeline]
+config = "models.toml"            # harness model configuration
+repo = ".."                       # repository root (static/unit stages)
+output_dir = "../validation-results"
+# Stage order: static, unit, scenarios, smoke, benchmarks, gates
+
+[scenarios]
+path = "evals"                    # offline scripted scenarios
+
+[[smoke]]                         # live: `agent-harness doctor` per profile
+profile = "ollama"
+skip_cache = true
+
+[[benchmark]]
+name = "gsm8k-ollama"
+suite = "gsm8k"
+data = "bench/gsm8k_sample.jsonl"  # e.g. datasets/gsm8k/test.jsonl
+profile = "ollama"
+limit = 3
+concurrency = 1
+max_steps = 8
+baseline = "../baselines/gsm8k-ollama.json"
+[benchmark.thresholds]
+max_accuracy_drop = 0.03
+max_error_rate = 0.10
+
+[[benchmark]]
+name = "bfcl-ollama"
+suite = "bfcl"
+data = "bench/bfcl_sample.json"            # e.g. datasets/bfcl/BFCL_v3_simple.json
+answers = "bench/bfcl_sample_answers.json" # e.g. datasets/bfcl/possible_answer/BFCL_v3_simple.json
+profile = "ollama"
+baseline = "../baselines/bfcl-ollama.json"
+[benchmark.thresholds]
+max_accuracy_drop = 0.05
+
+# [[benchmark]]
+# name = "humaneval-modal"
+# suite = "humaneval"                       # runs generated code in Docker (no network)
+# data = "bench/humaneval_sample.jsonl"     # e.g. datasets/HumanEval.jsonl.gz
+# profile = "modal"
+# baseline = "../baselines/humaneval-modal.json"

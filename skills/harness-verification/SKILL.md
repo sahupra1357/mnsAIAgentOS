@@ -24,3 +24,23 @@ Assert durable outcomes and emitted events rather than internal call order unles
 - Logs and errors do not expose secrets or unsanitized tool output.
 
 When a test exposes a cross-component contract mismatch, report the smallest failing scenario and notify the coordinating agent before changing another agent's owned component.
+
+## Validation pipeline (implemented)
+
+See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI via
+`.github/workflows/ci.yml`) → smoke (`doctor`) → benchmarks → gates (live, with
+`agent-harness-bench pipeline <plan.toml>`).
+
+- Code lives in `src/agent_harness/bench/`:
+  - `suites.py`: gsm8k, qa, bfcl, humaneval.
+  - `runner.py`: concurrency, resumable `results.jsonl`, metrics with a Wilson CI.
+  - `compare.py`: gates.
+  - `cli.py`: `run`, `compare`, `pipeline`, `suites`.
+- A new suite implements `load(path, options) -> list[BenchItem]` and
+  `async run(item, BenchContext) -> ItemResult`, and is registered in `SUITES`. Use
+  `BenchContext.run_agent` to exercise the real orchestrator. Raise `BenchConfigError`
+  only for misconfiguration, never for a single bad item.
+- Tests (`tests/test_bench.py`) use scripted "oracle" models and the synthetic samples
+  in `examples/bench/`. Never commit public dataset files or run live models in tests.
+- Model-generated code runs only through an `ExecutionRuntime`: Docker by default,
+  local only with an explicit unsafe flag.

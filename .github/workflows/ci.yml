@@ -1,0 +1,46 @@
+# Offline validation gates for every push and pull request. No model server,
+# network model access, or credentials are needed: tests use fakes and the
+# scenario evals run scripted models.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install lint and type tools
+        run: python -m pip install --upgrade pip ruff mypy
+      - name: "Stage static: lint"
+        run: ruff check src tests
+      - name: "Stage static: types"
+        run: MYPYPATH=src mypy src/agent_harness --ignore-missing-imports
+      - name: "Stage static: compile"
+        run: python -m compileall -q src tests examples
+      - name: "Stage unit: tests"
+        run: python -m unittest discover -s tests -v
+      - name: "Stage scenarios: scripted evals"
+        run: python -m agent_harness eval --config examples/models.toml examples/evals --report scenarios.json
+      - name: "Stage benchmarks: harness self-check on sample data (scripted)"
+        run: python -m unittest tests.test_bench -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scenario-report-${{ matrix.python-version }}
+          path: scenarios.json
