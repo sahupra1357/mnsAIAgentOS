@@ -384,8 +384,11 @@ async def _status_command(args: argparse.Namespace) -> int:
     print(f"time:   {usage.active_seconds:.1f}s active / {usage.max_wall_seconds:.0f}s")
     print(
         f"calls:  {usage.model_calls} model, {usage.tool_calls} tool, "
-        f"{usage.fallbacks} fallback switches"
+        f"{usage.fallbacks} fallback switches, {usage.subagents} subagents"
     )
+    marks = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
+    for item in usage.todos:
+        print(f"  {marks[item.status.value]} {item.content}")
     return 0
 
 

@@ -12,6 +12,7 @@ pre_tool        deny (result returned to the model), modify (``arguments``,
                 re-validated by the tool runtime), context (added to result)
 post_tool       context (added to the tool result)
 stop            continue (``reason`` becomes a user message; bounded)
+subagent_stop   context (added to the subagent's result for the parent)
 ==============  ===========================================================
 
 Hooks never override hard guardrails, deny rules, or approval requirements:
@@ -49,6 +50,7 @@ class HookEvent(StrEnum):
     PRE_TOOL = "pre_tool"
     POST_TOOL = "post_tool"
     STOP = "stop"
+    SUBAGENT_STOP = "subagent_stop"
 
 
 # Hooks that guard an action fail closed; observers fail open.

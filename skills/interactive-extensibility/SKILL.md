@@ -57,6 +57,23 @@ Not implemented:
 - `pre_compact`: the harness builds per-call views instead of compacting history.
 - `subagent_stop`: comes with subagents in 6c.
 
+6c is implemented: items 4 and 8.
+- `agents.py`: `SubagentDefinition`, `SubagentLimits`, the `agent` / `todo_write`
+  specs, and deterministic `child_run_id`.
+- The orchestrator owns the virtual tools `agent` and `todo_write`. They go through
+  hooks, permissions, and approval like other tools, then dispatch after approval.
+- A child is an ordinary run with `parent_run_id`, `parent_call_id`, `depth`, and
+  `allowed_tools`, created idempotently and executed inline.
+  - The child's usage rolls into the parent in the same checkpoint as the result.
+  - A child approval pauses the parent (`SUBAGENT_WAITING`). `pending_approval` and
+    `resolve_approval` on the parent forward to the child, and the parent resumes
+    with `SUBAGENT_RESUMED`.
+  - Cancel cascades to children, and children inherit the parent's permission mode.
+- Hooks: `subagent_stop` adds context to the child's result.
+- Config: `[[agents]]` (prompt or prompt_file), `[subagents]`, `[tasks]`.
+- Todos: `RunRecord.todos` and `TODOS_UPDATED`, shown in `status`,
+  `GET /runs/{id}`, and `/usage`.
+
 ## 1. Continuing a conversation
 - `continue_run(run_id, message)`: allowed from `completed` (and `budget_exhausted`, if
   budget is also raised explicitly). Appends a user `Message`, emits `USER_MESSAGE_ADDED`,

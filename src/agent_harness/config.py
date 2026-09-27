@@ -197,6 +197,7 @@ class MemoryConfig:
 _PERMISSION_MODES = {"default", "accept_edits", "plan", "bypass"}
 _HOOK_EVENTS = {
     "session_start", "user_prompt", "pre_model", "post_model", "pre_tool", "post_tool", "stop",
+    "subagent_stop",
 }
 
 
@@ -255,6 +256,42 @@ class HookConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentConfig:
+    """A subagent definition (``[[agents]]``). Give ``prompt`` or ``prompt_file``."""
+
+    name: str
+    description: str
+    prompt: str = ""
+    prompt_file: str | None = None
+    tools: tuple[str, ...] | None = None
+    profile: str | None = None
+    max_steps: int = 10
+    max_tokens: int | None = None
+    max_cost_usd: float | None = None
+
+    def __post_init__(self) -> None:
+        if bool(self.prompt.strip()) == bool(self.prompt_file):
+            raise ConfigError(f"agent {self.name!r} needs exactly one of prompt or prompt_file")
+        if self.tools is not None:
+            if isinstance(self.tools, str) or not all(isinstance(t, str) for t in self.tools):
+                raise ConfigError(f"agent {self.name!r} tools must be a list of tool names")
+            object.__setattr__(self, "tools", tuple(self.tools))
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentsConfig:
+    max_depth: int = 2
+    max_per_run: int = 8
+
+
+@dataclass(frozen=True, slots=True)
+class TasksConfig:
+    """Offer the ``todo_write`` task-list tool to every run."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessConfig:
     """Validated application configuration.
 
@@ -270,6 +307,9 @@ class HarnessConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
     hooks: tuple[HookConfig, ...] = ()
+    agents: tuple[AgentConfig, ...] = ()
+    subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
+    tasks: TasksConfig = field(default_factory=TasksConfig)
 
     def __post_init__(self) -> None:
         copied = dict(self.models)
@@ -393,7 +433,35 @@ def load_config(
         memory=_parse_section(raw, "memory", MemoryConfig),
         permissions=_parse_permissions(raw.get("permissions")),
         hooks=_parse_hooks(raw.get("hooks")),
+        agents=_parse_agents(raw.get("agents"), profiles, raw_routes),
+        subagents=_parse_section(raw, "subagents", SubagentsConfig),
+        tasks=_parse_section(raw, "tasks", TasksConfig),
     )
+
+
+def _parse_agents(
+    raw: Any, profiles: Mapping[str, ModelProfile], routes: Mapping[str, str]
+) -> tuple[AgentConfig, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ConfigError("agents must be an array of tables ([[agents]])")
+    agents = []
+    for item in raw:
+        unknown = set(item) - set(AgentConfig.__dataclass_fields__)
+        if unknown:
+            raise ConfigError(f"unknown fields in agents: {', '.join(sorted(unknown))}")
+        try:
+            agent = AgentConfig(**item)
+        except TypeError as exc:
+            raise ConfigError(f"invalid agent definition: {exc}") from exc
+        if agent.profile is not None and agent.profile not in profiles and agent.profile not in routes:
+            raise ConfigError(f"agent {agent.name!r} uses unknown profile {agent.profile!r}")
+        agents.append(agent)
+    names = [agent.name for agent in agents]
+    if len(names) != len(set(names)):
+        raise ConfigError("agent names must be unique")
+    return tuple(agents)
 
 
 def _parse_permissions(raw: Any) -> PermissionsConfig:

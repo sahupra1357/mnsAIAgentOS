@@ -25,6 +25,8 @@ from agent_harness.domain import (
     PermissionMode,
     RunStatus,
     SteerMessage,
+    TodoItem,
+    TodoStatus,
     ToolCall,
     ToolResult,
     ToolResultStatus,
@@ -439,6 +441,16 @@ def _decode_run(value: str) -> RunRecord:
         error=data.get("error"),
         version=int(data.get("version", 0)),
         mode=PermissionMode(data.get("mode", PermissionMode.DEFAULT.value)),
+        parent_run_id=data.get("parent_run_id"),
+        parent_call_id=data.get("parent_call_id"),
+        depth=int(data.get("depth", 0)),
+        allowed_tools=(
+            tuple(data["allowed_tools"]) if data.get("allowed_tools") is not None else None
+        ),
+        todos=tuple(
+            TodoItem(item["id"], item["content"], TodoStatus(item["status"]))
+            for item in data.get("todos", ())
+        ),
     )
 
 
