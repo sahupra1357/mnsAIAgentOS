@@ -1,0 +1,126 @@
+"""An in-process run store useful for tests and ephemeral applications."""
+
+from __future__ import annotations
+
+import asyncio
+from copy import deepcopy
+from dataclasses import replace
+from typing import Sequence
+from uuid import uuid4
+
+from agent_harness.domain import ConcurrencyError, RunEvent, RunRecord, utc_now
+
+
+class InMemoryRunStore:
+    """Keep snapshots and append-only events behind the ``RunStore`` protocol.
+
+    Values are copied at the boundary so callers cannot mutate persisted state
+    without a successful checkpoint.  A checkpoint atomically appends all of
+    its events and replaces the snapshot while holding one lock.
+    """
+
+    def __init__(self) -> None:
+        self._runs: dict[str, RunRecord] = {}
+        self._events: dict[str, list[RunEvent]] = {}
+        self._event_ids: set[str] = set()
+        self._lock = asyncio.Lock()
+
+    async def create_run(self, run: RunRecord, event: RunEvent) -> None:
+        _validate_run_event(run, event)
+        if run.version != 0:
+            raise ValueError("a new run must have version 0")
+        stored_event = _with_event_id(event)
+        assert stored_event.id is not None
+        async with self._lock:
+            if run.id in self._runs:
+                raise ValueError(f"run already exists: {run.id}")
+            if stored_event.id in self._event_ids:
+                raise ValueError(f"event already exists: {stored_event.id}")
+            self._runs[run.id] = deepcopy(run)
+            self._events[run.id] = [deepcopy(stored_event)]
+            self._event_ids.add(stored_event.id)
+
+    async def get_run(self, run_id: str) -> RunRecord | None:
+        _validate_identifier(run_id, "run_id")
+        async with self._lock:
+            run = self._runs.get(run_id)
+            return deepcopy(run) if run is not None else None
+
+    async def save_checkpoint(
+        self,
+        run: RunRecord,
+        events: Sequence[RunEvent],
+        *,
+        expected_version: int,
+    ) -> None:
+        _validate_identifier(run.id, "run.id")
+        if expected_version < 0:
+            raise ValueError("expected_version must be non-negative")
+        stored_events = [_with_event_id(event) for event in events]
+        for stored_event in stored_events:
+            assert stored_event.id is not None
+        for event in stored_events:
+            _validate_run_event(run, event)
+
+        async with self._lock:
+            current = self._runs.get(run.id)
+            if current is None:
+                raise KeyError(f"unknown run: {run.id}")
+            if current.version != expected_version:
+                raise ConcurrencyError(
+                    f"run {run.id!r} is version {current.version}, "
+                    f"expected {expected_version}"
+                )
+            duplicate = next(
+                (_event_id(event) for event in stored_events if _event_id(event) in self._event_ids),
+                None,
+            )
+            ids = [_event_id(event) for event in stored_events]
+            if duplicate is not None or len(ids) != len(set(ids)):
+                raise ValueError(f"event already exists: {duplicate or 'duplicate in checkpoint'}")
+
+            new_version = expected_version + 1
+            snapshot = deepcopy(run)
+            snapshot.version = new_version
+            snapshot.updated_at = utc_now()
+            self._events[run.id].extend(deepcopy(stored_events))
+            self._event_ids.update(_event_id(event) for event in stored_events)
+            self._runs[run.id] = snapshot
+
+            # The protocol has no return value, so reflect the committed version
+            # in the caller's mutable snapshot.
+            run.version = new_version
+            run.updated_at = snapshot.updated_at
+
+    async def list_events(self, run_id: str) -> Sequence[RunEvent]:
+        _validate_identifier(run_id, "run_id")
+        async with self._lock:
+            return tuple(deepcopy(self._events.get(run_id, ())))
+
+
+def _with_event_id(event: RunEvent) -> RunEvent:
+    event_id = event.id or uuid4().hex
+    _validate_identifier(event_id, "event.id")
+    if event.id is not None:
+        return event
+    return replace(event, id=event_id)
+
+
+def _event_id(event: RunEvent) -> str:
+    if event.id is None:
+        raise ValueError("persisted events must have IDs")
+    return event.id
+
+
+def _validate_run_event(run: RunRecord, event: RunEvent) -> None:
+    _validate_identifier(run.id, "run.id")
+    _validate_identifier(event.run_id, "event.run_id")
+    if event.run_id != run.id:
+        raise ValueError("event.run_id must match run.id")
+    if event.step < 0:
+        raise ValueError("event.step must be non-negative")
+
+
+def _validate_identifier(value: str, field: str) -> None:
+    if not isinstance(value, str) or not value.strip() or len(value) > 256:
+        raise ValueError(f"{field} must be a non-empty string of at most 256 characters")

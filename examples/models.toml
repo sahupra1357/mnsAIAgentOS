@@ -1,0 +1,49 @@
+# Select this profile by default. Override it with
+# AGENT_HARNESS_DEFAULT_MODEL_PROFILE or --model-profile.
+default_model_profile = "local"
+
+# Any server exposing an OpenAI-compatible /chat/completions endpoint can be
+# used: a hosted provider, vLLM, llama.cpp server, Ollama's compatible API, etc.
+[models.local]
+adapter = "openai_compatible"
+model = "your-model-name"
+endpoint = "http://127.0.0.1:8000/v1"
+timeout_seconds = 60
+max_retries = 2
+retry_backoff_seconds = 0.25
+
+[models.local.parameters]
+temperature = 0.2
+
+[models.hosted]
+adapter = "openai_compatible"
+model = "your-hosted-model"
+endpoint = "https://provider.example/v1"
+api_key_env = "HOSTED_MODEL_API_KEY"
+timeout_seconds = 60
+max_retries = 2
+retry_backoff_seconds = 0.25
+
+[models.hosted.parameters]
+temperature = 0.2
+
+# Enable repository coding tools by setting enabled = true. The default Docker
+# backend has no network and pauses before writes, commands, commits, or PRs.
+[coding]
+enabled = false
+workspace = "."
+execution_runtime = "docker"
+approval_mode = "side_effects"
+command_timeout_seconds = 120
+max_output_bytes = 128000
+enable_git_commit = true
+enable_pull_requests = false
+
+[coding.docker]
+image = "python:3.12-slim"
+network_enabled = false
+cpus = 1.0
+memory = "1g"
+pids_limit = 256
+read_only_root = true
+run_as_host_user = true
