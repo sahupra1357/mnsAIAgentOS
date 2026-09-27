@@ -11,7 +11,14 @@ from dataclasses import replace
 from typing import Sequence
 from uuid import uuid4
 
-from agent_harness.domain import ConcurrencyError, RunEvent, RunRecord, ToolResult, utc_now
+from agent_harness.domain import (
+    ConcurrencyError,
+    RunEvent,
+    RunRecord,
+    SteerMessage,
+    ToolResult,
+    utc_now,
+)
 
 
 class InMemoryRunStore:
@@ -30,7 +37,21 @@ class InMemoryRunStore:
         self._events: dict[str, list[RunEvent]] = {}
         self._event_ids: set[str] = set()
         self._tool_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
+        self._steers: dict[str, list[SteerMessage]] = {}
         self._lock = asyncio.Lock()
+
+    async def add_steer(self, run_id: str, content: str) -> SteerMessage:
+        _validate_identifier(run_id, "run_id")
+        async with self._lock:
+            if run_id not in self._runs:
+                raise KeyError(f"unknown run: {run_id}")
+            steer = SteerMessage(uuid4().hex, run_id, content, utc_now())
+            self._steers.setdefault(run_id, []).append(steer)
+            return steer
+
+    async def list_steers(self, run_id: str) -> Sequence[SteerMessage]:
+        async with self._lock:
+            return tuple(self._steers.get(run_id, ()))
 
     async def enqueue(self, run_id: str) -> None:
         _validate_identifier(run_id, "run_id")

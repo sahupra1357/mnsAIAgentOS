@@ -16,6 +16,9 @@ Endpoints (all JSON; every route except ``/healthz`` requires
     GET  /runs/{id}/events?after=N
     GET  /runs/{id}/events/stream?after=N   (server-sent events)
     POST /runs/{id}/cancel
+    POST /runs/{id}/messages       {"content", "budget"?}  (continue a completed run)
+    POST /runs/{id}/steer          {"content"}  (message for a run in progress)
+    GET  /runs/{id}/usage
     POST /runs/{id}/resume
     GET  /runs/{id}/approval
     POST /runs/{id}/approval        {"call_id", "decision": "allow" | "deny"}
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hmac
 import json
 import re
@@ -177,6 +181,9 @@ class HarnessAPI:
             ("GET", "/events"): lambda: self._send_events(send, run_id, query),
             ("GET", "/events/stream"): lambda: self._stream_events(send, run_id, query),
             ("POST", "/cancel"): lambda: self._cancel(send, run_id),
+            ("POST", "/messages"): lambda: self._continue(send, run_id, receive),
+            ("POST", "/steer"): lambda: self._steer(send, run_id, receive),
+            ("GET", "/usage"): lambda: self._send_usage(send, run_id),
             ("POST", "/resume"): lambda: self._resume(send, run_id),
             ("GET", "/approval"): lambda: self._send_approval(send, run_id),
             ("POST", "/approval"): lambda: self._decide(send, run_id, receive),
@@ -342,6 +349,52 @@ class HarnessAPI:
             }
         )
         await send({"type": "http.response.body", "body": data})
+
+    async def _continue(self, send: Send, run_id: str, receive: Receive) -> None:
+        body = await self._body(receive)
+        unknown = set(body) - {"content", "budget"}
+        if unknown:
+            raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
+        content = _required_text(body.get("content"), "content")
+        current = await self._load(run_id)
+        raised = _budget(body.get("budget"))
+        budget = None
+        if raised is not None:
+            # Only the supplied limits change; the rest keep the run's values.
+            supplied = body["budget"]
+            budget = dataclasses.replace(
+                current.budget, **{name: getattr(raised, name) for name in supplied}
+            )
+        try:
+            run = await self._orchestrator.continue_run(run_id, content, budget=budget)
+        except ValueError as exc:
+            raise ApiError(409, str(exc)) from exc
+        await self._queue.enqueue(run_id)
+        await _json(send, 202, {"id": run.id, "status": run.status.value})
+
+    async def _steer(self, send: Send, run_id: str, receive: Receive) -> None:
+        body = await self._body(receive)
+        unknown = set(body) - {"content"}
+        if unknown:
+            raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
+        content = _required_text(body.get("content"), "content")
+        run = await self._load(run_id)
+        try:
+            steer = await self._orchestrator.steer(run_id, content)
+        except ValueError as exc:
+            raise ApiError(409, str(exc)) from exc
+        if run.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
+            await self._queue.enqueue(run_id)  # no-op if already queued or leased
+        await _json(send, 202, {"id": run_id, "steer_id": steer.id, "status": run.status.value})
+
+    async def _send_usage(self, send: Send, run_id: str) -> None:
+        await self._load(run_id)
+        usage = await self._orchestrator.usage(run_id)
+        payload = {
+            field: getattr(usage, field) for field in usage.__dataclass_fields__
+        }
+        payload["status"] = usage.status.value
+        await _json(send, 200, payload)
 
     async def _cancel(self, send: Send, run_id: str) -> None:
         await self._load(run_id)

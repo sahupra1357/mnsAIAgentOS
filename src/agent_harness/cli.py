@@ -10,6 +10,7 @@ import os
 import signal
 import sys
 import tempfile
+from dataclasses import replace
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -63,6 +64,33 @@ def _parser() -> argparse.ArgumentParser:
     decision.add_argument("--allow", action="store_true", help="allow the pending call")
     decision.add_argument("--deny", action="store_true", help="deny the pending call")
     approve.add_argument("--call-id", help="call ID when more than one approval is pending")
+
+    continue_ = subcommands.add_parser(
+        "continue", help="send a follow-up message to a completed run and execute it"
+    )
+    _common_runtime_arguments(continue_)
+    continue_.add_argument("run_id")
+    continue_.add_argument("message")
+    continue_.add_argument("--stream", action="store_true")
+    continue_.add_argument("--max-steps", type=int, help="raise the step budget")
+    continue_.add_argument("--max-wall-seconds", type=float, help="raise the wall-clock budget")
+    continue_.add_argument("--max-tokens", type=int, help="raise the token budget")
+    continue_.add_argument("--max-cost-usd", type=float, help="raise the cost budget")
+
+    steer = subcommands.add_parser(
+        "steer", help="queue a message for a run in progress (applied at its next model turn)"
+    )
+    _common_runtime_arguments(steer)
+    steer.add_argument("run_id")
+    steer.add_argument("message")
+
+    cancel = subcommands.add_parser("cancel", help="cancel a run")
+    _common_runtime_arguments(cancel)
+    cancel.add_argument("run_id")
+
+    status = subcommands.add_parser("status", help="show a run's status and usage against budget")
+    _common_runtime_arguments(status)
+    status.add_argument("run_id")
 
     serve = subcommands.add_parser(
         "serve", help="serve the HTTP API with in-process queue workers (needs the [api] extra)"
@@ -267,6 +295,72 @@ async def _doctor_command(args: argparse.Namespace) -> int:
     return 1 if any(check.status is CheckStatus.FAIL for check in checks) else 0
 
 
+async def _continue_command(args: argparse.Namespace) -> int:
+    stream = _StdoutStream() if args.stream else None
+    app = _build(args, stream=stream)
+    async with app:
+        budget = None
+        raised = {
+            "max_steps": args.max_steps,
+            "max_wall_seconds": args.max_wall_seconds,
+            "max_tokens": args.max_tokens,
+            "max_cost_usd": args.max_cost_usd,
+        }
+        if any(value is not None for value in raised.values()):
+            current = await app.store.get_run(args.run_id)
+            if current is None:
+                raise KeyError(f"unknown run: {args.run_id}")
+            budget = replace(
+                current.budget, **{k: v for k, v in raised.items() if v is not None}
+            )
+        await app.orchestrator.continue_run(args.run_id, args.message, budget=budget)
+        finished = await app.orchestrator.run(args.run_id)
+        return await _print_result(
+            app, finished, streamed=stream is not None and stream.printed
+        )
+
+
+async def _steer_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    async with app:
+        steer = await app.orchestrator.steer(args.run_id, args.message)
+        print(f"steer_id={steer.id} queued for run {args.run_id}", file=sys.stderr)
+    return 0
+
+
+async def _cancel_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    async with app:
+        run = await app.orchestrator.cancel(args.run_id)
+        print(f"run_id={run.id} status={run.status.value}", file=sys.stderr)
+    return 0
+
+
+async def _status_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    async with app:
+        usage = await app.orchestrator.usage(args.run_id)
+
+    def limit(value: object) -> str:
+        return "unlimited" if value is None else str(value)
+
+    estimated = " (estimated)" if usage.cost_estimated else ""
+    print(f"run_id={usage.run_id} status={usage.status.value} profile={usage.model_profile}")
+    print(f"steps:  {usage.steps} / {usage.max_steps}")
+    print(
+        f"tokens: {usage.total_tokens} / {limit(usage.max_tokens)} "
+        f"(input {usage.input_tokens}, cached {usage.cached_input_tokens}, "
+        f"output {usage.output_tokens})"
+    )
+    print(f"cost:   ${usage.cost_usd:.4f} / {limit(usage.max_cost_usd)}{estimated}")
+    print(f"time:   {usage.active_seconds:.1f}s active / {usage.max_wall_seconds:.0f}s")
+    print(
+        f"calls:  {usage.model_calls} model, {usage.tool_calls} tool, "
+        f"{usage.fallbacks} fallback switches"
+    )
+    return 0
+
+
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -375,6 +469,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_worker_command(args))
         if args.command == "eval":
             return asyncio.run(_eval_command(args))
+        if args.command == "continue":
+            return asyncio.run(_continue_command(args))
+        if args.command == "steer":
+            return asyncio.run(_steer_command(args))
+        if args.command == "cancel":
+            return asyncio.run(_cancel_command(args))
+        if args.command == "status":
+            return asyncio.run(_status_command(args))
     except (ConfigError, HarnessError, KeyError, ValueError) as exc:
         print(f"agent-harness: {exc}", file=sys.stderr)
         return 2

@@ -117,6 +117,7 @@ def build_application(
         stream_listener=stream_listener,
         artifacts=artifacts,
         artifact_threshold_bytes=config.artifacts.threshold_bytes,
+        steering=store,
     )
     return HarnessApplication(
         config=config,
