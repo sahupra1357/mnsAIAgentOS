@@ -90,6 +90,7 @@ async def _run_command(args: argparse.Namespace) -> int:
         run = await app.orchestrator.create_run(
             model_profile=profile,
             route=route,
+            versions=app.run_versions(profile),
             messages=messages,
             budget=RunBudget(
                 max_steps=args.max_steps,

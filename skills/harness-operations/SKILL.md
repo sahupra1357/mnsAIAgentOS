@@ -10,6 +10,19 @@ framework, telemetry SDK, or database driver. Each one enters through a protocol
 `domain.py` (or a sibling module) with a no-op or stdlib default. Optional third-party
 packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported lazily.
 
+## Status
+
+- 4a is implemented: items 1, 2, and 10.
+  - `IdempotencyStore` protocol in `domain.py`, implemented by both run stores
+    (SQLite table `tool_results`).
+  - `ToolRuntime(idempotency_store=...)` / `attach_idempotency_store`.
+  - `versioning.py` hashes; `create_run(versions=...)`; `CONFIG_DRIFT` event.
+  - `Usage.cached_input_tokens`.
+- Deviation from item 1 as written: the result is stored in its own transaction
+  immediately after the handler succeeds, not in the checkpoint transaction. The runtime,
+  not the orchestrator, executes the handler. This covers a crash after the handler but
+  before the checkpoint, which is the case that matters.
+
 ## 1. Durable tool idempotency
 - Add intent-level store methods: `get_tool_result(key)` / `put_tool_result(key, fingerprint, result)`.
 - SQLite: a new table keyed by the idempotency key, written in the same transaction as

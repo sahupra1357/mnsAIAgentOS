@@ -8,7 +8,7 @@ from dataclasses import replace
 from typing import Sequence
 from uuid import uuid4
 
-from agent_harness.domain import ConcurrencyError, RunEvent, RunRecord, utc_now
+from agent_harness.domain import ConcurrencyError, RunEvent, RunRecord, ToolResult, utc_now
 
 
 class InMemoryRunStore:
@@ -23,7 +23,20 @@ class InMemoryRunStore:
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[RunEvent]] = {}
         self._event_ids: set[str] = set()
+        self._tool_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._lock = asyncio.Lock()
+
+    async def get_tool_result(
+        self, tool_name: str, idempotency_key: str
+    ) -> tuple[str, ToolResult] | None:
+        async with self._lock:
+            return self._tool_results.get((tool_name, idempotency_key))
+
+    async def put_tool_result(
+        self, tool_name: str, idempotency_key: str, fingerprint: str, result: ToolResult
+    ) -> None:
+        async with self._lock:
+            self._tool_results.setdefault((tool_name, idempotency_key), (fingerprint, result))
 
     async def create_run(self, run: RunRecord, event: RunEvent) -> None:
         _validate_run_event(run, event)

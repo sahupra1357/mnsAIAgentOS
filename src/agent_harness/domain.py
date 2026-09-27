@@ -64,6 +64,7 @@ class EventType(StrEnum):
     RUN_CANCELLED = "run_cancelled"
     BUDGET_EXHAUSTED = "budget_exhausted"
     MODEL_FALLBACK = "model_fallback"
+    CONFIG_DRIFT = "config_drift"
 
 
 class ToolRisk(StrEnum):
@@ -104,6 +105,8 @@ class Usage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None
+    # Prompt tokens served from the server's prefix cache; None when unreported.
+    cached_input_tokens: int | None = None
 
     @property
     def total_tokens(self) -> int | None:
@@ -251,6 +254,23 @@ class ToolExecutor(Protocol):
         idempotency_key: str,
         approved: bool = False,
     ) -> ToolResult: ...
+
+
+class IdempotencyStore(Protocol):
+    """Durable record of successful side-effecting tool results.
+
+    Keys are ``(tool_name, idempotency_key)``; the fingerprint is the canonical
+    JSON of the call arguments, so a reused key with different arguments can be
+    rejected.
+    """
+
+    async def get_tool_result(
+        self, tool_name: str, idempotency_key: str
+    ) -> tuple[str, ToolResult] | None: ...
+
+    async def put_tool_result(
+        self, tool_name: str, idempotency_key: str, fingerprint: str, result: ToolResult
+    ) -> None: ...
 
 
 class RunStore(Protocol):

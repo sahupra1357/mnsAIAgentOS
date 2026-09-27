@@ -216,7 +216,7 @@ async def _check_prefix_cache(client: ModelClient) -> DiagnosticCheck:
         second = await client.complete(request)
     except HarnessError as exc:
         return DiagnosticCheck("prefix_cache", CheckStatus.FAIL, _brief(exc))
-    cached = second.metadata.get("cached_input_tokens")
+    cached = second.usage.cached_input_tokens
     if cached is None:
         return DiagnosticCheck(
             "prefix_cache",

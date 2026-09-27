@@ -22,6 +22,8 @@ from agent_harness.domain import (
     RunRecord,
     RunStatus,
     ToolCall,
+    ToolResult,
+    ToolResultStatus,
     utc_now,
 )
 
@@ -74,6 +76,15 @@ class SQLiteRunStore:
             BEGIN
                 SELECT RAISE(ABORT, 'run events are append-only');
             END;
+
+            CREATE TABLE IF NOT EXISTS tool_results (
+                tool_name TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tool_name, idempotency_key)
+            );
 
             CREATE TRIGGER IF NOT EXISTS run_events_no_delete
             BEFORE DELETE ON run_events
@@ -193,6 +204,42 @@ class SQLiteRunStore:
             ).fetchall()
         return tuple(_decode_event(row) for row in rows)
 
+    async def get_tool_result(
+        self, tool_name: str, idempotency_key: str
+    ) -> tuple[str, ToolResult] | None:
+        async with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT fingerprint, result_json FROM tool_results
+                WHERE tool_name = ? AND idempotency_key = ?
+                """,
+                (tool_name, idempotency_key),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["fingerprint"], _decode_tool_result(row["result_json"])
+
+    async def put_tool_result(
+        self, tool_name: str, idempotency_key: str, fingerprint: str, result: ToolResult
+    ) -> None:
+        """Record a result once; the first successful result for a key wins."""
+
+        async with self._lock:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO tool_results(
+                    tool_name, idempotency_key, fingerprint, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    tool_name,
+                    idempotency_key,
+                    fingerprint,
+                    _json_dumps(asdict(result)),
+                    utc_now().isoformat(),
+                ),
+            )
+
     def _insert_event(self, event: RunEvent) -> None:
         self._connection.execute(
             """
@@ -266,6 +313,18 @@ def _decode_run(value: str) -> RunRecord:
         ),
         error=data.get("error"),
         version=int(data.get("version", 0)),
+    )
+
+
+def _decode_tool_result(value: str) -> ToolResult:
+    data = json.loads(value)
+    return ToolResult(
+        call_id=data["call_id"],
+        name=data["name"],
+        status=ToolResultStatus(data["status"]),
+        output=data.get("output", {}),
+        model_message=data.get("model_message", ""),
+        retryable=bool(data.get("retryable", False)),
     )
 
 

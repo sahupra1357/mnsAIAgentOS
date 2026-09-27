@@ -13,6 +13,7 @@ from .model_gateway import ModelGateway
 from .orchestrator import AgentOrchestrator, OrchestratorSettings
 from .persistence import SQLiteRunStore
 from .tools import ToolRuntime, create_default_runtime
+from .versioning import profile_sha256
 
 
 @dataclass(slots=True)
@@ -24,6 +25,16 @@ class HarnessApplication:
     tools: ToolRuntime
     store: SQLiteRunStore
     orchestrator: AgentOrchestrator
+
+    def run_versions(self, model_profile: str) -> dict[str, str]:
+        """Versions recorded on a new run, alongside prompt and tool hashes."""
+
+        from . import __version__
+
+        return {
+            "harness_version": __version__,
+            "profile_sha256": profile_sha256(self.config.model_profile(model_profile)),
+        }
 
     async def close(self) -> None:
         await self.store.close()
@@ -47,6 +58,7 @@ def build_application(
 
     config = load_config(config_path)
     models = ModelGateway(config)
+    store = SQLiteRunStore(Path(database_path))
     tool_runtime = tools
     if tool_runtime is None:
         if config.coding.enabled:
@@ -56,7 +68,9 @@ def build_application(
             )
         else:
             tool_runtime = create_default_runtime()
-    store = SQLiteRunStore(Path(database_path))
+        # Successful tool results survive restarts, so a replayed call after a
+        # crash returns the recorded result instead of repeating the side effect.
+        tool_runtime.attach_idempotency_store(store)
     orchestrator = AgentOrchestrator(
         models=models,
         tools=tool_runtime,
