@@ -44,7 +44,15 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
   - `api.py`: framework-free ASGI `HarnessAPI` with bearer auth, whose lifespan hosts
     workers, and `create_api(app)`.
   - CLI: `serve` (uvicorn, `[api]` extra) and `worker`.
-- Remaining for 4d: items 7 (artifacts), 8 (memory), 9 (evaluation runner).
+- 4d is implemented: items 7, 8, and 9.
+  - `artifacts.py`: content-addressed `LocalArtifactStore` and the `read_artifact`
+    tool. The orchestrator offloads tool results above the threshold, keeping a
+    preview in the message and `artifact_id` in the event.
+  - `memory.py`: `SQLiteMemoryStore` (FTS5 with a quoted-terms query, LIKE fallback,
+    namespaces, dedupe) and the `memory_search` / `memory_write` tools.
+  - `evals.py`: TOML scenarios (scripted or `--live`), assertions, JSON report.
+  - CLI: `eval`.
+  - Config: `[artifacts]` and `[memory]` sections.
 
 ## 1. Durable tool idempotency
 - Add intent-level store methods: `get_tool_result(key)` / `put_tool_result(key, fingerprint, result)`.

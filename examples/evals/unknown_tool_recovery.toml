@@ -1,0 +1,14 @@
+# The model calls a tool that does not exist; the harness reports it and the model recovers.
+name = "unknown_tool_recovery"
+prompt = "Look up today's weather."
+
+[[model]]
+tool_calls = [{ name = "weather", arguments = { city = "Pune" } }]
+
+[[model]]
+content = "I don't have a weather tool, so I can't look that up."
+
+[expect]
+status = "completed"
+tool_calls = ["weather"]
+output_contains = ["don't have a weather tool"]

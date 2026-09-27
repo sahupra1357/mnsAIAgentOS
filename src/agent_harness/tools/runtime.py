@@ -60,6 +60,11 @@ class ToolRuntime:
 
         self._idempotency_store = store
 
+    def register(self, spec: ToolSpec, handler: Any) -> None:
+        """Explicitly add a capability to this runtime's registry."""
+
+        self._registry.register(spec, handler)
+
     def specs(self) -> tuple[ToolSpec, ...]:
         return self._registry.specs()
 

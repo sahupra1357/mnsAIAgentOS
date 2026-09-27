@@ -1,0 +1,11 @@
+# Live only (no scripted model): agent-harness eval --config models.toml examples/evals --live --model-profile ollama
+name = "live_multiplication"
+prompt = "Use the calculator tool to multiply 27 by 19. Reply with just the number."
+
+[budget]
+max_steps = 4
+
+[expect]
+status = "completed"
+tool_calls = ["calculator"]
+output_contains = ["513"]

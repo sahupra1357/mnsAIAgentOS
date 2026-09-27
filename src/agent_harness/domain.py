@@ -317,6 +317,37 @@ class IdempotencyStore(Protocol):
     ) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactRef:
+    """A stored blob, addressed by the SHA-256 of its content."""
+
+    id: str
+    size: int
+    media_type: str
+
+
+class ArtifactStore(Protocol):
+    async def put(self, data: bytes, media_type: str) -> ArtifactRef: ...
+
+    async def get(self, artifact_id: str) -> bytes | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryItem:
+    id: str
+    text: str
+    metadata: Mapping[str, str] = field(default_factory=dict)
+    created_at: datetime | None = None
+
+
+class MemoryStore(Protocol):
+    """Long-term notes retrieved by search; content is data, never instructions."""
+
+    async def put(self, text: str, metadata: Mapping[str, str] | None = None) -> MemoryItem: ...
+
+    async def search(self, query: str, limit: int = 5) -> Sequence[MemoryItem]: ...
+
+
 class RunQueue(Protocol):
     """Work queue of run IDs with exclusive, expiring worker leases.
 

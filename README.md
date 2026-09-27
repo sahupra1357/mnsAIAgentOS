@@ -354,6 +354,52 @@ the boundary: unknown fields, oversized text, and out-of-range budgets are rejec
 run that keeps raising unexpected errors is removed from the queue after 3 attempts;
 it can be resumed explicitly after investigation.
 
+## Artifacts, Memory, and Evaluations
+
+Enable either feature in `models.toml`. Both are off by default:
+
+```toml
+[artifacts]
+enabled = true
+directory = "artifacts"      # relative to the config file
+threshold_bytes = 16384      # larger tool results are stored as artifacts
+
+[memory]
+enabled = true
+namespace = "my-project"     # isolates notes between projects
+# database = "memory.sqlite3"  # defaults to the run database
+```
+
+**Artifacts.** A tool result larger than the threshold is stored content-addressed.
+The model sees a preview plus the artifact ID, and can page through the full text
+with the `read_artifact` tool. Events record `artifact_id`, and the API serves the
+content at `GET /artifacts/{id}`.
+
+**Memory.** Adds the `memory_search` (read-only) and `memory_write` (side-effect)
+tools, backed by SQLite full-text search. Search results are labeled as notes, not
+instructions, because anything a model saved earlier is untrusted input.
+
+**Evaluations.** Scenario files (TOML) run the real orchestrator, with the same tools
+and context policy, against scripted responses (offline, suitable for CI) or live
+models:
+
+```bash
+.venv/bin/agent-harness eval --config models.toml examples/evals --report eval.json
+.venv/bin/agent-harness eval --config models.toml examples/evals --live --model-profile ollama
+```
+
+Scenarios can assert:
+- the final status;
+- the tool calls made, in order;
+- text the output must or must not contain;
+- the maximum number of steps;
+- required events;
+- expected error text.
+
+They can also auto-approve or auto-deny approval pauses. See `src/agent_harness/evals.py`
+for the file format and `examples/evals/` for samples. The command exits 1 if any
+scenario fails.
+
 ## Telemetry and Streaming
 
 Stream the answer as it is generated, and write sanitized telemetry:

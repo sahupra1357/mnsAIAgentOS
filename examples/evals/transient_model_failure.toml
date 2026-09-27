@@ -1,0 +1,17 @@
+# One transient provider error is retried within the step's attempt budget.
+name = "transient_model_failure"
+prompt = "Echo the word ready."
+
+[[model]]
+error = "retryable"
+
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "ready" } }]
+
+[[model]]
+content = "ready"
+
+[expect]
+status = "completed"
+tool_calls = ["echo"]
+output_contains = ["ready"]

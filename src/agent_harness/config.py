@@ -165,6 +165,34 @@ def _validated_headers_env(raw: Mapping[str, str]) -> dict[str, str]:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactsConfig:
+    """Store tool results larger than ``threshold_bytes`` outside the message history."""
+
+    enabled: bool = False
+    directory: str = "artifacts"
+    threshold_bytes: int = 16_384
+
+    def __post_init__(self) -> None:
+        if self.threshold_bytes < 1024:
+            raise ConfigError("artifacts.threshold_bytes must be at least 1024")
+        if not self.directory.strip():
+            raise ConfigError("artifacts.directory must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryConfig:
+    """Long-term notes exposed as memory_search / memory_write tools."""
+
+    enabled: bool = False
+    namespace: str = "default"
+    database: str | None = None
+
+    def __post_init__(self) -> None:
+        if not _PROFILE_NAME.fullmatch(self.namespace):
+            raise ConfigError(f"invalid memory.namespace: {self.namespace!r}")
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessConfig:
     """Validated application configuration.
 
@@ -176,6 +204,8 @@ class HarnessConfig:
     default_model_profile: str
     coding: CodingAgentConfig = field(default_factory=CodingAgentConfig)
     routes: Mapping[str, str] = field(default_factory=dict)
+    artifacts: ArtifactsConfig = field(default_factory=ArtifactsConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def __post_init__(self) -> None:
         copied = dict(self.models)
@@ -295,7 +325,29 @@ def load_config(
         default_model_profile=default,
         coding=coding,
         routes=raw_routes,
+        artifacts=_parse_section(raw, "artifacts", ArtifactsConfig),
+        memory=_parse_section(raw, "memory", MemoryConfig),
     )
+
+
+def _parse_section(raw: Mapping[str, Any], name: str, section_type: Any) -> Any:
+    values = raw.get(name)
+    if values is None:
+        return section_type()
+    if not isinstance(values, dict):
+        raise ConfigError(f"{name} must be a TOML table")
+    allowed = set(section_type.__dataclass_fields__)
+    unknown = set(values) - allowed
+    if unknown:
+        raise ConfigError(f"unknown fields in {name}: {', '.join(sorted(unknown))}")
+    defaults = section_type()
+    for key, value in values.items():
+        expected = type(getattr(defaults, key))
+        if getattr(defaults, key) is None:
+            expected = str
+        if isinstance(value, bool) != (expected is bool) or not isinstance(value, expected):
+            raise ConfigError(f"{name}.{key} must be of type {expected.__name__}")
+    return section_type(**values)
 
 
 def _apply_environment_overrides(
