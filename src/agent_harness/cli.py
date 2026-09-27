@@ -47,6 +47,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--stream", action="store_true", help="print assistant text as it is generated"
     )
+    run.add_argument(
+        "--mode",
+        choices=["default", "accept_edits", "plan", "bypass"],
+        help="permission mode for this run (default from [permissions] mode)",
+    )
 
     resume = subcommands.add_parser("resume", help="resume a durable run by ID")
     _common_runtime_arguments(resume)
@@ -64,6 +69,17 @@ def _parser() -> argparse.ArgumentParser:
     decision.add_argument("--allow", action="store_true", help="allow the pending call")
     decision.add_argument("--deny", action="store_true", help="deny the pending call")
     approve.add_argument("--call-id", help="call ID when more than one approval is pending")
+    approve.add_argument("--feedback", help="message returned to the model with a denial")
+    approve.add_argument(
+        "--mode",
+        choices=["default", "accept_edits", "plan", "bypass"],
+        help="for plan approvals: permission mode to switch to",
+    )
+
+    mode = subcommands.add_parser("mode", help="change a run's permission mode")
+    _common_runtime_arguments(mode)
+    mode.add_argument("run_id")
+    mode.add_argument("mode", choices=["default", "accept_edits", "plan", "bypass"])
 
     continue_ = subcommands.add_parser(
         "continue", help="send a follow-up message to a completed run and execute it"
@@ -193,6 +209,7 @@ async def _run_command(args: argparse.Namespace) -> int:
         run = await app.orchestrator.create_run(
             model_profile=profile,
             route=route,
+            mode=args.mode,
             versions=app.run_versions(profile),
             messages=messages,
             budget=RunBudget(
@@ -225,6 +242,8 @@ async def _approve_command(args: argparse.Namespace) -> int:
             args.run_id,
             call_id=pending.call_id,
             approved=args.allow,
+            feedback=args.feedback,
+            mode=args.mode,
         )
         resumed = await app.orchestrator.resume(resolved.id)
         return await _print_result(app, resumed)
@@ -244,6 +263,7 @@ async def _print_result(
                 + json.dumps(
                     {
                         "call_id": pending.call_id,
+                        "kind": pending.kind,
                         "tool": pending.tool_name,
                         "risk": pending.risk.value,
                         "arguments": pending.arguments,
@@ -318,6 +338,14 @@ async def _continue_command(args: argparse.Namespace) -> int:
         return await _print_result(
             app, finished, streamed=stream is not None and stream.printed
         )
+
+
+async def _mode_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    async with app:
+        run = await app.orchestrator.set_mode(args.run_id, args.mode)
+        print(f"run_id={run.id} mode={run.mode.value}", file=sys.stderr)
+    return 0
 
 
 async def _steer_command(args: argparse.Namespace) -> int:
@@ -473,6 +501,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_continue_command(args))
         if args.command == "steer":
             return asyncio.run(_steer_command(args))
+        if args.command == "mode":
+            return asyncio.run(_mode_command(args))
         if args.command == "cancel":
             return asyncio.run(_cancel_command(args))
         if args.command == "status":

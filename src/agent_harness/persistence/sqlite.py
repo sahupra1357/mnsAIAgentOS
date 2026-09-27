@@ -22,6 +22,7 @@ from agent_harness.domain import (
     RunBudget,
     RunEvent,
     RunRecord,
+    PermissionMode,
     RunStatus,
     SteerMessage,
     ToolCall,
@@ -437,6 +438,7 @@ def _decode_run(value: str) -> RunRecord:
         ),
         error=data.get("error"),
         version=int(data.get("version", 0)),
+        mode=PermissionMode(data.get("mode", PermissionMode.DEFAULT.value)),
     )
 
 

@@ -67,6 +67,23 @@ class EventType(StrEnum):
     CONFIG_DRIFT = "config_drift"
     USER_MESSAGE_ADDED = "user_message_added"
     STEER_APPLIED = "steer_applied"
+    HOOK_DECIDED = "hook_decided"
+    MODE_CHANGED = "mode_changed"
+
+
+class PermissionMode(StrEnum):
+    """How tool calls are authorized for a run (hard guardrails always apply).
+
+    ``default``: permission rules, then each tool's risk policy.
+    ``accept_edits``: workspace edit tools run without asking.
+    ``plan``: read-only tools only, until the plan is approved via ``exit_plan``.
+    ``bypass``: everything not matched by a deny rule runs without asking.
+    """
+
+    DEFAULT = "default"
+    ACCEPT_EDITS = "accept_edits"
+    PLAN = "plan"
+    BYPASS = "bypass"
 
 
 class ToolRisk(StrEnum):
@@ -182,6 +199,7 @@ class RunRecord:
     completed_at: datetime | None = None
     error: str | None = None
     version: int = 0
+    mode: PermissionMode = PermissionMode.DEFAULT
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +220,7 @@ class ApprovalRequest:
     risk: ToolRisk
     arguments: Mapping[str, Any]
     requested_at: datetime
+    kind: str = "tool"  # "tool" or "plan" (an exit_plan request)
 
 
 @dataclass(frozen=True, slots=True)

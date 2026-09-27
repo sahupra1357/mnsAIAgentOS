@@ -10,8 +10,10 @@ from .artifacts import READ_ARTIFACT_SPEC, LocalArtifactStore, read_artifact_han
 from .coding import create_coding_tool_runtime
 from .config import HarnessConfig, load_config
 from .context import BudgetedContextBuilder, ContextPolicy, limits_from_profiles
-from .domain import ArtifactStore, StreamListener, TelemetrySink
+from .domain import ArtifactStore, PermissionMode, StreamListener, TelemetrySink
+from .hooks import CommandHook, HookEvent, HookRunner
 from .memory import MEMORY_SEARCH_SPEC, MEMORY_WRITE_SPEC, SQLiteMemoryStore, memory_tool_handlers
+from .permissions import PermissionPolicy
 from .model_gateway import ModelGateway
 from .orchestrator import AgentOrchestrator, OrchestratorSettings
 from .persistence import SQLiteRunStore
@@ -66,6 +68,7 @@ def build_application(
     context_policy: ContextPolicy | None = None,
     telemetry: TelemetrySink | None = None,
     stream_listener: StreamListener | None = None,
+    hooks: HookRunner | None = None,
 ) -> HarnessApplication:
     """Compose the default local application from replaceable implementations."""
 
@@ -118,6 +121,14 @@ def build_application(
         artifacts=artifacts,
         artifact_threshold_bytes=config.artifacts.threshold_bytes,
         steering=store,
+        hooks=hooks if hooks is not None else _configured_hooks(config, base_path),
+        permissions=PermissionPolicy.from_lists(
+            allow=config.permissions.allow,
+            ask=config.permissions.ask,
+            deny=config.permissions.deny,
+            edit_tools=config.permissions.edit_tools,
+        ),
+        default_mode=PermissionMode(config.permissions.mode),
     )
     return HarnessApplication(
         config=config,
@@ -128,4 +139,23 @@ def build_application(
         telemetry=telemetry,
         artifacts=artifacts,
         memory=memory,
+    )
+
+
+def _configured_hooks(config: HarnessConfig, base_path: Path) -> HookRunner | None:
+    if not config.hooks:
+        return None
+    return HookRunner(
+        [
+            CommandHook(
+                name=hook.name,
+                event=HookEvent(hook.event),
+                argv=hook.command,
+                matcher=hook.matcher,
+                timeout_seconds=hook.timeout_seconds,
+                on_error=hook.on_error,
+                cwd=base_path,
+            )
+            for hook in config.hooks
+        ]
     )
