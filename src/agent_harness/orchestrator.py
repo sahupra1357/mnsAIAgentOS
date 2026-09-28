@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import replace
+from dataclasses import field, replace
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -37,6 +37,7 @@ from agent_harness.domain import (
     ArtifactRef,
     ArtifactStore,
     ConcurrencyError,
+    FileSnapshotter,
     RunUsage,
     SteerMessage,
     SteerStore,
@@ -103,6 +104,17 @@ class OrchestratorSettings:
 
 FallbackLookup = Callable[[str], Sequence[str]]
 
+
+@dataclass(frozen=True, slots=True)
+class RewindPlan:
+    run_id: str
+    to_step: int
+    archived_messages: int
+    files: list[dict[str, Any]]
+    irreversible: list[dict[str, Any]]
+    applied: bool = False
+    notes: list[str] = field(default_factory=list)
+
 _MAX_CHECKPOINT_CONFLICTS = 5
 MAX_USER_MESSAGE_CHARS = 100_000
 
@@ -140,6 +152,7 @@ class AgentOrchestrator:
         subagent_limits: SubagentLimits | None = None,
         task_tracking: bool = False,
         system_context: Callable[[], SystemContext] | None = None,
+        snapshots: FileSnapshotter | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -169,6 +182,7 @@ class AgentOrchestrator:
         self._agent_spec = agent_spec(tuple(self._agents.values())) if self._agents else None
         self._task_tracking = task_tracking
         self._system_context = system_context
+        self._snapshots = snapshots
 
     @property
     def context_builder(self) -> ContextBuilder:
@@ -1276,6 +1290,9 @@ class AgentOrchestrator:
             await self._run_subagent(run, events, call, attempt)
             return
 
+        if spec.writes_paths and self._snapshots is not None:
+            await self._snapshot_files(run, events, call, spec)
+
         idempotency_key = f"{run.id}:{run.step_count}:{call.id}"
         tool_started = self._monotonic()
         try:
@@ -1567,6 +1584,119 @@ class AgentOrchestrator:
                 created_at=self._clock(),
             ),
         )
+
+    async def _snapshot_files(
+        self, run: RunRecord, events: list[RunEvent], call: ToolCall, spec: ToolSpec
+    ) -> None:
+        """Record the pre-images of the files a tool is about to modify.
+
+        Checkpointed *before* execution: a replay after a crash finds the event
+        and never snapshots a post-image.
+        """
+
+        if any(
+            e.type is EventType.FILE_SNAPSHOT and e.step == run.step_count and e.payload.get("call_id") == call.id
+            for e in events
+        ):
+            return
+        paths = [
+            str(call.arguments[field])
+            for field in spec.writes_paths
+            if isinstance(call.arguments.get(field), str)
+        ]
+        if not paths or self._snapshots is None:
+            return
+        entries = await self._snapshots.capture(paths)
+        await self._checkpoint(run, events, RunEvent(
+            run_id=run.id,
+            type=EventType.FILE_SNAPSHOT,
+            payload={"call_id": call.id, "tool": call.name, "files": entries},
+            step=run.step_count,
+            created_at=self._clock(),
+        ))
+
+    async def rewind(self, run_id: str, to_step: int, *, confirm: bool = False) -> RewindPlan:
+        """Undo a settled run back to just before model step ``to_step``.
+
+        Files changed by snapshotting tools from that step on are restored to
+        their earliest pre-image (files created since are deleted). Messages
+        from that step on move to ``archived_messages``; events are kept. The
+        run becomes ``completed`` so it can be continued. Without ``confirm``
+        nothing changes and the plan is returned (a dry run). Side effects that
+        cannot be undone (commands, commits, external calls) are listed.
+        """
+
+        _validate_identifier(run_id, "run_id")
+        run = await self._store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"unknown run: {run_id}")
+        if run.status in {RunStatus.RUNNING, RunStatus.QUEUED}:
+            raise ValueError(f"run is {run.status.value}; cancel it or let it finish before rewinding")
+        assistant_indices = [i for i, m in enumerate(run.messages) if m.role is Role.ASSISTANT]
+        # The Nth assistant message still in the conversation is where step N starts.
+        if not 1 <= to_step <= len(assistant_indices):
+            raise ValueError(f"to_step must be between 1 and {len(assistant_indices)}")
+        cut = assistant_indices[to_step - 1]
+        events = list(await self._store.list_events(run_id))
+        first_step = _step_of_assistant(events, cut_index=to_step, rewinds=_rewind_count(events))
+        earliest: dict[str, Mapping[str, Any]] = {}
+        snapshotted: set[tuple[int, str]] = set()
+        for event in events:
+            if event.type is EventType.FILE_SNAPSHOT and event.step >= first_step:
+                snapshotted.add((event.step, str(event.payload.get("call_id"))))
+                for entry in event.payload.get("files", ()):
+                    earliest.setdefault(str(entry.get("path")), entry)
+        irreversible = [
+            {"step": e.step, "tool": e.payload.get("tool"), "call_id": e.payload.get("call_id")}
+            for e in events
+            if e.type is EventType.TOOL_REQUESTED
+            and e.step >= first_step
+            and e.payload.get("risk") != ToolRisk.READ_ONLY.value
+            and (e.step, str(e.payload.get("call_id"))) not in snapshotted
+        ]
+        plan = RewindPlan(
+            run_id=run.id,
+            to_step=to_step,
+            archived_messages=len(run.messages) - cut,
+            files=[
+                {"path": path, "action": _restore_action(entry)} for path, entry in earliest.items()
+            ],
+            irreversible=irreversible,
+        )
+        if not confirm:
+            return plan
+        notes: list[str] = []
+        if earliest:
+            if self._snapshots is None:
+                raise ValueError("file snapshots exist but no snapshotter is configured")
+            notes = await self._snapshots.restore(list(earliest.values()))
+        archived = run.messages[cut:]
+        run.archived_messages.extend(archived)
+        del run.messages[cut:]
+        now = self._clock()
+        run.status = RunStatus.COMPLETED
+        run.completed_at = now
+        run.error = None
+        await self._checkpoint(run, events, RunEvent(
+            run_id=run.id,
+            type=EventType.REWOUND,
+            payload={
+                "to_step": to_step,
+                "from_event_step": first_step,
+                "archived_messages": len(archived),
+                "files": plan.files,
+                "notes": notes,
+                "irreversible": irreversible,
+            },
+            step=run.step_count,
+            created_at=now,
+        ))
+        for event in events:  # the archived part may have spawned subagents
+            if event.type is EventType.SUBAGENT_STARTED and event.step >= first_step:
+                child = await self._store.get_run(str(event.payload["child_run_id"]))
+                if child is not None and not child.status.is_terminal:
+                    await self.cancel(child.id)
+        return replace(plan, applied=True, notes=notes)
 
     async def _write_todos(
         self, run: RunRecord, events: list[RunEvent], call: ToolCall, attempt: int
@@ -2015,14 +2145,47 @@ _ANNOTATION_EVENTS = frozenset(
         EventType.SUBAGENT_RESUMED,
         EventType.SUBAGENT_FINISHED,
         EventType.TODOS_UPDATED,
+        EventType.FILE_SNAPSHOT,
+        EventType.REWOUND,
     }
 )
+
+
+def _restore_action(entry: Mapping[str, Any]) -> str:
+    if entry.get("error") or entry.get("skipped"):
+        return "cannot_restore"
+    return "restore" if entry.get("existed") else "delete"
+
+
+def _rewind_count(events: Sequence[RunEvent]) -> int:
+    return sum(e.type is EventType.REWOUND for e in events)
+
+
+def _step_of_assistant(events: Sequence[RunEvent], *, cut_index: int, rewinds: int) -> int:
+    """Map "the Nth assistant message still in the conversation" to its model step.
+
+    Accepted model responses (MODEL_RESPONDED ok) each appended one assistant
+    message; responses archived by earlier rewinds no longer count.
+    """
+
+    kept: list[int] = []
+    for event in events:
+        if event.type is EventType.REWOUND:
+            archived = int(event.payload.get("to_step", 1)) - 1
+            kept = kept[:archived]
+        elif event.type is EventType.MODEL_RESPONDED and event.payload.get("ok") is True:
+            kept.append(event.step)
+    if cut_index - 1 < len(kept):
+        return kept[cut_index - 1]
+    return kept[-1] + 1 if kept else 1
 
 
 def _waiting_child(events: Sequence[RunEvent]) -> RunEvent | None:
     """The SUBAGENT_WAITING event the run is paused on, if any."""
 
     for event in reversed(events):
+        if event.type is EventType.REWOUND:
+            return None
         if event.type is EventType.SUBAGENT_RESUMED:
             return None
         if event.type is EventType.SUBAGENT_WAITING:
@@ -2191,6 +2354,8 @@ def _tool_call_approved(
 def _unresolved_approval(events: Sequence[RunEvent]) -> RunEvent | None:
     resolved: set[tuple[int, str]] = set()
     for event in reversed(events):
+        if event.type is EventType.REWOUND:
+            return None  # approvals requested before a rewind were archived with their calls
         call_id = event.payload.get("call_id")
         if not isinstance(call_id, str):
             continue

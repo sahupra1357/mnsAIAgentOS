@@ -24,6 +24,7 @@ Endpoints (all JSON; every route except ``/healthz`` requires
     GET  /runs/{id}/approval
     POST /runs/{id}/approval        {"call_id", "decision", "feedback"?, "mode"?}
     POST /runs/{id}/mode            {"mode": "default" | "accept_edits" | "plan" | "bypass"}
+    POST /runs/{id}/rewind          {"to_step", "confirm"?}  (dry run unless confirm)
 """
 
 from __future__ import annotations
@@ -198,6 +199,7 @@ class HarnessAPI:
             ("POST", "/steer"): lambda: self._steer(send, run_id, receive),
             ("GET", "/usage"): lambda: self._send_usage(send, run_id),
             ("POST", "/mode"): lambda: self._set_mode(send, run_id, receive),
+            ("POST", "/rewind"): lambda: self._rewind(send, run_id, receive),
             ("POST", "/resume"): lambda: self._resume(send, run_id),
             ("GET", "/approval"): lambda: self._send_approval(send, run_id),
             ("POST", "/approval"): lambda: self._decide(send, run_id, receive),
@@ -447,6 +449,24 @@ class HarnessAPI:
         except ValueError as exc:
             raise ApiError(409, str(exc)) from exc
         await _json(send, 200, {"id": run.id, "mode": run.mode.value})
+
+    async def _rewind(self, send: Send, run_id: str, receive: Receive) -> None:
+        body = await self._body(receive)
+        unknown = set(body) - {"to_step", "confirm"}
+        if unknown:
+            raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
+        to_step = body.get("to_step")
+        if isinstance(to_step, bool) or not isinstance(to_step, int):
+            raise ApiError(400, "to_step must be an integer")
+        confirm = body.get("confirm", False)
+        if not isinstance(confirm, bool):
+            raise ApiError(400, "confirm must be a boolean")
+        await self._load(run_id)
+        try:
+            plan = await self._orchestrator.rewind(run_id, to_step, confirm=confirm)
+        except ValueError as exc:
+            raise ApiError(409, str(exc)) from exc
+        await _json(send, 200, dataclasses.asdict(plan))
 
     async def _cancel(self, send: Send, run_id: str) -> None:
         await self._load(run_id)
