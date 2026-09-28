@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
 
+from .agents import SubagentDefinition, SubagentLimits
 from .artifacts import READ_ARTIFACT_SPEC, LocalArtifactStore, read_artifact_handler
 from .coding import create_coding_tool_runtime
-from .config import HarnessConfig, load_config
+from .config import ConfigError, HarnessConfig, load_config
 from .context import BudgetedContextBuilder, ContextPolicy, limits_from_profiles
 from .domain import ArtifactStore, PermissionMode, StreamListener, TelemetrySink
 from .hooks import CommandHook, HookEvent, HookRunner
@@ -129,6 +130,11 @@ def build_application(
             edit_tools=config.permissions.edit_tools,
         ),
         default_mode=PermissionMode(config.permissions.mode),
+        subagents=_subagents(config, base_path, tool_runtime),
+        subagent_limits=SubagentLimits(
+            max_depth=config.subagents.max_depth, max_per_run=config.subagents.max_per_run
+        ),
+        task_tracking=config.tasks.enabled,
     )
     return HarnessApplication(
         config=config,
@@ -159,3 +165,33 @@ def _configured_hooks(config: HarnessConfig, base_path: Path) -> HookRunner | No
             for hook in config.hooks
         ]
     )
+
+
+def _subagents(
+    config: HarnessConfig, base_path: Path, tools: ToolRuntime
+) -> list[SubagentDefinition]:
+    available = {spec.name for spec in tools.specs()}
+    definitions = []
+    for agent in config.agents:
+        prompt = agent.prompt
+        if agent.prompt_file:
+            prompt = (base_path / agent.prompt_file).read_text(encoding="utf-8")
+        unknown = sorted(set(agent.tools or ()) - available)
+        if unknown:
+            raise ConfigError(f"agent {agent.name!r} lists unknown tools: {', '.join(unknown)}")
+        try:
+            definitions.append(
+                SubagentDefinition(
+                    name=agent.name,
+                    description=agent.description,
+                    prompt=prompt,
+                    tools=agent.tools,
+                    profile=config.resolve_model_name(agent.profile) if agent.profile else None,
+                    max_steps=agent.max_steps,
+                    max_tokens=agent.max_tokens,
+                    max_cost_usd=agent.max_cost_usd,
+                )
+            )
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+    return definitions

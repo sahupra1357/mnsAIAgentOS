@@ -278,6 +278,41 @@ with read-only tools and then calls `exit_plan`, which pauses the run for approv
 Every decision is recorded as a `hook_decided` event. A resumed run replays the
 recorded decisions; it does not re-run the hooks.
 
+## Subagents and Task Lists
+
+```toml
+[tasks]
+enabled = true                    # offer todo_write: the model keeps a visible task list
+
+[subagents]
+max_depth = 2                     # how deep delegation may nest
+max_per_run = 8
+
+[[agents]]
+name = "researcher"
+description = "Finds facts in the repository with read-only tools."
+prompt_file = "agents/researcher.md"      # or prompt = "..."
+tools = ["read_file", "search_files"]     # omit for all tools
+profile = "fast"                          # optional: a cheaper model or route
+max_steps = 10
+```
+
+**Delegation.** When agents are configured, the model gets an `agent` tool and can
+hand a self-contained task to a subagent:
+- The subagent is a separate run with its own prompt, tool subset, model, and budget.
+  Its budget is capped by what the parent has left.
+- Only its final answer returns to the parent, and its tokens and cost count toward
+  the parent's budget.
+- Subagents inherit the parent's permission mode, so a plan-mode parent gets
+  read-only subagents.
+- If a subagent needs approval, the parent pauses too. `agent-harness approve
+  PARENT_ID` shows and decides the subagent's pending call.
+- Cancelling the parent cancels its subagents. Resuming the parent resumes an
+  unfinished subagent instead of starting a new one.
+
+**Task list.** `agent-harness status RUN_ID` and `GET /runs/{id}` show the task list
+and the subagents.
+
 ## LiteLLM (optional)
 
 LiteLLM is opt-in for each profile. Only profiles with `adapter = "litellm"` use it;

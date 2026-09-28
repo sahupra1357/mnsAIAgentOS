@@ -69,6 +69,11 @@ class EventType(StrEnum):
     STEER_APPLIED = "steer_applied"
     HOOK_DECIDED = "hook_decided"
     MODE_CHANGED = "mode_changed"
+    SUBAGENT_STARTED = "subagent_started"
+    SUBAGENT_WAITING = "subagent_waiting"
+    SUBAGENT_RESUMED = "subagent_resumed"
+    SUBAGENT_FINISHED = "subagent_finished"
+    TODOS_UPDATED = "todos_updated"
 
 
 class PermissionMode(StrEnum):
@@ -183,6 +188,21 @@ class RunBudget:
     max_cost_usd: float | None = None
 
 
+class TodoStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True, slots=True)
+class TodoItem:
+    """One entry of a run's task list, maintained by the model via ``todo_write``."""
+
+    id: str
+    content: str
+    status: TodoStatus = TodoStatus.PENDING
+
+
 @dataclass(slots=True)
 class RunRecord:
     id: str
@@ -200,6 +220,13 @@ class RunRecord:
     error: str | None = None
     version: int = 0
     mode: PermissionMode = PermissionMode.DEFAULT
+    # Subagent lineage: a child run records its parent and the spawning call.
+    parent_run_id: str | None = None
+    parent_call_id: str | None = None
+    depth: int = 0
+    # None = every registered tool; otherwise only these tool names.
+    allowed_tools: tuple[str, ...] | None = None
+    todos: tuple[TodoItem, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +441,8 @@ class RunUsage:
     model_calls: int
     tool_calls: int
     fallbacks: int
+    subagents: int = 0
+    todos: tuple[TodoItem, ...] = ()
 
 
 class RunQueue(Protocol):

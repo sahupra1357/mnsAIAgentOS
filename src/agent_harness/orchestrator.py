@@ -11,6 +11,16 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from agent_harness.agents import (
+    AGENT_TOOL,
+    TODO_SPEC,
+    TODO_TOOL,
+    SubagentDefinition,
+    SubagentLimits,
+    agent_spec,
+    child_run_id,
+    parse_todos,
+)
 from agent_harness.context import FullHistoryContextBuilder
 from agent_harness.hooks import HookEvent, HookInput, HookResult, HookRunner
 from agent_harness.permissions import (
@@ -35,6 +45,7 @@ from agent_harness.domain import (
     ModelStreamEvent,
     PermissionMode,
     StreamListener,
+    TodoStatus,
     TelemetryRecord,
     TelemetrySink,
     EventType,
@@ -124,6 +135,9 @@ class AgentOrchestrator:
         permissions: PermissionPolicy | None = None,
         default_mode: PermissionMode = PermissionMode.DEFAULT,
         max_stop_continuations: int = 3,
+        subagents: Sequence[SubagentDefinition] = (),
+        subagent_limits: SubagentLimits | None = None,
+        task_tracking: bool = False,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -146,6 +160,12 @@ class AgentOrchestrator:
         if max_stop_continuations < 0:
             raise ValueError("max_stop_continuations must not be negative")
         self._max_stop_continuations = max_stop_continuations
+        self._agents = {definition.name: definition for definition in subagents}
+        if len(self._agents) != len(subagents):
+            raise ValueError("subagent names must be unique")
+        self._agent_limits = subagent_limits or SubagentLimits()
+        self._agent_spec = agent_spec(tuple(self._agents.values())) if self._agents else None
+        self._task_tracking = task_tracking
 
     @property
     def context_builder(self) -> ContextBuilder:
@@ -163,8 +183,15 @@ class AgentOrchestrator:
         route: str | None = None,
         versions: Mapping[str, str] | None = None,
         mode: PermissionMode | str | None = None,
+        parent_run_id: str | None = None,
+        parent_call_id: str | None = None,
+        depth: int = 0,
+        allowed_tools: Sequence[str] | None = None,
     ) -> RunRecord:
-        """Create and persist a queued run before any provider is contacted."""
+        """Create and persist a queued run before any provider is contacted.
+
+        The lineage arguments are set when the orchestrator spawns a subagent.
+        """
 
         identifier = run_id or uuid4().hex
         _validate_identifier(identifier, "run_id")
@@ -186,6 +213,10 @@ class AgentOrchestrator:
             created_at=now,
             updated_at=now,
             mode=selected_mode,
+            parent_run_id=parent_run_id,
+            parent_call_id=parent_call_id,
+            depth=depth,
+            allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
         )
         recorded_versions = {
             "system_prompt_sha256": system_prompt_sha256(initial_messages),
@@ -198,6 +229,8 @@ class AgentOrchestrator:
         payload: dict[str, Any] = {"model_profile": model_profile, "versions": recorded_versions}
         if selected_mode is not PermissionMode.DEFAULT:
             payload["mode"] = selected_mode.value
+        if parent_run_id is not None:
+            payload.update(parent_run_id=parent_run_id, parent_call_id=parent_call_id, depth=depth)
         if prompt_hook is not None:
             payload["user_prompt_hook"] = prompt_hook.as_payload()
         if route is not None:
@@ -404,6 +437,10 @@ class AgentOrchestrator:
         events = list(await self._store.list_events(run_id))
         pending = _unresolved_approval(events)
         if pending is None:
+            waiting = _waiting_child(events) if run.status is RunStatus.AWAITING_INPUT else None
+            if waiting is not None:
+                # The run is paused because its subagent awaits approval.
+                return await self.pending_approval(str(waiting.payload["child_run_id"]))
             return None
         call_id = str(pending.payload.get("call_id", ""))
         call = _find_tool_call(run.messages, call_id)
@@ -452,6 +489,12 @@ class AgentOrchestrator:
             raise ValueError("run is not awaiting approval")
         events = list(await self._store.list_events(run_id))
         request = _unresolved_approval(events)
+        waiting = _waiting_child(events) if request is None else None
+        if waiting is not None:
+            return await self._resolve_child_approval(
+                run, events, waiting, call_id=call_id, approved=approved,
+                feedback=feedback, mode=target_mode,
+            )
         if request is None or request.payload.get("call_id") != call_id:
             raise ValueError("tool call is not awaiting approval")
         call = _find_tool_call(run.messages, call_id)
@@ -711,7 +754,39 @@ class AgentOrchestrator:
             model_calls=sum(e.type is EventType.MODEL_REQUESTED for e in events),
             tool_calls=sum(e.type is EventType.TOOL_REQUESTED for e in events),
             fallbacks=sum(e.type is EventType.MODEL_FALLBACK for e in events),
+            subagents=sum(e.type is EventType.SUBAGENT_STARTED for e in events),
+            todos=run.todos,
         )
+
+    async def _resolve_child_approval(
+        self,
+        run: RunRecord,
+        events: list[RunEvent],
+        waiting: RunEvent,
+        *,
+        call_id: str,
+        approved: bool,
+        feedback: str | None,
+        mode: PermissionMode | None,
+    ) -> RunRecord:
+        """Forward a decision to the subagent the run waits on, then unpause it."""
+
+        child_id = str(waiting.payload["child_run_id"])
+        await self.resolve_approval(
+            child_id, call_id=call_id, approved=approved, feedback=feedback, mode=mode
+        )
+        now = self._clock()
+        if run.started_at is not None and now > waiting.created_at:
+            run.started_at += now - waiting.created_at
+        run.status = RunStatus.RUNNING
+        await self._checkpoint(run, events, RunEvent(
+            run_id=run.id,
+            type=EventType.SUBAGENT_RESUMED,
+            payload={"child_run_id": child_id},
+            step=run.step_count,
+            created_at=now,
+        ))
+        return run
 
     async def cancel(self, run_id: str) -> RunRecord:
         """Persist cancellation unless the run is already terminal."""
@@ -736,6 +811,12 @@ class AgentOrchestrator:
                 created_at=now,
             ),
         )
+        # Cancelling a parent cancels its unfinished subagents (recursively).
+        for event in events:
+            if event.type is EventType.SUBAGENT_STARTED:
+                child = await self._store.get_run(str(event.payload["child_run_id"]))
+                if child is not None and not child.status.is_terminal:
+                    await self.cancel(child.id)
         return run
 
     async def _perform_model_turn(
@@ -1159,6 +1240,8 @@ class AgentOrchestrator:
                 extra["arguments"] = dict(call.arguments)
             if hook_context:
                 extra["hook_context"] = hook_context
+            if call.name == AGENT_TOOL:
+                extra["child_run_id"] = child_run_id(run.id, run.step_count, call.id)
             await self._record_tool_request(run, events, call, spec, attempt, extra=extra)
 
         approved = _tool_call_approved(events, run.step_count, call.id)
@@ -1170,6 +1253,12 @@ class AgentOrchestrator:
             return
         if permission.action == "allow":
             approved = True
+        if call.name == TODO_TOOL:
+            await self._write_todos(run, events, call, attempt)
+            return
+        if call.name == AGENT_TOOL:
+            await self._run_subagent(run, events, call, attempt)
+            return
 
         idempotency_key = f"{run.id}:{run.step_count}:{call.id}"
         tool_started = self._monotonic()
@@ -1254,9 +1343,17 @@ class AgentOrchestrator:
         return {spec.name: spec for spec in self._specs_for(run)}
 
     def _specs_for(self, run: RunRecord) -> tuple[ToolSpec, ...]:
-        specs = tuple(self._tools.specs())
+        specs = tuple(
+            spec
+            for spec in self._tools.specs()
+            if run.allowed_tools is None or spec.name in run.allowed_tools
+        )
         if run.mode is PermissionMode.PLAN:
             specs += (EXIT_PLAN_SPEC,)
+        if self._agent_spec is not None and run.depth < self._agent_limits.max_depth:
+            specs += (self._agent_spec,)
+        if self._task_tracking:
+            specs += (TODO_SPEC,)
         return specs
 
     def _permission(
@@ -1429,6 +1526,7 @@ class AgentOrchestrator:
         attempt: int,
         artifact: ArtifactRef | None = None,
         extra: Mapping[str, Any] | None = None,
+        extra_events: Sequence[RunEvent] = (),
     ) -> None:
         payload: dict[str, Any] = {
             **(extra or {}),
@@ -1444,6 +1542,7 @@ class AgentOrchestrator:
         await self._checkpoint(
             run,
             events,
+            *extra_events,  # annotations first, so TOOL_RESPONDED stays the latest state event
             RunEvent(
                 run_id=run.id,
                 type=EventType.TOOL_RESPONDED,
@@ -1451,6 +1550,175 @@ class AgentOrchestrator:
                 step=run.step_count,
                 created_at=self._clock(),
             ),
+        )
+
+    async def _write_todos(
+        self, run: RunRecord, events: list[RunEvent], call: ToolCall, attempt: int
+    ) -> None:
+        try:
+            todos = parse_todos(call.arguments)
+        except ValueError as exc:
+            result = ToolResult(call.id, call.name, ToolResultStatus.VALIDATION_ERROR,
+                                {"error": str(exc)}, f"Invalid task list: {exc}")
+            self._append_tool_message(run, result)
+            await self._record_tool_result(run, events, result, attempt=attempt)
+            return
+        run.todos = todos
+        counts = {status: sum(t.status is status for t in todos) for status in TodoStatus}
+        summary = ", ".join(f"{count} {status.value}" for status, count in counts.items())
+        result = ToolResult(call.id, call.name, ToolResultStatus.SUCCESS,
+                            {"items": len(todos)}, f"Task list updated ({summary}).")
+        self._append_tool_message(run, result)
+        await self._record_tool_result(
+            run, events, result, attempt=attempt,
+            extra_events=(RunEvent(
+                run_id=run.id,
+                type=EventType.TODOS_UPDATED,
+                payload={"items": len(todos), **{s.value: c for s, c in counts.items()}},
+                step=run.step_count,
+                created_at=self._clock(),
+            ),),
+        )
+
+    def _child_budget(self, run: RunRecord, definition: SubagentDefinition) -> RunBudget | None:
+        """The child's budget: its own limits, capped by what the parent has left."""
+
+        steps = min(definition.max_steps, run.budget.max_steps - run.step_count)
+        if steps < 1:
+            return None
+        elapsed = (
+            (self._clock() - run.started_at).total_seconds() if run.started_at is not None else 0.0
+        )
+        wall = run.budget.max_wall_seconds - elapsed
+        if wall < 1:
+            return None
+        tokens = definition.max_tokens
+        if run.budget.max_tokens is not None:
+            remaining = run.budget.max_tokens - run.consumed_tokens
+            if remaining < 1:
+                return None
+            tokens = min(tokens, remaining) if tokens is not None else remaining
+        cost = definition.max_cost_usd
+        if run.budget.max_cost_usd is not None:
+            remaining_cost = run.budget.max_cost_usd - run.consumed_cost_usd
+            if remaining_cost <= 0:
+                return None
+            cost = min(cost, remaining_cost) if cost is not None else remaining_cost
+        return RunBudget(max_steps=steps, max_wall_seconds=wall, max_tokens=tokens, max_cost_usd=cost)
+
+    async def _run_subagent(
+        self, run: RunRecord, events: list[RunEvent], call: ToolCall, attempt: int
+    ) -> None:
+        """Spawn (or resume) the child run for an ``agent`` call and report back."""
+
+        async def refuse(message: str) -> None:
+            result = ToolResult(call.id, call.name, ToolResultStatus.PERMANENT_ERROR,
+                                {"error": message}, message)
+            self._append_tool_message(run, result)
+            await self._record_tool_result(run, events, result, attempt=attempt)
+
+        name = str(call.arguments.get("agent", ""))
+        task = call.arguments.get("task")
+        definition = self._agents.get(name)
+        if definition is None:
+            await refuse(f"Unknown agent {name!r}. Available: {', '.join(sorted(self._agents))}.")
+            return
+        if run.depth >= self._agent_limits.max_depth:
+            await refuse("Subagents cannot spawn further subagents at this depth.")
+            return
+        if not isinstance(task, str) or not task.strip():
+            await refuse("The task must be a non-empty string.")
+            return
+        child_id = child_run_id(run.id, run.step_count, call.id)
+        child = await self._store.get_run(child_id)
+        if child is None:
+            spawned = sum(e.type is EventType.SUBAGENT_STARTED for e in events)
+            if spawned >= self._agent_limits.max_per_run:
+                await refuse(f"This run already used its {self._agent_limits.max_per_run} subagents.")
+                return
+            budget = self._child_budget(run, definition)
+            if budget is None:
+                await refuse("Not enough budget is left to run a subagent.")
+                return
+            await self.create_run(
+                model_profile=definition.profile or run.model_profile,
+                messages=[Message(Role.SYSTEM, definition.prompt), Message(Role.USER, task)],
+                budget=budget,
+                run_id=child_id,
+                mode=run.mode,
+                parent_run_id=run.id,
+                parent_call_id=call.id,
+                depth=run.depth + 1,
+                allowed_tools=definition.tools,
+            )
+            await self._checkpoint(run, events, RunEvent(
+                run_id=run.id,
+                type=EventType.SUBAGENT_STARTED,
+                payload={"child_run_id": child_id, "agent": name, "tool_call_id": call.id},
+                step=run.step_count,
+                created_at=self._clock(),
+            ))
+        finished = await self.run(child_id)
+        if finished.status is RunStatus.AWAITING_INPUT:
+            run.status = RunStatus.AWAITING_INPUT
+            await self._checkpoint(run, events, RunEvent(
+                run_id=run.id,
+                type=EventType.SUBAGENT_WAITING,
+                payload={"child_run_id": child_id, "tool_call_id": call.id},
+                step=run.step_count,
+                created_at=self._clock(),
+            ))
+            return
+
+        output = next(
+            (m.content for m in reversed(finished.messages) if m.role is Role.ASSISTANT and not m.tool_calls),
+            "",
+        )
+        stop = await self._run_hook(run, events, HookInput(
+            event=HookEvent.SUBAGENT_STOP,
+            run_id=run.id,
+            step=run.step_count,
+            model_profile=run.model_profile,
+            tool=name,
+            call_id=call.id,
+            result_status=finished.status.value,
+            final_output=output[:_HOOK_RESULT_PREVIEW_CHARS],
+        ), call_id=call.id)
+        completed = finished.status is RunStatus.COMPLETED
+        body = output if completed else f"The subagent did not finish ({finished.status.value}): {finished.error or ''}"
+        result = ToolResult(
+            call.id,
+            call.name,
+            ToolResultStatus.SUCCESS if completed else ToolResultStatus.PERMANENT_ERROR,
+            {
+                "child_run_id": child_id,
+                "status": finished.status.value,
+                "steps": finished.step_count,
+                "tokens": finished.consumed_tokens,
+                "cost_usd": finished.consumed_cost_usd,
+            },
+            f"[subagent {name}: {finished.status.value}]\n{body}",
+        )
+        # Roll the child's usage into the parent in the same checkpoint as the
+        # result, so a crash cannot count it twice.
+        run.consumed_tokens += finished.consumed_tokens
+        run.consumed_cost_usd += finished.consumed_cost_usd
+        artifact = await self._append_tool_result(run, result, suffix=stop.context if stop else "")
+        await self._record_tool_result(
+            run, events, result, attempt=attempt, artifact=artifact,
+            extra={"child_run_id": child_id},
+            extra_events=(RunEvent(
+                run_id=run.id,
+                type=EventType.SUBAGENT_FINISHED,
+                payload={
+                    "child_run_id": child_id,
+                    "status": finished.status.value,
+                    "tokens": finished.consumed_tokens,
+                    "cost_usd": finished.consumed_cost_usd,
+                },
+                step=run.step_count,
+                created_at=self._clock(),
+            ),),
         )
 
     async def _append_tool_result(
@@ -1722,8 +1990,28 @@ def _has_accepted_final_response(
 
 # Events that annotate a run without changing where its state machine stands.
 _ANNOTATION_EVENTS = frozenset(
-    {EventType.HOOK_DECIDED, EventType.MODE_CHANGED, EventType.CONFIG_DRIFT}
+    {
+        EventType.HOOK_DECIDED,
+        EventType.MODE_CHANGED,
+        EventType.CONFIG_DRIFT,
+        EventType.SUBAGENT_STARTED,
+        EventType.SUBAGENT_WAITING,
+        EventType.SUBAGENT_RESUMED,
+        EventType.SUBAGENT_FINISHED,
+        EventType.TODOS_UPDATED,
+    }
 )
+
+
+def _waiting_child(events: Sequence[RunEvent]) -> RunEvent | None:
+    """The SUBAGENT_WAITING event the run is paused on, if any."""
+
+    for event in reversed(events):
+        if event.type is EventType.SUBAGENT_RESUMED:
+            return None
+        if event.type is EventType.SUBAGENT_WAITING:
+            return event
+    return None
 
 
 def _latest_state_event(events: Sequence[RunEvent]) -> RunEvent | None:

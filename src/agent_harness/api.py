@@ -40,6 +40,7 @@ from urllib.parse import parse_qs
 from agent_harness.config import ConfigError, HarnessConfig
 from agent_harness.domain import (
     ArtifactStore,
+    EventType,
     HarnessError,
     Message,
     PermissionMode,
@@ -291,6 +292,17 @@ class HarnessAPI:
             "completed_at": run.completed_at.isoformat() if run.completed_at else None,
             "error": run.error,
             "output": _final_output(run),
+            "mode": run.mode.value,
+            "parent_run_id": run.parent_run_id,
+            "depth": run.depth,
+            "todos": [
+                {"id": t.id, "content": t.content, "status": t.status.value} for t in run.todos
+            ],
+            "subagents": [
+                {"run_id": e.payload["child_run_id"], "agent": e.payload.get("agent")}
+                for e in await self._store.list_events(run_id)
+                if e.type is EventType.SUBAGENT_STARTED
+            ],
         }
         if run.status is RunStatus.AWAITING_INPUT:
             payload["pending_approval"] = await self._approval_payload(run_id)
@@ -398,6 +410,9 @@ class HarnessAPI:
             field: getattr(usage, field) for field in usage.__dataclass_fields__
         }
         payload["status"] = usage.status.value
+        payload["todos"] = [
+            {"id": t.id, "content": t.content, "status": t.status.value} for t in usage.todos
+        ]
         await _json(send, 200, payload)
 
     async def _set_mode(self, send: Send, run_id: str, receive: Receive) -> None:
