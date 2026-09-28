@@ -20,6 +20,9 @@ jobs:
         python-version: ["3.12", "3.13"]
     env:
       PYTHONPATH: src
+      # Keep runs hermetic: no user or enterprise settings layers.
+      AGENT_HARNESS_USER_SETTINGS: /nonexistent/settings.toml
+      AGENT_HARNESS_ENTERPRISE_SETTINGS: /nonexistent/settings.toml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

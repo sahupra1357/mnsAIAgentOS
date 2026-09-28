@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
 
 from .agents import SubagentDefinition, SubagentLimits
 from .artifacts import READ_ARTIFACT_SPEC, LocalArtifactStore, read_artifact_handler
 from .coding import create_coding_tool_runtime
-from .config import ConfigError, HarnessConfig, load_config
+from .config import AgentConfig, ConfigError, HarnessConfig, HookConfig, load_config
+from .instructions import (
+    Skill,
+    SystemContextBuilder,
+    discover_skills,
+    load_skill_handler,
+    load_skill_spec,
+    resolve_path,
+)
+from .plugins import Plugin, enabled_plugins
+from .templates import Template, discover_templates
 from .context import BudgetedContextBuilder, ContextPolicy, limits_from_profiles
 from .domain import ArtifactStore, PermissionMode, StreamListener, TelemetrySink
 from .hooks import CommandHook, HookEvent, HookRunner
@@ -34,6 +44,9 @@ class HarnessApplication:
     telemetry: TelemetrySink | None = None
     artifacts: ArtifactStore | None = None
     memory: SQLiteMemoryStore | None = None
+    templates: dict[str, Template] = field(default_factory=dict)
+    skills: dict[str, Skill] = field(default_factory=dict)
+    plugins: list[Plugin] = field(default_factory=list)
 
     def run_versions(self, model_profile: str) -> dict[str, str]:
         """Versions recorded on a new run, alongside prompt and tool hashes."""
@@ -73,8 +86,17 @@ def build_application(
 ) -> HarnessApplication:
     """Compose the default local application from replaceable implementations."""
 
-    config = load_config(config_path)
+    config = load_config(config_path, layered=True)
     base_path = Path(config_path).parent
+    plugins = enabled_plugins(resolve_path(config.plugins.directory, base_path), config.plugins.enabled)
+    templates = discover_templates(
+        [resolve_path(path, base_path) for path in config.templates.paths]
+        + [plugin.templates_dir for plugin in plugins if plugin.templates_dir]
+    )
+    skills = discover_skills(
+        ([resolve_path(path, base_path) for path in config.skills.paths] if config.skills.enabled else [])
+        + [plugin.skills_dir for plugin in plugins if plugin.skills_dir]
+    )
     models = ModelGateway(config)
     store = SQLiteRunStore(Path(database_path))
     artifacts = (
@@ -108,6 +130,22 @@ def build_application(
             search, write = memory_tool_handlers(memory)
             tool_runtime.register(MEMORY_SEARCH_SPEC, search)
             tool_runtime.register(MEMORY_WRITE_SPEC, write)
+        if skills:
+            tool_runtime.register(load_skill_spec(skills), load_skill_handler(skills))
+    system_context = None
+    if config.instructions.enabled or skills:
+        system_context = SystemContextBuilder(
+            instruction_files=config.instructions.files if config.instructions.enabled else (),
+            base=base_path,
+            max_bytes=config.instructions.max_bytes,
+            skills=skills,
+        )
+    hook_sources = [(hook, base_path) for hook in config.hooks] + [
+        (hook, plugin.root) for plugin in plugins for hook in plugin.hooks
+    ]
+    agent_sources = [(agent, base_path) for agent in config.agents] + [
+        (agent, plugin.root) for plugin in plugins for agent in plugin.agents
+    ]
     orchestrator = AgentOrchestrator(
         models=models,
         tools=tool_runtime,
@@ -122,7 +160,7 @@ def build_application(
         artifacts=artifacts,
         artifact_threshold_bytes=config.artifacts.threshold_bytes,
         steering=store,
-        hooks=hooks if hooks is not None else _configured_hooks(config, base_path),
+        hooks=hooks if hooks is not None else _configured_hooks(hook_sources),
         permissions=PermissionPolicy.from_lists(
             allow=config.permissions.allow,
             ask=config.permissions.ask,
@@ -130,11 +168,12 @@ def build_application(
             edit_tools=config.permissions.edit_tools,
         ),
         default_mode=PermissionMode(config.permissions.mode),
-        subagents=_subagents(config, base_path, tool_runtime),
+        subagents=_subagents(config, agent_sources, tool_runtime),
         subagent_limits=SubagentLimits(
             max_depth=config.subagents.max_depth, max_per_run=config.subagents.max_per_run
         ),
         task_tracking=config.tasks.enabled,
+        system_context=system_context,
     )
     return HarnessApplication(
         config=config,
@@ -145,11 +184,14 @@ def build_application(
         telemetry=telemetry,
         artifacts=artifacts,
         memory=memory,
+        templates=templates,
+        skills=skills,
+        plugins=plugins,
     )
 
 
-def _configured_hooks(config: HarnessConfig, base_path: Path) -> HookRunner | None:
-    if not config.hooks:
+def _configured_hooks(sources: list[tuple[HookConfig, Path]]) -> HookRunner | None:
+    if not sources:
         return None
     return HookRunner(
         [
@@ -160,19 +202,23 @@ def _configured_hooks(config: HarnessConfig, base_path: Path) -> HookRunner | No
                 matcher=hook.matcher,
                 timeout_seconds=hook.timeout_seconds,
                 on_error=hook.on_error,
-                cwd=base_path,
+                cwd=cwd,
             )
-            for hook in config.hooks
+            for hook, cwd in sources
         ]
     )
 
 
 def _subagents(
-    config: HarnessConfig, base_path: Path, tools: ToolRuntime
+    config: HarnessConfig, sources: list[tuple[AgentConfig, Path]], tools: ToolRuntime
 ) -> list[SubagentDefinition]:
     available = {spec.name for spec in tools.specs()}
     definitions = []
-    for agent in config.agents:
+    seen: set[str] = set()
+    for agent, base_path in sources:
+        if agent.name in seen:
+            raise ConfigError(f"agent {agent.name!r} is defined more than once (settings or plugins)")
+        seen.add(agent.name)
         prompt = agent.prompt
         if agent.prompt_file:
             prompt = (base_path / agent.prompt_file).read_text(encoding="utf-8")

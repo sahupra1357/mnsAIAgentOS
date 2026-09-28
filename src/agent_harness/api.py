@@ -11,6 +11,7 @@ Endpoints (all JSON; every route except ``/healthz`` requires
 
     GET  /healthz
     GET  /profiles
+    GET  /templates
     POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?, "mode"?}
     GET  /runs/{id}
     GET  /runs/{id}/events?after=N
@@ -52,6 +53,7 @@ from agent_harness.domain import (
     RunStore,
 )
 from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.templates import Template, TemplateError, expand_prompt
 from agent_harness.worker import Worker, run_is_settled
 
 
@@ -89,6 +91,7 @@ class HarnessAPI:
         max_body_bytes: int = 1_000_000,
         shutdown_grace_seconds: float = 10.0,
         artifacts: ArtifactStore | None = None,
+        templates: Mapping[str, Template] | None = None,
     ) -> None:
         if auth_token is not None and len(auth_token) < 16:
             raise ValueError("API auth token must be at least 16 characters")
@@ -104,6 +107,7 @@ class HarnessAPI:
         self._max_body = max_body_bytes
         self._grace = shutdown_grace_seconds
         self._artifacts = artifacts
+        self._templates = dict(templates or {})
         self._stop = asyncio.Event()
         self._worker_tasks: list[asyncio.Task[None]] = []
 
@@ -167,6 +171,12 @@ class HarnessAPI:
 
         if path == "/profiles" and method == "GET":
             await _json(send, 200, self._profiles())
+            return
+        if path == "/templates" and method == "GET":
+            await _json(send, 200, {
+                name: {"description": t.description, "sha256": t.sha256}
+                for name, t in sorted(self._templates.items())
+            })
             return
         if path == "/runs" and method == "POST":
             await _json(send, 202, await self._create_run(await self._body(receive)))
@@ -248,10 +258,19 @@ class HarnessAPI:
         }
 
     async def _create_run(self, body: dict[str, Any]) -> dict[str, Any]:
-        unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode"}
+        unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode", "template_args"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         prompt = _required_text(body.get("prompt"), "prompt")
+        named = body.get("template_args") or {}
+        if not isinstance(named, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in named.items()
+        ):
+            raise ApiError(400, "template_args must map strings to strings")
+        try:
+            prompt, template = expand_prompt(prompt, self._templates, named)
+        except TemplateError as exc:
+            raise ApiError(400, str(exc)) from exc
         system = _text(body.get("system"), "system", required=False) or self._default_system
         requested = body.get("model_profile")
         if requested is not None and not isinstance(requested, str):
@@ -268,6 +287,7 @@ class HarnessAPI:
             budget=_budget(body.get("budget")),
             versions=self._run_versions(profile) if self._run_versions else None,
             mode=_mode(body.get("mode")),
+            template={"name": template.name, "sha256": template.sha256} if template else None,
         )
         await self._queue.enqueue(run.id)
         return {"id": run.id, "status": run.status.value, "model_profile": profile}
@@ -622,4 +642,5 @@ def create_api(
         default_system_prompt=CODING_AGENT_SYSTEM_PROMPT if app.config.coding.enabled else None,
         workers=workers,
         artifacts=app.artifacts,
+        templates=app.templates,
     )
