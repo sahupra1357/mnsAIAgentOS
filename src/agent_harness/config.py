@@ -293,11 +293,18 @@ class TasksConfig:
 
 @dataclass(frozen=True, slots=True)
 class InstructionsConfig:
-    """Instruction files added to every new top-level run (later = more specific)."""
+    """Instruction files added to every new top-level run (later = more specific).
+
+    With ``subdirectories``, files named in ``filenames`` are also loaded from
+    each directory between the project root (the config file's directory) and
+    the working directory at run creation, outermost first, after ``files``.
+    """
 
     enabled: bool = False
     files: tuple[str, ...] = ("~/.agent-harness/AGENTS.md", "AGENTS.md")
     max_bytes: int = 32_768
+    subdirectories: bool = False
+    filenames: tuple[str, ...] = ("AGENTS.md",)
 
 
 @dataclass(frozen=True, slots=True)

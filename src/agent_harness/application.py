@@ -17,6 +17,7 @@ from .instructions import (
     load_skill_handler,
     load_skill_spec,
     resolve_path,
+    validate_instruction_filenames,
 )
 from .plugins import Plugin, enabled_plugins
 from .snapshots import WorkspaceSnapshotter
@@ -145,11 +146,18 @@ def build_application(
             tool_runtime.register(load_skill_spec(skills), load_skill_handler(skills))
     system_context = None
     if config.instructions.enabled or skills:
+        subdirectory_filenames: tuple[str, ...] = ()
+        if config.instructions.enabled and config.instructions.subdirectories:
+            try:
+                subdirectory_filenames = validate_instruction_filenames(config.instructions.filenames)
+            except ValueError as exc:
+                raise ConfigError(f"instructions.filenames: {exc}") from exc
         system_context = SystemContextBuilder(
             instruction_files=config.instructions.files if config.instructions.enabled else (),
             base=base_path,
             max_bytes=config.instructions.max_bytes,
             skills=skills,
+            subdirectory_filenames=subdirectory_filenames,
         )
     hook_sources = [(hook, base_path) for hook in config.hooks] + [
         (hook, plugin.root) for plugin in plugins for hook in plugin.hooks

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -72,6 +72,49 @@ def load_instructions(files: Iterable[str], *, base: Path, max_bytes: int) -> tu
     return "\n\n".join(blocks), sources
 
 
+def validate_instruction_filenames(filenames: Iterable[str]) -> tuple[str, ...]:
+    """Instruction file names must be plain names, never paths."""
+
+    names = tuple(filenames)
+    for name in names:
+        if not name or name in {".", ".."} or "/" in name or "\\" in name:
+            raise ValueError(f"instruction filename must be a plain file name: {name!r}")
+    return names
+
+
+def discover_subdirectory_instructions(
+    root: Path, start: Path, filenames: Sequence[str]
+) -> list[str]:
+    """Instruction files in each directory below ``root`` down to ``start``.
+
+    Outermost first, so deeper (more specific) files come later. ``root``
+    itself is excluded because its files are listed explicitly. Paths are
+    returned relative to ``root``; nothing is found when ``start`` is outside
+    ``root``, and files that resolve outside ``root`` (symlinks) are skipped.
+    """
+
+    names = validate_instruction_filenames(filenames)
+    try:
+        resolved_root = root.resolve()
+        relative = start.resolve().relative_to(resolved_root)
+    except (OSError, ValueError):
+        return []
+    found: list[str] = []
+    current = resolved_root
+    for part in relative.parts:
+        current = current / part
+        for name in names:
+            candidate = current / name
+            if not candidate.is_file():
+                continue
+            try:
+                candidate.resolve().relative_to(resolved_root)
+            except (OSError, ValueError):
+                continue
+            found.append(candidate.relative_to(resolved_root).as_posix())
+    return found
+
+
 def discover_skills(directories: Iterable[Path]) -> dict[str, Skill]:
     """Index ``<dir>/<name>/SKILL.md`` files by their frontmatter name."""
 
@@ -122,20 +165,41 @@ def load_skill_handler(skills: Mapping[str, Skill]):
 
 @dataclass(slots=True)
 class SystemContextBuilder:
-    """Callable handed to the orchestrator; evaluated once per new run."""
+    """Callable handed to the orchestrator; evaluated once per new run.
+
+    With ``subdirectory_filenames``, instruction files between ``base`` and the
+    working directory are appended after ``instruction_files``.
+    """
 
     instruction_files: Sequence[str] = ()
     base: Path = field(default_factory=Path)
     max_bytes: int = 32_768
     skills: Mapping[str, Skill] = field(default_factory=dict)
+    subdirectory_filenames: Sequence[str] = ()
+    working_directory: Callable[[], Path] | None = None  # default: Path.cwd
 
     def __call__(self) -> SystemContext:
-        text, sources = load_instructions(self.instruction_files, base=self.base, max_bytes=self.max_bytes)
+        files = list(self.instruction_files)
+        if self.subdirectory_filenames:
+            listed = {_resolved(resolve_path(entry, self.base)) for entry in files}
+            for entry in discover_subdirectory_instructions(
+                self.base, (self.working_directory or Path.cwd)(), self.subdirectory_filenames
+            ):
+                if _resolved(resolve_path(entry, self.base)) not in listed:
+                    files.append(entry)
+        text, sources = load_instructions(files, base=self.base, max_bytes=self.max_bytes)
         parts = [text] if text else []
         if self.skills:
             parts.append(skills_index(self.skills))
             sources = [*sources, *(str(skill.path) for skill in self.skills.values())]
         return SystemContext("\n\n".join(parts), tuple(sources))
+
+
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path
 
 
 def _frontmatter(text: str) -> dict[str, str]:

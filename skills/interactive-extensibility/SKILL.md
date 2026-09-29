@@ -173,6 +173,11 @@ is deleted.
   of the workspace), concatenated in precedence order with source headers, bounded in
   size, and hashed into the run's version record. They are loaded once at creation and
   never re-read mid-run, which keeps the prompt prefix stable.
+  Implemented (6f): `[instructions] subdirectories = true` appends the `filenames`
+  (default `AGENTS.md`) found in each directory between the project root (the config
+  file's directory, excluded) and the working directory at run creation, outermost
+  first, after `files`. Files already listed, directories outside the root, and
+  symlinks that escape it are skipped; filenames must be plain names.
 - Skills: index `skills/*/SKILL.md` frontmatter (`name`, `description`). Put only the
   index in the system prompt. `load_skill(name)` (read-only) returns the body. Validate
   names; no path input.
