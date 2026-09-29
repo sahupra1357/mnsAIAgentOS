@@ -74,6 +74,8 @@ class EventType(StrEnum):
     SUBAGENT_RESUMED = "subagent_resumed"
     SUBAGENT_FINISHED = "subagent_finished"
     TODOS_UPDATED = "todos_updated"
+    FILE_SNAPSHOT = "file_snapshot"
+    REWOUND = "rewound"
 
 
 class PermissionMode(StrEnum):
@@ -147,6 +149,9 @@ class ToolSpec:
     timeout_seconds: float = 30.0
     risk: ToolRisk = ToolRisk.READ_ONLY
     idempotent: bool = True
+    # Argument fields holding workspace-relative paths this tool may modify;
+    # their pre-images are snapshotted so the change can be rewound.
+    writes_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +232,8 @@ class RunRecord:
     # None = every registered tool; otherwise only these tool names.
     allowed_tools: tuple[str, ...] | None = None
     todos: tuple[TodoItem, ...] = ()
+    # Messages moved out of the conversation by a rewind (never deleted).
+    archived_messages: list[Message] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,6 +450,19 @@ class RunUsage:
     fallbacks: int
     subagents: int = 0
     todos: tuple[TodoItem, ...] = ()
+
+
+class FileSnapshotter(Protocol):
+    """Captures and restores workspace files for rewind.
+
+    ``capture`` returns one JSON-compatible entry per path (whether the file
+    existed and where its pre-image is stored); ``restore`` puts files back to
+    those pre-images (deleting files that did not exist) and returns notes.
+    """
+
+    async def capture(self, paths: Sequence[str]) -> list[dict[str, Any]]: ...
+
+    async def restore(self, entries: Sequence[Mapping[str, Any]]) -> list[str]: ...
 
 
 class RunQueue(Protocol):

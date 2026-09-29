@@ -146,6 +146,14 @@ def _parser() -> argparse.ArgumentParser:
     skills = subcommands.add_parser("skills", help="list skills available to the model")
     skills.add_argument("--config", type=Path, required=True)
 
+    rewind = subcommands.add_parser(
+        "rewind", help="restore files and conversation to before a step (dry run without --yes)"
+    )
+    _common_runtime_arguments(rewind)
+    rewind.add_argument("run_id")
+    rewind.add_argument("--to-step", type=int, required=True, help="the model step to undo from")
+    rewind.add_argument("--yes", action="store_true", help="apply the rewind")
+
     config_cmd = subcommands.add_parser("config", help="inspect layered settings")
     config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show", help="print effective settings and where each came from")
@@ -440,6 +448,22 @@ def _inspect(config: Path) -> HarnessApplication:
     return build_application(config_path=config, database_path=":memory:")
 
 
+async def _rewind_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    async with app:
+        plan = await app.orchestrator.rewind(args.run_id, args.to_step, confirm=args.yes)
+    verb = "Rewound" if plan.applied else "Would rewind"
+    print(f"{verb} run {plan.run_id} to before step {plan.to_step}: "
+          f"{plan.archived_messages} messages archived")
+    for item in plan.files:
+        print(f"  {item['action']:15} {item['path']}")
+    for item in plan.irreversible:
+        print(f"  cannot undo    {item['tool']} (step {item['step']})")
+    if not plan.applied:
+        print("dry run: pass --yes to apply", file=sys.stderr)
+    return 0
+
+
 async def _templates_command(args: argparse.Namespace) -> int:
     async with _inspect(args.config) as app:
         for name, template in sorted(app.templates.items()):
@@ -600,6 +624,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_steer_command(args))
         if args.command == "mode":
             return asyncio.run(_mode_command(args))
+        if args.command == "rewind":
+            return asyncio.run(_rewind_command(args))
         if args.command == "templates":
             return asyncio.run(_templates_command(args))
         if args.command == "skills":

@@ -91,6 +91,26 @@ Deviation from the design below: enterprise settings are applied last and win on
 scalars, instead of first. Rule lists still concatenate, so an enterprise deny can
 never be removed.
 
+6e is implemented: item 12.
+- `ToolSpec.writes_paths` declares file-path arguments (`apply_patch` sets `path`).
+- `snapshots.py` `WorkspaceSnapshotter` stores pre-images content-addressed.
+- The orchestrator checkpoints `FILE_SNAPSHOT` *before* executing, so a replay never
+  snapshots a post-image.
+- `rewind(run_id, to_step, confirm=)` is a dry run unless confirmed. When applied:
+  - files are restored to their earliest pre-image from that step on;
+  - messages from that step on move to `RunRecord.archived_messages` (never
+    deleted);
+  - a `REWOUND` event is recorded, and approvals and subagent waits before it are
+    closed;
+  - the run becomes `completed`, so it can be continued;
+  - side effects it cannot undo are listed.
+- CLI `rewind --to-step N [--yes]`; API `POST /runs/{id}/rewind`.
+
+Deviation from the design below: the design called for a view cursor over the
+message history. Instead, messages from the rewind point on move to
+`archived_messages`, which keeps all loop logic on `run.messages` unchanged. Nothing
+is deleted.
+
 ## 1. Continuing a conversation
 - `continue_run(run_id, message)`: allowed from `completed` (and `budget_exhausted`, if
   budget is also raised explicitly). Appends a user `Message`, emits `USER_MESSAGE_ADDED`,

@@ -357,6 +357,27 @@ templates, skills, subagents, and hooks.
 - Plugin hooks and agents follow the same permission rules and guardrails as
   everything else.
 
+## Rewind
+
+With coding tools enabled, every file an edit tool is about to change is snapshotted
+first. Rewind undoes a run back to just before a model step:
+
+```bash
+agent-harness rewind --config models.toml RUN_ID --to-step 3          # dry run: shows what would change
+agent-harness rewind --config models.toml RUN_ID --to-step 3 --yes    # apply
+agent-harness continue --config models.toml RUN_ID "Try a smaller change instead"
+```
+
+**What a rewind does:**
+- **Files:** each changed file goes back to how it was before that step. Files created
+  since are deleted.
+- **Conversation:** messages from that step on move to the run's archive; nothing is
+  deleted. The run is then ready to continue.
+- **Side effects it cannot undo:** commands, commits, and external calls are listed.
+
+Over HTTP: `POST /runs/{id}/rewind {"to_step": 3, "confirm": true}`. Without
+`confirm`, this is a dry run.
+
 ## LiteLLM (optional)
 
 LiteLLM is opt-in for each profile. Only profiles with `adapter = "litellm"` use it;

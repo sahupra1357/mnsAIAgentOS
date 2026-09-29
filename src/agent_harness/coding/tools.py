@@ -246,6 +246,7 @@ def register_coding_tools(
                 required=["path", "new_text"],
             ),
             risk=ToolRisk.SIDE_EFFECT,
+            writes_paths=("path",),
         ),
         apply_patch,
     )

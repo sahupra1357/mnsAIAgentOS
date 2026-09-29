@@ -401,23 +401,7 @@ def _encode_run(run: RunRecord) -> str:
 
 def _decode_run(value: str) -> RunRecord:
     data = json.loads(value)
-    messages = [
-        Message(
-            role=Role(message["role"]),
-            content=message.get("content", ""),
-            name=message.get("name"),
-            tool_call_id=message.get("tool_call_id"),
-            tool_calls=tuple(
-                ToolCall(
-                    id=call["id"],
-                    name=call["name"],
-                    arguments=call.get("arguments", {}),
-                )
-                for call in message.get("tool_calls", ())
-            ),
-        )
-        for message in data["messages"]
-    ]
+    messages = _decode_messages(data["messages"])
     budget_data = data.get("budget", {})
     return RunRecord(
         id=data["id"],
@@ -451,7 +435,28 @@ def _decode_run(value: str) -> RunRecord:
             TodoItem(item["id"], item["content"], TodoStatus(item["status"]))
             for item in data.get("todos", ())
         ),
+        archived_messages=_decode_messages(data.get("archived_messages", ())),
     )
+
+
+def _decode_messages(items: Any) -> list[Message]:
+    return [
+        Message(
+            role=Role(message["role"]),
+            content=message.get("content", ""),
+            name=message.get("name"),
+            tool_call_id=message.get("tool_call_id"),
+            tool_calls=tuple(
+                ToolCall(
+                    id=call["id"],
+                    name=call["name"],
+                    arguments=call.get("arguments", {}),
+                )
+                for call in message.get("tool_calls", ())
+            ),
+        )
+        for message in items
+    ]
 
 
 def _decode_tool_result(value: str) -> ToolResult:

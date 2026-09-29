@@ -19,6 +19,7 @@ from .instructions import (
     resolve_path,
 )
 from .plugins import Plugin, enabled_plugins
+from .snapshots import WorkspaceSnapshotter
 from .templates import Template, discover_templates
 from .context import BudgetedContextBuilder, ContextPolicy, limits_from_profiles
 from .domain import ArtifactStore, PermissionMode, StreamListener, TelemetrySink
@@ -174,6 +175,14 @@ def build_application(
         ),
         task_tracking=config.tasks.enabled,
         system_context=system_context,
+        snapshots=(
+            WorkspaceSnapshotter(
+                config.coding.workspace_path(base=base_path),
+                artifacts or LocalArtifactStore(base_path / ".agent-harness" / "snapshots"),
+            )
+            if config.coding.enabled
+            else None
+        ),
     )
     return HarnessApplication(
         config=config,
