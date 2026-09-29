@@ -197,7 +197,7 @@ class MemoryConfig:
 _PERMISSION_MODES = {"default", "accept_edits", "plan", "bypass"}
 _HOOK_EVENTS = {
     "session_start", "user_prompt", "pre_model", "post_model", "pre_tool", "post_tool", "stop",
-    "subagent_stop",
+    "subagent_stop", "pre_compact",
 }
 
 
@@ -301,6 +301,21 @@ class InstructionsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SummarizationConfig:
+    """Summarize history that the context window would otherwise omit.
+
+    Applies only to profiles with ``context_window``. ``profile`` (a profile or
+    route name) writes the summaries; empty means the run's own profile.
+    ``max_input_chars = 0`` sizes the transcript from that profile's window.
+    """
+
+    enabled: bool = False
+    profile: str = ""
+    max_output_tokens: int = 1024
+    max_input_chars: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class SkillsConfig:
     """Skill directories; each ``<dir>/<name>/SKILL.md`` becomes a loadable skill."""
 
@@ -343,6 +358,7 @@ class HarnessConfig:
     subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
     tasks: TasksConfig = field(default_factory=TasksConfig)
     instructions: InstructionsConfig = field(default_factory=InstructionsConfig)
+    summarization: SummarizationConfig = field(default_factory=SummarizationConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     templates: TemplatesConfig = field(default_factory=TemplatesConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
@@ -481,6 +497,7 @@ def load_config(
         subagents=_parse_section(raw, "subagents", SubagentsConfig),
         tasks=_parse_section(raw, "tasks", TasksConfig),
         instructions=_parse_section(raw, "instructions", InstructionsConfig),
+        summarization=_parse_section(raw, "summarization", SummarizationConfig),
         skills=_parse_section(raw, "skills", SkillsConfig),
         templates=_parse_section(raw, "templates", TemplatesConfig),
         plugins=_parse_section(raw, "plugins", PluginsConfig),

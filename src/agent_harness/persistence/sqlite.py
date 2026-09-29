@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from agent_harness.domain import (
     ConcurrencyError,
+    ContextSummary,
     EventType,
     Message,
     Role,
@@ -436,6 +437,14 @@ def _decode_run(value: str) -> RunRecord:
             for item in data.get("todos", ())
         ),
         archived_messages=_decode_messages(data.get("archived_messages", ())),
+        context_summary=(
+            ContextSummary(
+                covers=int(data["context_summary"]["covers"]),
+                content=str(data["context_summary"]["content"]),
+            )
+            if data.get("context_summary")
+            else None
+        ),
     )
 
 

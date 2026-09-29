@@ -21,7 +21,7 @@ from agent_harness.agents import (
     child_run_id,
     parse_todos,
 )
-from agent_harness.context import FullHistoryContextBuilder
+from agent_harness.context import ContextSummarizer, FullHistoryContextBuilder
 from agent_harness.instructions import SystemContext
 from agent_harness.hooks import HookEvent, HookInput, HookResult, HookRunner
 from agent_harness.permissions import (
@@ -42,6 +42,7 @@ from agent_harness.domain import (
     SteerMessage,
     SteerStore,
     ContextBuilder,
+    ContextSummary,
     ContextView,
     ModelClient,
     ModelStreamEvent,
@@ -153,6 +154,7 @@ class AgentOrchestrator:
         task_tracking: bool = False,
         system_context: Callable[[], SystemContext] | None = None,
         snapshots: FileSnapshotter | None = None,
+        summarizer: ContextSummarizer | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -183,6 +185,7 @@ class AgentOrchestrator:
         self._task_tracking = task_tracking
         self._system_context = system_context
         self._snapshots = snapshots
+        self._summarizer = summarizer
 
     @property
     def context_builder(self) -> ContextBuilder:
@@ -894,7 +897,10 @@ class AgentOrchestrator:
         try:
             client = self._models.resolve(run.model_profile)
             specs = self._specs_for(run)
-            view = self._context.build(run.messages, specs, model_profile=run.model_profile)
+            view = self._build_view(run, specs)
+            if self._summarizer is not None and view.omitted_through is not None:
+                if await self._summarize(run, events, view):
+                    view = self._build_view(run, specs)
             request_messages = view.messages
             if pre_model is not None and pre_model.context:
                 # Ephemeral: appended to this request only, so history (and the
@@ -930,6 +936,107 @@ class AgentOrchestrator:
                 step=run.step_count,
                 model_profile=run.model_profile,
                 final_output=response.content[:_HOOK_RESULT_PREVIEW_CHARS],
+            ),
+        )
+
+    def _build_view(self, run: RunRecord, specs: Sequence[ToolSpec]) -> ContextView:
+        if run.context_summary is None:
+            # Builders without summary support never see the keyword.
+            return self._context.build(run.messages, specs, model_profile=run.model_profile)
+        # ``summary`` is an optional extension of the ContextBuilder protocol.
+        build: Any = self._context.build
+        view: ContextView = build(
+            run.messages, specs, model_profile=run.model_profile, summary=run.context_summary
+        )
+        return view
+
+    async def _summarize(
+        self, run: RunRecord, events: list[RunEvent], view: ContextView
+    ) -> bool:
+        """Replace the omitted range with a persisted summary; True if one was written.
+
+        The summary is a model call: its usage counts against the run budget,
+        and the result is stored on the run and in a ``context_summarized``
+        event, so a resumed run reuses it instead of regenerating it. Failures
+        never fail the run: the view falls back to plain omission, and the same
+        range is not retried until the trim point moves.
+        """
+
+        assert self._summarizer is not None
+        start, target = view.omitted_from, view.omitted_through
+        if start is None or target is None or target <= start:
+            return False
+        for event in reversed(events):
+            if event.type is EventType.CONTEXT_SUMMARIZED:
+                if event.payload.get("ok") is False and event.payload.get("covers") == target:
+                    return False
+                break
+        previous = run.context_summary
+        profile = self._summarizer.profile or run.model_profile
+        payload: dict[str, Any] = {
+            "covers": target,
+            "previous_covers": previous.covers if previous is not None else None,
+            "summarized_messages": target - start,
+            "model_profile": profile,
+        }
+        hook = await self._run_hook(
+            run,
+            events,
+            HookInput(
+                event=HookEvent.PRE_COMPACT,
+                run_id=run.id,
+                step=run.step_count,
+                model_profile=profile,
+            ),
+        )
+        if hook is not None and hook.decision == "deny":
+            await self._record_summary(run, events, {**payload, "ok": False, "error": "denied by pre_compact hook"})
+            return False
+        request = self._summarizer.request(
+            previous.content if previous is not None else None,
+            run.messages[start:target],
+            profile=profile,
+            metadata={"run_id": run.id, "step": str(run.step_count), "purpose": "summary"},
+        )
+        try:
+            response = await self._models.resolve(profile).complete(request)
+            content = response.content.strip()
+            if not content:
+                raise ValueError("the model returned an empty summary")
+        except Exception as exc:
+            await self._record_summary(run, events, {**payload, "ok": False, "error": _safe_error(exc)})
+            return False
+        if response.usage.total_tokens is not None:
+            run.consumed_tokens += response.usage.total_tokens
+        if response.usage.cost_usd is not None:
+            run.consumed_cost_usd += response.usage.cost_usd
+        run.context_summary = ContextSummary(covers=target, content=content)
+        await self._record_summary(
+            run,
+            events,
+            {
+                **payload,
+                "ok": True,
+                "content": content,
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "cost_usd": response.usage.cost_usd,
+            },
+        )
+        return True
+
+    async def _record_summary(
+        self, run: RunRecord, events: list[RunEvent], payload: Mapping[str, Any]
+    ) -> None:
+        await self._checkpoint(
+            run,
+            events,
+            RunEvent(
+                run_id=run.id,
+                type=EventType.CONTEXT_SUMMARIZED,
+                payload=dict(payload),
+                step=run.step_count,
+                created_at=self._clock(),
             ),
         )
 
@@ -1025,6 +1132,8 @@ class AgentOrchestrator:
                 "trimmed_tool_outputs": view.trimmed_tool_outputs,
                 "estimated_tokens": view.estimated_tokens,
             }
+            if view.summarized_messages:
+                payload["context"]["summarized_messages"] = view.summarized_messages
         await self._checkpoint(
             run,
             events,
@@ -1673,6 +1782,10 @@ class AgentOrchestrator:
         archived = run.messages[cut:]
         run.archived_messages.extend(archived)
         del run.messages[cut:]
+        # A summary that covers archived messages would describe undone work.
+        summary_cleared = run.context_summary is not None and run.context_summary.covers > cut
+        if summary_cleared:
+            run.context_summary = None
         now = self._clock()
         run.status = RunStatus.COMPLETED
         run.completed_at = now
@@ -1687,6 +1800,7 @@ class AgentOrchestrator:
                 "files": plan.files,
                 "notes": notes,
                 "irreversible": irreversible,
+                **({"summary_cleared": True} if summary_cleared else {}),
             },
             step=run.step_count,
             created_at=now,

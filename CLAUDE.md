@@ -108,6 +108,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   others still send the full history. For Ollama's OpenAI-compatible mode, the server's
   own context (`OLLAMA_CONTEXT_LENGTH`) must also be at least that large, or the server
   truncates silently. See `skills/context-management/SKILL.md`.
+- **Summarization (Phase 2.3).** It is off unless `[summarization] enabled = true`, and
+  applies only to profiles with `context_window`. The summary is a model call that
+  counts against the budget and is persisted on the run (`context_summary`). A test
+  model must answer requests with `metadata["purpose"] == "summary"`.
 - `ModelResolver.resolve` is synchronous; `Execution.md` shows `await` but the code does not.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
@@ -152,7 +156,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
     SGLang's equivalent; verify the field against the deployed version). `doctor` sends the
     same prompt twice and reports whether the second call hit the cache.
 
-**Phase 2 – Context window** [context-management] — steps 1, 2, 4 implemented on `phase-2-context-window`; step 3 (summarization) deferred
+**Phase 2 – Context window** [context-management] — steps 1, 2, 4 implemented on `phase-2-context-window`; step 3 (summarization) on `phase-2-summarization`
 1. Add the `ContextBuilder` protocol, and inject it with a default that sends
    everything (today's behavior).
 2. Add a `BudgetedContextBuilder`: token estimate, keep system and first user message,

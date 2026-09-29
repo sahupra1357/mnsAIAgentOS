@@ -49,6 +49,7 @@ class HookEvent(StrEnum):
     POST_MODEL = "post_model"
     PRE_TOOL = "pre_tool"
     POST_TOOL = "post_tool"
+    PRE_COMPACT = "pre_compact"
     STOP = "stop"
     SUBAGENT_STOP = "subagent_stop"
 

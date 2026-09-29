@@ -76,6 +76,7 @@ class EventType(StrEnum):
     TODOS_UPDATED = "todos_updated"
     FILE_SNAPSHOT = "file_snapshot"
     REWOUND = "rewound"
+    CONTEXT_SUMMARIZED = "context_summarized"
 
 
 class PermissionMode(StrEnum):
@@ -234,6 +235,8 @@ class RunRecord:
     todos: tuple[TodoItem, ...] = ()
     # Messages moved out of the conversation by a rewind (never deleted).
     archived_messages: list[Message] = field(default_factory=list)
+    # Persisted summary of older turns, reused on every later call and on resume.
+    context_summary: ContextSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +261,25 @@ class ApprovalRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextSummary:
+    """A model-written summary that stands in for older messages in the view.
+
+    ``covers`` is the index in ``RunRecord.messages`` where the kept history
+    resumes: every message between the pinned head and ``covers`` is replaced
+    by ``content``. Stored messages are never changed.
+    """
+
+    covers: int
+    content: str
+
+    def __post_init__(self) -> None:
+        if self.covers < 0:
+            raise ValueError("covers must not be negative")
+        if not self.content.strip():
+            raise ValueError("summary content must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ContextView:
     """The bounded message sequence sent to a model for one call.
 
@@ -269,17 +291,29 @@ class ContextView:
     estimated_tokens: int | None = None
     omitted_messages: int = 0
     trimmed_tool_outputs: int = 0
+    # Messages replaced by a ContextSummary in this view.
+    summarized_messages: int = 0
+    # When messages were omitted: the half-open range [omitted_from,
+    # omitted_through) of indices into the stored messages that was left out.
+    omitted_from: int | None = None
+    omitted_through: int | None = None
 
     @property
     def modified(self) -> bool:
-        return self.omitted_messages > 0 or self.trimmed_tool_outputs > 0
+        return (
+            self.omitted_messages > 0
+            or self.trimmed_tool_outputs > 0
+            or self.summarized_messages > 0
+        )
 
 
 class ContextBuilder(Protocol):
     """Build the per-call view of a run's history.
 
     Implementations must be deterministic functions of their inputs so that a
-    resumed run sends the same view.
+    resumed run sends the same view. When a run has a persisted
+    ``ContextSummary``, the orchestrator also passes it as a ``summary``
+    keyword argument; builders that support summarization accept it.
     """
 
     def build(
