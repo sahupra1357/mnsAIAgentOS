@@ -200,7 +200,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
    cost when present.
 
 **Phase 6 – Interactive and extensibility features** [interactive-extensibility] — split into PRs that each target `main`:
-6a (items 1, 2, 15) on `phase-6a-conversation-control`; 6b (items 3, 5, 6, 7) on `phase-6b-hooks-permissions`; 6c (items 4, 8) on `phase-6c-subagents-tasks`; 6d (items 9, 10, 11, 13, 14) on `phase-6d-instructions-settings-plugins`; 6e (item 12) on `phase-6e-rewind`. All of Phase 6 is implemented.
+6a (items 1, 2, 15) on `phase-6a-conversation-control`; 6b (items 3, 5, 6, 7) on `phase-6b-hooks-permissions`; 6c (items 4, 8) on `phase-6c-subagents-tasks`; 6d (items 9, 10, 11, 13, 14) on `phase-6d-instructions-settings-plugins`; 6e (item 12) on `phase-6e-rewind`; 6f (item 9 subdirectory discovery) on `phase-6f-instruction-discovery`. All of Phase 6 is implemented.
 Order matters: 6.1 is the foundation for most of the rest.
 1. Continue a conversation: `continue_run(run_id, message)` appends a user message to a
    `completed` run and moves it back to `running` (new event `USER_MESSAGE_ADDED`). Add a

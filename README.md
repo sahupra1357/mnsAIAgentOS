@@ -319,6 +319,8 @@ and the subagents.
 [instructions]                    # project conventions for every new run
 enabled = true
 files = ["~/.agent-harness/AGENTS.md", "AGENTS.md"]   # later = more specific
+subdirectories = true             # also AGENTS.md in each directory down to the cwd
+filenames = ["AGENTS.md"]
 
 [skills]                          # skills/<name>/SKILL.md with name/description frontmatter
 enabled = true
@@ -334,6 +336,10 @@ enabled = ["reviewkit"]           # installed plugins take effect only when list
 **Instructions and skills.** Both are read once when a run starts and fixed for that
 run, so the prompt prefix stays cacheable, and their hash is recorded. The model sees
 only each skill's name and description, and loads a full skill with `load_skill`.
+With `subdirectories = true`, a run started from `services/api/` also loads
+`services/AGENTS.md` and then `services/api/AGENTS.md` (relative to the config file's
+directory), after `files`. Directories outside the project, and symlinks that point
+outside it, are ignored.
 
 **Templates.** `agent-harness run --arg focus=security "/review app.py"` fills
 `$ARGUMENTS`, `$1`, and `${focus}`, and records the template in the run. List them
