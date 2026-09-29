@@ -74,6 +74,23 @@ Not implemented:
 - Todos: `RunRecord.todos` and `TODOS_UPDATED`, shown in `status`,
   `GET /runs/{id}`, and `/usage`.
 
+6d is implemented: items 9, 10, 11, 13, and 14.
+- `settings.py`: layers user → project → local, then enterprise last (it wins),
+  with provenance and `config show`.
+- `instructions.py`: instruction files, the skills index, `load_skill`, and
+  `SystemContextBuilder`, applied once in `create_run` for top-level runs.
+- `templates.py`: `/name` expansion with `$ARGUMENTS`, `$1`, and `${key}`.
+- `plugins.py`: manifest validation, install (copy; symlinks rejected), and
+  enable-by-name.
+- Config: `[instructions]`, `[skills]`, `[templates]`, `[plugins]`.
+- CLI: `templates`, `skills`, `config show`, `plugin install/list/remove`, and
+  `run --arg`.
+- API: `template_args` and `GET /templates`.
+
+Deviation from the design below: enterprise settings are applied last and win on
+scalars, instead of first. Rule lists still concatenate, so an enterprise deny can
+never be removed.
+
 ## 1. Continuing a conversation
 - `continue_run(run_id, message)`: allowed from `completed` (and `budget_exhausted`, if
   budget is also raised explicitly). Appends a user `Message`, emits `USER_MESSAGE_ADDED`,

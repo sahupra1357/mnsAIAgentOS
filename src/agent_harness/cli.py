@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -21,6 +22,10 @@ from .domain import HarnessError, Message, Role, RunBudget, RunRecord
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
 from .api import create_api
+from .instructions import resolve_path
+from .plugins import install_plugin, installed_plugins
+from .settings import SettingsError, load_layers, render_effective
+from .templates import expand_prompt
 from .evals import load_scenarios, run_scenario, summarize
 from .telemetry import JsonLinesTelemetry
 from .worker import Worker
@@ -46,6 +51,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-cost-usd", type=float)
     run.add_argument(
         "--stream", action="store_true", help="print assistant text as it is generated"
+    )
+    run.add_argument(
+        "--arg", action="append", default=[], metavar="KEY=VALUE",
+        help="named value for a /template prompt (${KEY})",
     )
     run.add_argument(
         "--mode",
@@ -132,6 +141,28 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--lease-seconds", type=float, default=60.0)
     worker.add_argument("--poll-seconds", type=float, default=1.0)
 
+    templates = subcommands.add_parser("templates", help="list prompt templates (/name)")
+    templates.add_argument("--config", type=Path, required=True)
+    skills = subcommands.add_parser("skills", help="list skills available to the model")
+    skills.add_argument("--config", type=Path, required=True)
+
+    config_cmd = subcommands.add_parser("config", help="inspect layered settings")
+    config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
+    show = config_sub.add_parser("show", help="print effective settings and where each came from")
+    show.add_argument("--config", type=Path, required=True)
+
+    plugin = subcommands.add_parser("plugin", help="install, list, or remove plugins")
+    plugin_sub = plugin.add_subparsers(dest="plugin_command", required=True)
+    install = plugin_sub.add_parser("install", help="validate and copy a plugin (not enabled)")
+    install.add_argument("source", type=Path)
+    install.add_argument("--config", type=Path, required=True)
+    install.add_argument("--replace", action="store_true")
+    listing = plugin_sub.add_parser("list", help="list installed plugins")
+    listing.add_argument("--config", type=Path, required=True)
+    remove = plugin_sub.add_parser("remove", help="delete an installed plugin")
+    remove.add_argument("name")
+    remove.add_argument("--config", type=Path, required=True)
+
     evaluate = subcommands.add_parser(
         "eval", help="run scenario evaluations (scripted by default, --live for real models)"
     )
@@ -205,12 +236,14 @@ async def _run_command(args: argparse.Namespace) -> int:
             system = CODING_AGENT_SYSTEM_PROMPT
         if system:
             messages.append(Message(role=Role.SYSTEM, content=system))
-        messages.append(Message(role=Role.USER, content=args.prompt))
+        prompt, template = expand_prompt(args.prompt, app.templates, _named_args(args.arg))
+        messages.append(Message(role=Role.USER, content=prompt))
         run = await app.orchestrator.create_run(
             model_profile=profile,
             route=route,
             mode=args.mode,
             versions=app.run_versions(profile),
+            template={"name": template.name, "sha256": template.sha256} if template else None,
             messages=messages,
             budget=RunBudget(
                 max_steps=args.max_steps,
@@ -284,7 +317,7 @@ async def _print_result(
 
 
 def _list_profiles(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
+    config = load_config(args.config, layered=True)
     for name, profile in config.models.items():
         marker = " *" if name == config.default_model_profile else ""
         fallback = f" (fallback: {', '.join(profile.fallback)})" if profile.fallback else ""
@@ -298,7 +331,7 @@ def _list_profiles(args: argparse.Namespace) -> int:
 
 
 async def _doctor_command(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
+    config = load_config(args.config, layered=True)
     profile = config.resolve_model_name(args.model_profile)
     transport = StdlibHttpTransport()
     client = ModelGateway(config, transport=transport).resolve(profile)
@@ -333,7 +366,8 @@ async def _continue_command(args: argparse.Namespace) -> int:
             budget = replace(
                 current.budget, **{k: v for k, v in raised.items() if v is not None}
             )
-        await app.orchestrator.continue_run(args.run_id, args.message, budget=budget)
+        message, _ = expand_prompt(args.message, app.templates)
+        await app.orchestrator.continue_run(args.run_id, message, budget=budget)
         finished = await app.orchestrator.run(args.run_id)
         return await _print_result(
             app, finished, streamed=stream is not None and stream.printed
@@ -389,6 +423,66 @@ async def _status_command(args: argparse.Namespace) -> int:
     marks = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
     for item in usage.todos:
         print(f"  {marks[item.status.value]} {item.content}")
+    return 0
+
+
+def _named_args(pairs: Sequence[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for pair in pairs:
+        key, separator, value = pair.partition("=")
+        if not separator or not key:
+            raise ValueError(f"--arg expects KEY=VALUE, got {pair!r}")
+        values[key] = value
+    return values
+
+
+def _inspect(config: Path) -> HarnessApplication:
+    return build_application(config_path=config, database_path=":memory:")
+
+
+async def _templates_command(args: argparse.Namespace) -> int:
+    async with _inspect(args.config) as app:
+        for name, template in sorted(app.templates.items()):
+            print(f"/{name:20} {template.description or '(no description)'}  [{template.path}]")
+    return 0
+
+
+async def _skills_command(args: argparse.Namespace) -> int:
+    async with _inspect(args.config) as app:
+        for name, skill in sorted(app.skills.items()):
+            print(f"{name:20} {skill.description}  [{skill.path}]")
+    return 0
+
+
+def _config_command(args: argparse.Namespace) -> int:
+    print(render_effective(load_layers(args.config, os.environ)))
+    return 0
+
+
+def _plugins_dir(config_path: Path) -> Path:
+    config = load_config(config_path, layered=True)
+    return resolve_path(config.plugins.directory, config_path.parent)
+
+
+def _plugin_command(args: argparse.Namespace) -> int:
+    directory = _plugins_dir(args.config)
+    enabled = set(load_config(args.config, layered=True).plugins.enabled)
+    if args.plugin_command == "install":
+        installed = install_plugin(args.source, directory, replace=args.replace)
+        print(f"installed {installed.name} {installed.version} into {installed.root}")
+        if installed.name not in enabled:
+            print(f'enable it with: [plugins] enabled = ["{installed.name}"]', file=sys.stderr)
+        return 0
+    if args.plugin_command == "list":
+        for plugin in installed_plugins(directory):
+            state = "enabled" if plugin.name in enabled else "installed"
+            print(f"{plugin.name:20} {plugin.version:10} {state:9} {plugin.description}")
+        return 0
+    target = directory / args.name
+    if not (target / "plugin.toml").is_file() or target.resolve().parent != directory.resolve():
+        raise ValueError(f"plugin {args.name!r} is not installed in {directory}")
+    shutil.rmtree(target)
+    print(f"removed {args.name}")
     return 0
 
 
@@ -506,11 +600,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_steer_command(args))
         if args.command == "mode":
             return asyncio.run(_mode_command(args))
+        if args.command == "templates":
+            return asyncio.run(_templates_command(args))
+        if args.command == "skills":
+            return asyncio.run(_skills_command(args))
+        if args.command == "config":
+            return _config_command(args)
+        if args.command == "plugin":
+            return _plugin_command(args)
         if args.command == "cancel":
             return asyncio.run(_cancel_command(args))
         if args.command == "status":
             return asyncio.run(_status_command(args))
-    except (ConfigError, HarnessError, KeyError, ValueError) as exc:
+    except (ConfigError, HarnessError, KeyError, ValueError, SettingsError, OSError) as exc:
         print(f"agent-harness: {exc}", file=sys.stderr)
         return 2
     return 2

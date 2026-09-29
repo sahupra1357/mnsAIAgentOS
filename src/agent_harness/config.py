@@ -292,6 +292,38 @@ class TasksConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class InstructionsConfig:
+    """Instruction files added to every new top-level run (later = more specific)."""
+
+    enabled: bool = False
+    files: tuple[str, ...] = ("~/.agent-harness/AGENTS.md", "AGENTS.md")
+    max_bytes: int = 32_768
+
+
+@dataclass(frozen=True, slots=True)
+class SkillsConfig:
+    """Skill directories; each ``<dir>/<name>/SKILL.md`` becomes a loadable skill."""
+
+    enabled: bool = False
+    paths: tuple[str, ...] = ("skills",)
+
+
+@dataclass(frozen=True, slots=True)
+class TemplatesConfig:
+    """Prompt templates ``<dir>/<name>.md``, invoked as ``/<name> arguments``."""
+
+    paths: tuple[str, ...] = ("templates",)
+
+
+@dataclass(frozen=True, slots=True)
+class PluginsConfig:
+    """Installed plugins live in ``directory``; only ``enabled`` ones take effect."""
+
+    directory: str = ".agent-harness/plugins"
+    enabled: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessConfig:
     """Validated application configuration.
 
@@ -310,6 +342,10 @@ class HarnessConfig:
     agents: tuple[AgentConfig, ...] = ()
     subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
     tasks: TasksConfig = field(default_factory=TasksConfig)
+    instructions: InstructionsConfig = field(default_factory=InstructionsConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
+    templates: TemplatesConfig = field(default_factory=TemplatesConfig)
+    plugins: PluginsConfig = field(default_factory=PluginsConfig)
 
     def __post_init__(self) -> None:
         copied = dict(self.models)
@@ -366,6 +402,7 @@ def load_config(
     path: str | os.PathLike[str] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
+    layered: bool = False,
 ) -> HarnessConfig:
     """Load TOML configuration and apply environment overrides.
 
@@ -378,7 +415,14 @@ def load_config(
     env = os.environ if environ is None else environ
     configured_path = path or env.get("AGENT_HARNESS_CONFIG")
     raw: dict[str, Any] = {}
-    if configured_path:
+    if layered:
+        from agent_harness.settings import SettingsError, load_layers
+
+        try:
+            raw = load_layers(Path(configured_path) if configured_path else None, env).raw
+        except SettingsError as exc:
+            raise ConfigError(str(exc)) from exc
+    elif configured_path:
         config_path = Path(configured_path)
         try:
             with config_path.open("rb") as config_file:
@@ -436,6 +480,10 @@ def load_config(
         agents=_parse_agents(raw.get("agents"), profiles, raw_routes),
         subagents=_parse_section(raw, "subagents", SubagentsConfig),
         tasks=_parse_section(raw, "tasks", TasksConfig),
+        instructions=_parse_section(raw, "instructions", InstructionsConfig),
+        skills=_parse_section(raw, "skills", SkillsConfig),
+        templates=_parse_section(raw, "templates", TemplatesConfig),
+        plugins=_parse_section(raw, "plugins", PluginsConfig),
     )
 
 
@@ -502,13 +550,18 @@ def _parse_section(raw: Mapping[str, Any], name: str, section_type: Any) -> Any:
     if unknown:
         raise ConfigError(f"unknown fields in {name}: {', '.join(sorted(unknown))}")
     defaults = section_type()
+    converted = dict(values)
     for key, value in values.items():
-        expected = type(getattr(defaults, key))
-        if getattr(defaults, key) is None:
-            expected = str
+        default = getattr(defaults, key)
+        if isinstance(default, tuple):
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ConfigError(f"{name}.{key} must be a list of strings")
+            converted[key] = tuple(value)
+            continue
+        expected = str if default is None else type(default)
         if isinstance(value, bool) != (expected is bool) or not isinstance(value, expected):
             raise ConfigError(f"{name}.{key} must be of type {expected.__name__}")
-    return section_type(**values)
+    return section_type(**converted)
 
 
 def _apply_environment_overrides(

@@ -313,6 +313,50 @@ hand a self-contained task to a subagent:
 **Task list.** `agent-harness status RUN_ID` and `GET /runs/{id}` show the task list
 and the subagents.
 
+## Instructions, Skills, Templates, Settings Layers, and Plugins
+
+```toml
+[instructions]                    # project conventions for every new run
+enabled = true
+files = ["~/.agent-harness/AGENTS.md", "AGENTS.md"]   # later = more specific
+
+[skills]                          # skills/<name>/SKILL.md with name/description frontmatter
+enabled = true
+paths = ["skills"]
+
+[templates]                       # templates/<name>.md, used as: /name args
+paths = ["templates"]
+
+[plugins]
+enabled = ["reviewkit"]           # installed plugins take effect only when listed
+```
+
+**Instructions and skills.** Both are read once when a run starts and fixed for that
+run, so the prompt prefix stays cacheable, and their hash is recorded. The model sees
+only each skill's name and description, and loads a full skill with `load_skill`.
+
+**Templates.** `agent-harness run --arg focus=security "/review app.py"` fills
+`$ARGUMENTS`, `$1`, and `${focus}`, and records the template in the run. List them
+with `agent-harness templates`.
+
+**Settings layers.** Settings merge in this order:
+1. user: `~/.agent-harness/settings.toml`
+2. project: your `--config` file
+3. local: `models.local.toml`, for personal overrides that are not committed
+4. enterprise: `/etc/agent-harness/settings.toml`, applied last so it wins
+
+Rule lists (permissions, hooks, agents) accumulate across layers. Run
+`agent-harness config show --config models.toml` to see each effective value and
+the layer it came from.
+
+**Plugins.** A plugin is a directory with a `plugin.toml` manifest that bundles
+templates, skills, subagents, and hooks.
+- `agent-harness plugin install ./my-plugin --config models.toml` validates it and
+  copies it into `.agent-harness/plugins/`. It does nothing until you add its name to
+  `[plugins] enabled`.
+- Plugin hooks and agents follow the same permission rules and guardrails as
+  everything else.
+
 ## LiteLLM (optional)
 
 LiteLLM is opt-in for each profile. Only profiles with `adapter = "litellm"` use it;

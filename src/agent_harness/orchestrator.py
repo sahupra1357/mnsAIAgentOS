@@ -22,6 +22,7 @@ from agent_harness.agents import (
     parse_todos,
 )
 from agent_harness.context import FullHistoryContextBuilder
+from agent_harness.instructions import SystemContext
 from agent_harness.hooks import HookEvent, HookInput, HookResult, HookRunner
 from agent_harness.permissions import (
     EXIT_PLAN_SPEC,
@@ -138,6 +139,7 @@ class AgentOrchestrator:
         subagents: Sequence[SubagentDefinition] = (),
         subagent_limits: SubagentLimits | None = None,
         task_tracking: bool = False,
+        system_context: Callable[[], SystemContext] | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -166,6 +168,7 @@ class AgentOrchestrator:
         self._agent_limits = subagent_limits or SubagentLimits()
         self._agent_spec = agent_spec(tuple(self._agents.values())) if self._agents else None
         self._task_tracking = task_tracking
+        self._system_context = system_context
 
     @property
     def context_builder(self) -> ContextBuilder:
@@ -187,6 +190,7 @@ class AgentOrchestrator:
         parent_call_id: str | None = None,
         depth: int = 0,
         allowed_tools: Sequence[str] | None = None,
+        template: Mapping[str, str] | None = None,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted.
 
@@ -202,6 +206,13 @@ class AgentOrchestrator:
         initial_messages = list(messages)
         for message in initial_messages:
             _validate_message(message)
+        context = None
+        if self._system_context is not None and parent_run_id is None:
+            # Instructions and the skills index are read once, here, and stay
+            # fixed for the run so the prompt prefix remains cacheable.
+            context = self._system_context()
+            if context.text:
+                initial_messages.insert(0, Message(role=Role.SYSTEM, content=context.text))
         prompt_hook = await self._user_prompt_hook(identifier, initial_messages, model_profile)
 
         now = self._clock()
@@ -231,6 +242,11 @@ class AgentOrchestrator:
             payload["mode"] = selected_mode.value
         if parent_run_id is not None:
             payload.update(parent_run_id=parent_run_id, parent_call_id=parent_call_id, depth=depth)
+        if context is not None and context.text:
+            payload["context_sources"] = list(context.sources)
+            recorded_versions["context_sha256"] = context.sha256
+        if template is not None:
+            payload["template"] = {str(k): str(v) for k, v in template.items()}
         if prompt_hook is not None:
             payload["user_prompt_hook"] = prompt_hook.as_payload()
         if route is not None:
