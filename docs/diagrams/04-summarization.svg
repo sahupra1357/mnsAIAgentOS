@@ -1,62 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 960" width="1500" height="960" font-family="Helvetica, Arial, sans-serif">
 <rect width="1500" height="960" fill="#ffffff"/>
 <text x="40" y="50" font-size="30" fill="#1e1e1e" font-weight="bold"><tspan x="40" dy="0">Context window: trimming and summarization</tspan></text>
-<rect x="40" y="90" width="300" height="90" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="190.0" y="130.1">Build view</tspan><tspan x="190.0" y="152.6">BudgetedContextBuilder</tspan></text>
-<polyline points="190,180 190,220" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="190,220 184.8,209.2 195.2,209.2" fill="#1e1e1e"/>
-<polygon points="190.0,220 320,290.0 190.0,360 60,290.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="190.0" y="285.1">messages</tspan><tspan x="190.0" y="307.6">omitted?</tspan></text>
-<polyline points="190,360 190,420" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="190,420 184.8,409.2 195.2,409.2" fill="#1e1e1e"/>
-<rect x="40" y="420" width="300" height="80" rx="12" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="190.0" y="466.3">Send view to model</tspan></text>
-<polyline points="320,290 430,290" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="430,290 419.2,295.2 419.2,284.8" fill="#1e1e1e"/>
-<polygon points="560.0,220 690,290.0 560.0,360 430,290.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="560.0" y="285.1">summarizer</tspan><tspan x="560.0" y="307.6">enabled?</tspan></text>
-<polyline points="560,360 560,420" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="560,420 554.8,409.2 565.2,409.2" fill="#1e1e1e"/>
-<rect x="430" y="420" width="260" height="90" rx="12" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="560.0" y="460.1">Plain omission:</tspan><tspan x="560.0" y="482.6">notice in first message</tspan></text>
-<polyline points="430,465 340,460" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="340,460 351.1,455.4 350.5,465.8" fill="#1e1e1e"/>
-<polyline points="690,290 800,290" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="800,290 789.2,295.2 789.2,284.8" fill="#1e1e1e"/>
-<polygon points="930.0,220 1060,290.0 930.0,360 800,290.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/>
-<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="930.0" y="285.6">same trim point</tspan><tspan x="930.0" y="305.6">failed before?</tspan></text>
-<polyline points="930,360 930,390 640,390 640,420" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="640,420 634.8,409.2 645.2,409.2" fill="#1e1e1e"/>
-<polyline points="1060,290 1170,290" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="1170,290 1159.2,295.2 1159.2,284.8" fill="#1e1e1e"/>
-<rect x="1170" y="235" width="280" height="110" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="296.3">pre_compact hook</tspan></text>
-<polyline points="1170,330 1080,560" fill="none" stroke="#ef4444" stroke-width="2"/>
-<polygon points="1080,560 1079.1,548.0 1088.8,551.8" fill="#ef4444"/>
-<polyline points="1310,345 1310,400" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="1310,400 1304.8,389.2 1315.2,389.2" fill="#1e1e1e"/>
-<rect x="1170" y="400" width="280" height="110" rx="12" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="438.8">Summary model call</tspan><tspan x="1310.0" y="461.3">previous summary +</tspan><tspan x="1310.0" y="483.8">omitted transcript</tspan></text>
-<polyline points="1310,510 1310,550" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="1310,550 1304.8,539.2 1315.2,539.2" fill="#1e1e1e"/>
-<polygon points="1310.0,550 1440,620.0 1310.0,690 1180,620.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="626.3">ok?</tspan></text>
-<polyline points="1180,620 1080,620" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="1080,620 1090.8,614.8 1090.8,625.2" fill="#1e1e1e"/>
-<rect x="800" y="560" width="280" height="110" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/>
-<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="940.0" y="600.6">CONTEXT_SUMMARIZED</tspan><tspan x="940.0" y="620.6">ok: false</tspan><tspan x="940.0" y="640.6">-&gt; plain omission</tspan></text>
-<polyline points="800,615 560,615 560,510" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="560,510 565.2,520.8 554.8,520.8" fill="#1e1e1e"/>
-<polyline points="1310,690 1310,740" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="1310,740 1304.8,729.2 1315.2,729.2" fill="#1e1e1e"/>
-<rect x="1170" y="740" width="280" height="130" rx="12" fill="#c3fae8" stroke="#22c55e" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="788.8">Store context_summary</tspan><tspan x="1310.0" y="811.3">CONTEXT_SUMMARIZED ok</tspan><tspan x="1310.0" y="833.8">usage -&gt; run budget</tspan></text>
-<polyline points="1170,805 1100,815" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="1100,815 1110.0,808.3 1111.4,818.6" fill="#1e1e1e"/>
-<rect x="800" y="760" width="300" height="110" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/>
-<text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="950.0" y="798.8">Rebuild view:</tspan><tspan x="950.0" y="821.3">head + summary</tspan><tspan x="950.0" y="843.8">+ newer turns</tspan></text>
-<polyline points="800,815 190,815 190,500" fill="none" stroke="#1e1e1e" stroke-width="2"/>
-<polygon points="190,500 195.2,510.8 184.8,510.8" fill="#1e1e1e"/>
+<g class="node" id="n-build"><rect x="40" y="90" width="300" height="90" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="190.0" y="130.1">Build view</tspan><tspan x="190.0" y="152.6">BudgetedContextBuilder</tspan></text></g>
+<g class="edge" id="e-a1"><polyline points="190,180 190,220" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="190,220 184.8,209.2 195.2,209.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-omitted"><polygon points="190.0,220 320,290.0 190.0,360 60,290.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="190.0" y="285.1">messages</tspan><tspan x="190.0" y="307.6">omitted?</tspan></text></g>
+<g class="edge" id="e-no1"><polyline points="190,360 190,420" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="190,420 184.8,409.2 195.2,409.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-send"><rect x="40" y="420" width="300" height="80" rx="12" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="190.0" y="466.3">Send view to model</tspan></text></g>
+<g class="edge" id="e-yes1"><polyline points="320,290 430,290" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="430,290 419.2,295.2 419.2,284.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-enabled"><polygon points="560.0,220 690,290.0 560.0,360 430,290.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="560.0" y="285.1">summarizer</tspan><tspan x="560.0" y="307.6">enabled?</tspan></text></g>
+<g class="edge" id="e-no2"><polyline points="560,360 560,420" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="560,420 554.8,409.2 565.2,409.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-omit"><rect x="430" y="420" width="260" height="90" rx="12" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="560.0" y="460.1">Plain omission:</tspan><tspan x="560.0" y="482.6">notice in first message</tspan></text></g>
+<g class="edge" id="e-omit_send"><polyline points="430,465 340,460" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="340,460 351.1,455.4 350.5,465.8" fill="#1e1e1e"/></g>
+<g class="edge" id="e-yes2"><polyline points="690,290 800,290" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="800,290 789.2,295.2 789.2,284.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-failed_before"><polygon points="930.0,220 1060,290.0 930.0,360 800,290.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="930.0" y="285.6">same trim point</tspan><tspan x="930.0" y="305.6">failed before?</tspan></text></g>
+<g class="edge" id="e-yes3"><polyline points="930,360 930,390 640,390 640,420" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="640,420 634.8,409.2 645.2,409.2" fill="#1e1e1e"/></g>
+<g class="edge" id="e-no3"><polyline points="1060,290 1170,290" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1170,290 1159.2,295.2 1159.2,284.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-hook"><rect x="1170" y="235" width="280" height="110" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="296.3">pre_compact hook</tspan></text></g>
+<g class="edge" id="e-deny"><polyline points="1170,330 1080,560" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="1080,560 1079.1,548.0 1088.8,551.8" fill="#ef4444"/></g>
+<g class="edge" id="e-allow"><polyline points="1310,345 1310,400" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1310,400 1304.8,389.2 1315.2,389.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-call"><rect x="1170" y="400" width="280" height="110" rx="12" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="438.8">Summary model call</tspan><tspan x="1310.0" y="461.3">previous summary +</tspan><tspan x="1310.0" y="483.8">omitted transcript</tspan></text></g>
+<g class="edge" id="e-a2"><polyline points="1310,510 1310,550" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1310,550 1304.8,539.2 1315.2,539.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-ok"><polygon points="1310.0,550 1440,620.0 1310.0,690 1180,620.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="626.3">ok?</tspan></text></g>
+<g class="edge" id="e-not_ok"><polyline points="1180,620 1080,620" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1080,620 1090.8,614.8 1090.8,625.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-fail"><rect x="800" y="560" width="280" height="110" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="940.0" y="600.6">CONTEXT_SUMMARIZED</tspan><tspan x="940.0" y="620.6">ok: false</tspan><tspan x="940.0" y="640.6">-&gt; plain omission</tspan></text></g>
+<g class="edge" id="e-fail_omit"><polyline points="800,615 560,615 560,510" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="560,510 565.2,520.8 554.8,520.8" fill="#1e1e1e"/></g>
+<g class="edge" id="e-is_ok"><polyline points="1310,690 1310,740" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1310,740 1304.8,729.2 1315.2,729.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-store"><rect x="1170" y="740" width="280" height="130" rx="12" fill="#c3fae8" stroke="#22c55e" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="788.8">Store context_summary</tspan><tspan x="1310.0" y="811.3">CONTEXT_SUMMARIZED ok</tspan><tspan x="1310.0" y="833.8">usage -&gt; run budget</tspan></text></g>
+<g class="edge" id="e-a3"><polyline points="1170,805 1100,815" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1100,815 1110.0,808.3 1111.4,818.6" fill="#1e1e1e"/></g>
+<g class="node" id="n-rebuild"><rect x="800" y="760" width="300" height="110" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="950.0" y="798.8">Rebuild view:</tspan><tspan x="950.0" y="821.3">head + summary</tspan><tspan x="950.0" y="843.8">+ newer turns</tspan></text></g>
+<g class="edge" id="e-send_arrow"><polyline points="800,815 190,815 190,500" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="190,500 195.2,510.8 184.8,510.8" fill="#1e1e1e"/></g>
 <text x="40" y="916" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">Resume reuses the stored summary.  Rewinding behind it clears it.  Views stay append-only between trim points (prefix cache friendly).</tspan></text>
 <rect x="175.04" y="377.0" width="29.92" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
 <text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="190.0" y="395.6">no</tspan></text>
