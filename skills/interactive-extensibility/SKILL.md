@@ -54,7 +54,8 @@ Deviations from the design below:
   feedback/mode, and `POST /runs/{id}/mode`.
 
 Not implemented:
-- `pre_compact`: the harness builds per-call views instead of compacting history.
+- `pre_compact`: implemented with context summarization (Phase 2, step 3). It runs
+  before each summary call; a deny skips the summary and keeps plain omission.
 - `subagent_stop`: comes with subagents in 6c.
 
 6c is implemented: items 4 and 8.

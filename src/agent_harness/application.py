@@ -21,7 +21,14 @@ from .instructions import (
 from .plugins import Plugin, enabled_plugins
 from .snapshots import WorkspaceSnapshotter
 from .templates import Template, discover_templates
-from .context import BudgetedContextBuilder, ContextPolicy, limits_from_profiles
+from .context import (
+    BudgetedContextBuilder,
+    ContextLimits,
+    ContextPolicy,
+    ContextSummarizer,
+    limits_from_profiles,
+    summary_input_chars,
+)
 from .domain import ArtifactStore, PermissionMode, StreamListener, TelemetrySink
 from .hooks import CommandHook, HookEvent, HookRunner
 from .memory import MEMORY_SEARCH_SPEC, MEMORY_WRITE_SPEC, SQLiteMemoryStore, memory_tool_handlers
@@ -89,6 +96,9 @@ def build_application(
 
     config = load_config(config_path, layered=True)
     base_path = Path(config_path).parent
+    # Validated before any store or file is opened.
+    context_limits = limits_from_profiles(config.models)
+    summarizer = _summarizer(config, context_limits, context_policy)
     plugins = enabled_plugins(resolve_path(config.plugins.directory, base_path), config.plugins.enabled)
     templates = discover_templates(
         [resolve_path(path, base_path) for path in config.templates.paths]
@@ -152,9 +162,7 @@ def build_application(
         tools=tool_runtime,
         store=store,
         settings=settings,
-        context=BudgetedContextBuilder(
-            limits_from_profiles(config.models), policy=context_policy
-        ),
+        context=BudgetedContextBuilder(context_limits, policy=context_policy),
         fallbacks=models.fallback_profiles,
         telemetry=telemetry,
         stream_listener=stream_listener,
@@ -183,6 +191,7 @@ def build_application(
             if config.coding.enabled
             else None
         ),
+        summarizer=summarizer,
     )
     return HarnessApplication(
         config=config,
@@ -197,6 +206,31 @@ def build_application(
         skills=skills,
         plugins=plugins,
     )
+
+
+def _summarizer(
+    config: HarnessConfig,
+    limits: dict[str, ContextLimits],
+    policy: ContextPolicy | None,
+) -> ContextSummarizer | None:
+    section = config.summarization
+    if not section.enabled:
+        return None
+    profile = None
+    if section.profile:
+        try:
+            profile = config.resolve_model_name(section.profile)
+        except (ConfigError, KeyError, ValueError) as exc:
+            raise ConfigError(f"summarization.profile: {exc}") from exc
+    try:
+        return ContextSummarizer(
+            profile=profile,
+            max_output_tokens=section.max_output_tokens,
+            max_input_chars=section.max_input_chars or 48_000,
+            input_chars=None if section.max_input_chars else summary_input_chars(limits, policy),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"summarization: {exc}") from exc
 
 
 def _configured_hooks(sources: list[tuple[HookConfig, Path]]) -> HookRunner | None:

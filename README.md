@@ -426,11 +426,35 @@ The stored run history is never modified.
   keep reusing their prefix cache.
 - **Input budget:** `context_window` minus the output reserve (`parameters.max_tokens`,
   default 1024) and the tool definitions.
-- **Too large to fit:** if the system prompt, first user message, and latest turn alone
-  do not fit, the run fails with `ContextWindowExceededError`. It does not send a
+- **Too large to fit:** if the system prompt, first user message (with any summary), and
+  latest turn alone do not fit, the run fails with `ContextWindowExceededError`. It does not send a
   truncated request.
 
 Tune the behavior with `build_application(..., context_policy=ContextPolicy(...))`.
+
+**Summarization (optional).** Instead of dropping the omitted turns, a model can summarize
+them:
+
+```toml
+[summarization]
+enabled = true
+profile = "fast"          # profile or route that writes summaries; empty = the run's own
+max_output_tokens = 1024  # keep well below the smallest context_window
+max_input_chars = 0       # 0 = size the transcript from the summarizing profile's window
+```
+
+- **When:** only when a trim would omit messages, so at most once per trim point, never
+  every step.
+- **Where it goes:** the summary is appended to the first user message. The view is then
+  the system prompt, the first user message with the summary, and the turns after it.
+  Later summaries fold in the previous one.
+- **Durable:** the summary is stored on the run and in a `context_summarized` event, so
+  resume reuses it instead of calling the model again. Its tokens and cost count against
+  the run budget.
+- **Failures never fail the run:** the view falls back to plain omission, and the same
+  trim point is not retried.
+- **Hooks:** a `pre_compact` hook runs first and can deny the summary.
+- **Rewind:** rewinding behind the summarized range clears the summary.
 
 ## Programmatic Composition
 

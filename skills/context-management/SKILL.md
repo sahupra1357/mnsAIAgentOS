@@ -68,8 +68,45 @@ prefix, so the context view must keep its prefix stable:
   omitted. It avoids consecutive same-role messages that strict chat templates reject.
 - **Deliberately not done:**
   - No usage-based calibration of the estimate: it would change past trim decisions.
-  - No summarization yet: it needs a persisted summary event and budget accounting,
-    and is deferred.
+
+## Summarization (Phase 2, step 3)
+
+- **Domain:** `ContextSummary(covers, content)` sits on `RunRecord.context_summary`, with
+  a default of `None` (SQLite round-trips it). `covers` is the index in `run.messages`
+  where the kept history resumes.
+  - `ContextView` adds `summarized_messages`, plus `omitted_from`/`omitted_through`, the
+    half-open range of stored indices that was left out.
+  - The event is `CONTEXT_SUMMARIZED`.
+- **Builder:** `BudgetedContextBuilder.build(..., summary=...)` replaces
+  `messages[head_end:covers]` with a `[Summary of N earlier messages]` block appended to
+  the first user message. It then runs the same hysteresis over the rest.
+  - A summary that no longer applies is ignored: past the end, starting on a tool result,
+    or inside the head.
+  - `FullHistoryContextBuilder` and profiles without limits ignore it.
+- **Protocol:** `ContextBuilder` is unchanged. The orchestrator passes `summary=` only
+  when the run has one, so custom builders keep working until summarization is used.
+- **`ContextSummarizer` (context.py):** builds the summary request. It uses a system
+  prompt, a rendered transcript with the previous summary folded in, and no tools.
+  - Each message is capped, and the whole transcript is bounded by
+    `summary_input_chars(limits)` (75% of the summarizing profile's usable window) or
+    `max_input_chars`.
+- **Orchestrator:** `_summarize` runs inside the model turn, after `MODEL_REQUESTED`,
+  whenever the view reports an omitted range.
+  1. It runs the `pre_compact` hook; a deny skips summarization.
+  2. It calls the summarizer profile, or the run's profile if none is set.
+  3. It adds the call's usage to the run's tokens and cost, and checkpoints the summary
+     together with the event.
+  4. On failure, it records `ok: false` and keeps plain omission. It does not retry
+     while the trim point (`covers`) is unchanged.
+- **Crash between the call and the checkpoint:** the summary is regenerated. Nothing
+  inconsistent is persisted.
+- **Rewind:** if `covers` is past the rewind cut, the summary is cleared
+  (`summary_cleared` in `REWOUND`).
+- **Config:** `[summarization] enabled, profile, max_output_tokens, max_input_chars`.
+  An invalid profile is a `ConfigError`, raised before any store is opened.
+- **Size:** keep `max_output_tokens` well below the smallest window. The summary sits in
+  the pinned head; if the head no longer fits, the run fails with
+  `ContextWindowExceededError`.
 
 ## Testing
 

@@ -7,6 +7,12 @@ estimate crosses a high-water mark, the oldest units are omitted until it falls
 to a low-water mark. Between trims every view extends the previous one, so
 self-hosted servers keep reusing their KV cache, and because the replay depends
 only on the messages, a resumed run rebuilds exactly the same view.
+
+With a persisted ``ContextSummary`` the view is the pinned head (with the
+summary appended to the first user message) followed by the history after
+``summary.covers``; the same hysteresis then applies to that remainder.
+``ContextSummarizer`` builds the model request that writes such a summary; the
+orchestrator makes the call and persists the result.
 """
 
 from __future__ import annotations
@@ -17,9 +23,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from agent_harness.domain import (
+    ContextSummary,
     ContextView,
     ContextWindowExceededError,
     Message,
+    ModelRequest,
     Role,
     ToolSpec,
 )
@@ -75,7 +83,9 @@ class FullHistoryContextBuilder:
         tools: Sequence[ToolSpec],
         *,
         model_profile: str,
+        summary: ContextSummary | None = None,
     ) -> ContextView:
+        # The full history is still stored, so a summary is never needed here.
         return ContextView(messages=tuple(messages))
 
 
@@ -107,9 +117,11 @@ class BudgetedContextBuilder:
         tools: Sequence[ToolSpec],
         *,
         model_profile: str,
+        summary: ContextSummary | None = None,
     ) -> ContextView:
         limits = self._lookup(model_profile)
         if limits is None:
+            # Without a window the full history fits by definition; no summary needed.
             return ContextView(messages=tuple(messages))
 
         prepared: list[Message] = []
@@ -121,14 +133,22 @@ class BudgetedContextBuilder:
 
         head_end = _pinned_head_end(prepared)
         head = prepared[:head_end]
-        units = _group_units(prepared[head_end:])
+        if summary is not None and (not head or not _summary_applies(summary, prepared, head_end)):
+            summary = None  # e.g. the history was rewound behind it
+        rest_start = summary.covers if summary is not None else head_end
+        units = _group_units(prepared[rest_start:])
+        summarized = rest_start - head_end
 
         budget = limits.context_window - limits.output_reserve_tokens - self._tools_tokens(tools)
+        if summary is not None:
+            block = f"\n\n[Summary of {summarized} earlier messages]\n{summary.content.strip()}"
+            head[-1] = replace(head[-1], content=head[-1].content + block)
         head_tokens = sum(self._message_tokens(message) for message in head)
         if budget <= 0 or head_tokens > budget:
             raise ContextWindowExceededError(
                 f"context window {limits.context_window} cannot hold the output reserve, "
-                f"tool definitions, and pinned instructions for profile {model_profile!r}"
+                f"tool definitions, and pinned instructions{' and summary' if summary else ''} "
+                f"for profile {model_profile!r}"
             )
         high_water = math.floor(budget * self._policy.high_water_ratio)
         low_water = math.floor(budget * self._policy.low_water_ratio)
@@ -164,6 +184,9 @@ class BudgetedContextBuilder:
             estimated_tokens=total,
             omitted_messages=omitted,
             trimmed_tool_outputs=trimmed_outputs,
+            summarized_messages=summarized,
+            omitted_from=rest_start if omitted else None,
+            omitted_through=rest_start + omitted if omitted else None,
         )
 
     def _trim_tool_output(self, message: Message) -> Message:
@@ -199,6 +222,14 @@ class BudgetedContextBuilder:
             sort_keys=True,
         )
         return self._text_tokens(serialized)
+
+
+def _summary_applies(summary: ContextSummary, messages: Sequence[Message], head_end: int) -> bool:
+    """A summary must end inside the history and at a unit boundary."""
+
+    if not head_end <= summary.covers <= len(messages):
+        return False
+    return summary.covers == len(messages) or messages[summary.covers].role is not Role.TOOL
 
 
 def _pinned_head_end(messages: Sequence[Message]) -> int:
@@ -246,3 +277,111 @@ def limits_from_profiles(
             reserve = default_output_reserve_tokens
         limits[name] = ContextLimits(context_window=window, output_reserve_tokens=reserve)
     return limits
+
+
+SUMMARY_INSTRUCTIONS = (
+    "You compress the earlier part of an agent's conversation so the agent can keep "
+    "working with a smaller context. Write a concise, factual summary that preserves: "
+    "the user's goals and constraints, decisions made, facts and results learned from "
+    "tools (file paths, identifiers, numbers, errors), work completed, and open "
+    "questions or next steps. Merge the previous summary, if given, with the new "
+    "messages into one summary. Do not invent anything, do not address the user, and "
+    "do not call tools. Reply with the summary text only."
+)
+
+
+class ContextSummarizer:
+    """Build the model request that summarizes omitted history.
+
+    ``profile`` selects the summarizing model (None: the run's own profile).
+    The transcript is bounded by ``input_chars(profile)`` characters (or
+    ``max_input_chars`` when no lookup is given): each message is capped, and
+    if the whole transcript is still too long its middle is dropped.
+    """
+
+    def __init__(
+        self,
+        *,
+        profile: str | None = None,
+        max_output_tokens: int = 1024,
+        max_input_chars: int = 48_000,
+        max_message_chars: int = 4_000,
+        input_chars: Callable[[str], int | None] | None = None,
+        instructions: str = SUMMARY_INSTRUCTIONS,
+    ) -> None:
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be greater than zero")
+        if max_input_chars < 1_000:
+            raise ValueError("max_input_chars must be at least 1000")
+        if max_message_chars < 200:
+            raise ValueError("max_message_chars must be at least 200")
+        self.profile = profile
+        self.max_output_tokens = max_output_tokens
+        self._max_input_chars = max_input_chars
+        self._max_message_chars = max_message_chars
+        self._input_chars = input_chars
+        self._instructions = instructions
+
+    def input_limit(self, profile: str) -> int:
+        derived = self._input_chars(profile) if self._input_chars is not None else None
+        if derived is None:
+            return self._max_input_chars
+        return max(1_000, min(self._max_input_chars, derived))
+
+    def request(
+        self,
+        previous: str | None,
+        messages: Sequence[Message],
+        *,
+        profile: str,
+        metadata: Mapping[str, str] | None = None,
+    ) -> ModelRequest:
+        transcript = "\n\n".join(self._render(message) for message in messages)
+        parts = []
+        if previous:
+            parts.append("Previous summary:\n" + previous.strip())
+        parts.append("New messages:\n" + transcript)
+        text = _shorten("\n\n".join(parts), self.input_limit(profile))
+        return ModelRequest(
+            messages=(
+                Message(role=Role.SYSTEM, content=self._instructions),
+                Message(role=Role.USER, content=text),
+            ),
+            max_output_tokens=self.max_output_tokens,
+            metadata=dict(metadata or {}),
+        )
+
+    def _render(self, message: Message) -> str:
+        label = message.role.value.upper()
+        if message.role is Role.TOOL and message.name:
+            label += f" ({message.name})"
+        lines = [f"{label}: {_shorten(message.content, self._max_message_chars)}"]
+        for call in message.tool_calls:
+            arguments = json.dumps(call.arguments, separators=(",", ":"), sort_keys=True)
+            lines.append(f"  -> {call.name}({_shorten(arguments, 500)})")
+        return "\n".join(lines)
+
+
+def _shorten(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = f"\n[... {len(text) - limit} characters omitted ...]\n"
+    keep_head = limit // 2
+    return text[:keep_head] + marker + text[-(limit - keep_head):]
+
+
+def summary_input_chars(
+    limits: Mapping[str, ContextLimits], policy: ContextPolicy | None = None
+) -> Callable[[str], int | None]:
+    """Transcript size that fits a profile's window after the summary's own output."""
+
+    selected = policy or ContextPolicy()
+
+    def lookup(profile: str) -> int | None:
+        found = limits.get(profile)
+        if found is None:
+            return None
+        usable = found.context_window - found.output_reserve_tokens - 256
+        return math.floor(usable * selected.chars_per_token * 0.75) if usable > 0 else None
+
+    return lookup
