@@ -73,5 +73,5 @@ jobs:
           python-version: "3.12"
       - name: Install the postgres extra
         run: python -m pip install --upgrade pip "psycopg[binary]>=3.1,<4"
-      - name: "Stage unit: store conformance on Postgres"
-        run: python -m unittest tests.test_store_conformance -v
+      - name: "Stage unit: store and memory conformance on Postgres"
+        run: python -m unittest tests.test_store_conformance tests.test_memory_backends -v
