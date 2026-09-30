@@ -425,6 +425,47 @@ fallback = ["claude"]                   # use it only when Modal keeps failing
 Alternatively, run the LiteLLM Proxy yourself and point an ordinary
 `openai_compatible` profile at it.
 
+## Planning and Parallel Delegation
+
+**Plan-and-execute.** Turn it on for one run with `agent-harness run --plan "..."` or
+`"planning": true` on the API, or for every new run with `[planning] enabled = true`.
+The model proposes the plan; the orchestrator owns it and drives execution:
+
+1. **Plan.** The model explores with read-only tools, then calls `create_plan`: a goal,
+   plus steps with ids, dependencies, and an optional `agent` per step.
+   - Nothing that changes state can run before the plan exists.
+   - The plan is validated: unique ids, known dependencies, no cycles, known agents.
+2. **Execute.** The orchestrator picks the steps that are ready.
+   - **Agent steps:** steps naming an agent are delegated to that subagent directly, with
+     no model turn. Ready agent steps run **in parallel**, and the parent's remaining
+     tokens and cost are split between them.
+   - **Other steps:** the orchestrator gives the main model one step at a time. The model
+     reports with `update_plan`, or a final answer completes the step.
+3. **Replan.** A failed step asks the model to call `revise_plan`. Completed steps are
+   kept. There are at most `max_replans` revisions (default 2); after that the run fails
+   with a clear reason.
+4. **Finish.** When every step is done, the orchestrator asks for the final answer.
+
+The plan is stored on the run and changes are recorded as `plan_created`,
+`plan_step_updated`, and `plan_revised` events. `agent-harness status RUN_ID` and
+`GET /runs/{id}` show it. A crash or an approval pause resumes at the same step.
+
+```toml
+[planning]
+enabled = false        # default for new runs; --plan / --no-plan override per run
+max_plan_steps = 20
+max_replans = 2
+```
+
+**Parallel work without a plan.** When one model response asks for several things, the
+orchestrator runs independent work concurrently:
+- **Read-only tool calls** run together. Results are recorded in the original order, with
+  the same events.
+- **Several `agent` calls** start their subagents together.
+
+Calls that a permission rule denies or asks about are not run early, and nothing is run
+early when a `pre_tool` hook is configured, since a hook could change the arguments.
+
 ## Tools: Catalog, Sources, MCP, and Dynamic Loading
 
 Tools come from **sources** declared in config. `examples/tools.toml` shows all of them.

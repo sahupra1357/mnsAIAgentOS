@@ -78,6 +78,9 @@ class EventType(StrEnum):
     REWOUND = "rewound"
     CONTEXT_SUMMARIZED = "context_summarized"
     TOOLS_LOADED = "tools_loaded"
+    PLAN_CREATED = "plan_created"
+    PLAN_STEP_UPDATED = "plan_step_updated"
+    PLAN_REVISED = "plan_revised"
 
 
 class PermissionMode(StrEnum):
@@ -252,6 +255,9 @@ class RunRecord:
     context_summary: ContextSummary | None = None
     # Tools this run loaded with load_tools (dynamic tool loading), in load order.
     loaded_tools: tuple[str, ...] = ()
+    # Plan-and-execute: whether the orchestrator drives this run from a plan, and the plan.
+    planning: bool = False
+    plan: Plan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +279,56 @@ class ApprovalRequest:
     arguments: Mapping[str, Any]
     requested_at: datetime
     kind: str = "tool"  # "tool" or "plan" (an exit_plan request)
+
+
+class PlanStepStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in {PlanStepStatus.COMPLETED, PlanStepStatus.FAILED, PlanStepStatus.SKIPPED}
+
+
+@dataclass(frozen=True, slots=True)
+class PlanStep:
+    """One step of an orchestrator-owned plan.
+
+    Steps with ``agent`` set are delegated by the orchestrator to that subagent
+    (``child_run_id``); the others are executed by the main model.
+    """
+
+    id: str
+    title: str
+    instructions: str = ""
+    depends_on: tuple[str, ...] = ()
+    agent: str | None = None
+    status: PlanStepStatus = PlanStepStatus.PENDING
+    result: str = ""
+    child_run_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Plan:
+    """The run's plan. ``phase`` is where plan-and-execute stands:
+    ``executing``, ``replanning`` (a step failed), ``finalizing`` (all steps
+    done, final answer requested), or ``done``.
+    """
+
+    goal: str
+    steps: tuple[PlanStep, ...]
+    revision: int = 1
+    replans: int = 0
+    phase: str = "executing"
+    # Notes (e.g. delegated step results) not yet shown to the model; delivered
+    # with the next orchestrator message, so they survive pauses and crashes.
+    outbox: str = ""
+
+    def step(self, step_id: str) -> PlanStep | None:
+        return next((s for s in self.steps if s.id == step_id), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,6 +555,7 @@ class RunUsage:
     fallbacks: int
     subagents: int = 0
     todos: tuple[TodoItem, ...] = ()
+    plan: Plan | None = None
 
 
 class FileSnapshotter(Protocol):

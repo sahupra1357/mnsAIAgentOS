@@ -17,6 +17,9 @@ from uuid import uuid4
 from agent_harness.domain import (
     ConcurrencyError,
     ContextSummary,
+    Plan,
+    PlanStep,
+    PlanStepStatus,
     ToolCatalogEntry,
     ToolRisk,
     ToolTrust,
@@ -516,6 +519,8 @@ def _decode_run(value: str) -> RunRecord:
         ),
         archived_messages=_decode_messages(data.get("archived_messages", ())),
         loaded_tools=tuple(data.get("loaded_tools", ())),
+        planning=bool(data.get("planning", False)),
+        plan=_decode_plan(data.get("plan")),
         context_summary=(
             ContextSummary(
                 covers=int(data["context_summary"]["covers"]),
@@ -524,6 +529,31 @@ def _decode_run(value: str) -> RunRecord:
             if data.get("context_summary")
             else None
         ),
+    )
+
+
+def _decode_plan(data: Any) -> Plan | None:
+    if not data:
+        return None
+    return Plan(
+        goal=str(data["goal"]),
+        steps=tuple(
+            PlanStep(
+                id=str(step["id"]),
+                title=str(step["title"]),
+                instructions=str(step.get("instructions", "")),
+                depends_on=tuple(step.get("depends_on", ())),
+                agent=step.get("agent"),
+                status=PlanStepStatus(step.get("status", "pending")),
+                result=str(step.get("result", "")),
+                child_run_id=step.get("child_run_id"),
+            )
+            for step in data.get("steps", ())
+        ),
+        revision=int(data.get("revision", 1)),
+        replans=int(data.get("replans", 0)),
+        phase=str(data.get("phase", "executing")),
+        outbox=str(data.get("outbox", "")),
     )
 
 

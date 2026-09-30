@@ -27,3 +27,19 @@ Model and tool requests may be retried only when the error is classified as retr
 ## Handoff
 
 State any atomicity guarantees required from the store and provide network-free tests using fakes. If a contract change affects model or tool components, notify the coordinating agent instead of editing their owned paths.
+
+## Plans and parallel work (Phase 8)
+
+- **Plan state:** it lives on `RunRecord.plan` (with `planning` as the switch). Every
+  change is checkpointed together with a `plan_*` annotation event. The step-level
+  state machine is in `_plan_next` and `_plan_on_final`, and the design is in
+  `skills/planning-delegation/SKILL.md`.
+- **One message per boundary:** the orchestrator adds at most one user message per
+  boundary. Notes that are not yet delivered, such as delegated results, wait in
+  `plan.outbox`, so they survive pauses and crashes.
+- **Idempotent children:** plan children use deterministic ids
+  (`child_run_id(run, step, "plan-r<revision>-<step>")`), so a resume finds them instead
+  of creating new ones.
+- **Parallel prefetch:** it reuses idempotency keys, so the sequential loop remains the
+  only place that records events.
+

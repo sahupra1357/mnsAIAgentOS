@@ -33,6 +33,13 @@ enable_pull_requests = false
 
 # Nesting: by default (max_depth = 2) a subagent is also offered the `agent` tool and
 # can start its own subagents. max_depth = 1 lets only the top-level run delegate.
+# Plan-and-execute: `agent-harness run --plan ...` lets the model write a plan whose steps
+# can name these agents; the orchestrator then runs those steps itself, in parallel when
+# they are independent. Set enabled = true to plan every new run.
+[planning]
+enabled = false
+max_replans = 2
+
 [subagents]
 max_depth = 1
 max_per_run = 6
