@@ -57,6 +57,10 @@ def _parser() -> argparse.ArgumentParser:
         "--stream", action="store_true", help="print assistant text as it is generated"
     )
     run.add_argument(
+        "--show-reasoning", action="store_true",
+        help="also print the model's reasoning, when the server returns it (to stderr)",
+    )
+    run.add_argument(
         "--arg", action="append", default=[], metavar="KEY=VALUE",
         help="named value for a /template prompt (${KEY})",
     )
@@ -106,6 +110,8 @@ def _parser() -> argparse.ArgumentParser:
     continue_.add_argument("run_id")
     continue_.add_argument("message")
     continue_.add_argument("--stream", action="store_true")
+    continue_.add_argument("--show-reasoning", action="store_true",
+                           help="also print the model's reasoning (to stderr)")
     continue_.add_argument("--max-steps", type=int, help="raise the step budget")
     continue_.add_argument("--max-wall-seconds", type=float, help="raise the wall-clock budget")
     continue_.add_argument("--max-tokens", type=int, help="raise the token budget")
@@ -256,13 +262,20 @@ def _common_runtime_arguments(parser: argparse.ArgumentParser) -> None:
 class _StdoutStream:
     """Print streamed assistant text; remembers whether anything was shown."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, show_reasoning: bool = False) -> None:
         self.printed = False
+        self.show_reasoning = show_reasoning
 
     def on_text(self, run_id: str, step: int, text: str) -> None:
         sys.stdout.write(text)
         sys.stdout.flush()
         self.printed = True
+
+    def on_reasoning(self, run_id: str, step: int, text: str) -> None:
+        # Reasoning goes to stderr so stdout stays the answer alone.
+        if self.show_reasoning:
+            sys.stderr.write(text)
+            sys.stderr.flush()
 
 
 def _build(args: argparse.Namespace, *, stream: _StdoutStream | None = None) -> HarnessApplication:
@@ -279,7 +292,7 @@ def _build(args: argparse.Namespace, *, stream: _StdoutStream | None = None) -> 
 
 
 async def _run_command(args: argparse.Namespace) -> int:
-    stream = _StdoutStream() if args.stream else None
+    stream = _StdoutStream(show_reasoning=args.show_reasoning) if args.stream else None
     app = _build(args, stream=stream)
     async with app:
         await _start_tools(app)
@@ -310,7 +323,10 @@ async def _run_command(args: argparse.Namespace) -> int:
             ),
         )
         completed = await app.orchestrator.run(run.id)
-        return await _print_result(app, completed, streamed=stream is not None and stream.printed)
+        return await _print_result(
+            app, completed, streamed=stream is not None and stream.printed,
+            show_reasoning=args.show_reasoning and stream is None,
+        )
 
 
 async def _resume_command(args: argparse.Namespace) -> int:
@@ -342,7 +358,7 @@ async def _approve_command(args: argparse.Namespace) -> int:
 
 
 async def _print_result(
-    app: HarnessApplication, run: RunRecord, *, streamed: bool = False
+    app: HarnessApplication, run: RunRecord, *, streamed: bool = False, show_reasoning: bool = False
 ) -> int:
     print(f"run_id={run.id} status={run.status.value}", file=sys.stderr)
     if run.error:
@@ -370,6 +386,8 @@ async def _print_result(
     else:
         for message in reversed(run.messages):
             if message.role is Role.ASSISTANT and not message.tool_calls:
+                if show_reasoning and message.reasoning:
+                    print(f"[reasoning]\n{message.reasoning}\n[/reasoning]", file=sys.stderr)
                 print(message.content)
                 break
     return 0 if run.status.value == "completed" else 1
@@ -408,7 +426,7 @@ async def _doctor_command(args: argparse.Namespace) -> int:
 
 
 async def _continue_command(args: argparse.Namespace) -> int:
-    stream = _StdoutStream() if args.stream else None
+    stream = _StdoutStream(show_reasoning=args.show_reasoning) if args.stream else None
     app = _build(args, stream=stream)
     async with app:
         await _start_tools(app)
@@ -430,7 +448,8 @@ async def _continue_command(args: argparse.Namespace) -> int:
         await app.orchestrator.continue_run(args.run_id, message, budget=budget)
         finished = await app.orchestrator.run(args.run_id)
         return await _print_result(
-            app, finished, streamed=stream is not None and stream.printed
+            app, finished, streamed=stream is not None and stream.printed,
+            show_reasoning=args.show_reasoning and stream is None,
         )
 
 

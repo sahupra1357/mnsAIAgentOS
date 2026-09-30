@@ -699,6 +699,7 @@ def _decode_messages(items: Any) -> list[Message]:
                 )
                 for call in message.get("tool_calls", ())
             ),
+            reasoning=message.get("reasoning"),
         )
         for message in items
     ]

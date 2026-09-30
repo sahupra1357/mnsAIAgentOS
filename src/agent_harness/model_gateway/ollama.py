@@ -70,7 +70,10 @@ class OllamaClient(OpenAICompatibleClient):
         payload.update(
             {
                 "model": self._profile.model,
-                "messages": [_native_message(message) for message in request.messages],
+                "messages": [
+                    _native_message(message, keep_reasoning=self._profile.reasoning_history == "keep")
+                    for message in request.messages
+                ],
                 "stream": False,
             }
         )
@@ -87,8 +90,10 @@ class OllamaClient(OpenAICompatibleClient):
         return raw
 
 
-def _native_message(message: Message) -> dict[str, object]:
+def _native_message(message: Message, *, keep_reasoning: bool = False) -> dict[str, object]:
     result: dict[str, object] = {"role": message.role.value, "content": message.content}
+    if keep_reasoning and message.role is Role.ASSISTANT and message.reasoning:
+        result["thinking"] = message.reasoning
     if message.role is Role.TOOL and message.name is not None:
         result["tool_name"] = message.name
     if message.tool_calls:
@@ -131,7 +136,12 @@ def _native_to_openai_shape(raw: dict[str, Any]) -> dict[str, Any]:
     converted_raw: dict[str, Any] = {
         "choices": [
             {
-                "message": {"content": message.get("content"), "tool_calls": converted_calls},
+                "message": {
+                    "content": message.get("content"),
+                    "tool_calls": converted_calls,
+                    # Native /api/chat returns reasoning as "thinking" (with "think": true).
+                    "reasoning_content": message.get("thinking"),
+                },
                 "finish_reason": finish_reason,
             }
         ],

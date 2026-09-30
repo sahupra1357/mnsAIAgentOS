@@ -1278,6 +1278,7 @@ class AgentOrchestrator:
                 role=Role.ASSISTANT,
                 content=response.content,
                 tool_calls=response.tool_calls,
+                reasoning=response.reasoning,
             )
         )
         payload: dict[str, Any] = {
@@ -1292,6 +1293,9 @@ class AgentOrchestrator:
         }
         if response.usage.cached_input_tokens is not None:
             payload["cached_input_tokens"] = response.usage.cached_input_tokens
+        if response.reasoning:
+            # Only the size: the text itself stays in the run snapshot, not the event log.
+            payload["reasoning_chars"] = len(response.reasoning)
         if response.metadata.get("cost_estimated") is True:
             payload["cost_estimated"] = True
         if view is not None and view.modified:
@@ -2782,6 +2786,13 @@ class AgentOrchestrator:
         stream = getattr(client, "stream")
         event: ModelStreamEvent
         async for event in stream(request):
+            if event.reasoning and self._stream_listener is not None:
+                on_reasoning = getattr(self._stream_listener, "on_reasoning", None)
+                if on_reasoning is not None:
+                    try:
+                        on_reasoning(run.id, run.step_count, event.reasoning)
+                    except Exception:  # noqa: BLE001 - display problems must not fail runs
+                        pass
             if event.text and self._stream_listener is not None:
                 try:
                     self._stream_listener.on_text(run.id, run.step_count, event.text)

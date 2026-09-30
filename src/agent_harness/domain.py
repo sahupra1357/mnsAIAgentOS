@@ -140,6 +140,9 @@ class Message:
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    # The model's reasoning ("thinking") for an assistant turn, when the server
+    # returns it separately. Sent back only for profiles with reasoning_history = "keep".
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +193,7 @@ class ModelResponse:
     finish_reason: FinishReason = FinishReason.UNKNOWN
     provider_request_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +413,8 @@ class ModelStreamEvent:
 
     text: str = ""
     response: "ModelResponse | None" = None
+    # A reasoning increment (never part of the answer text).
+    reasoning: str = ""
 
 
 class StreamingModelClient(Protocol):
@@ -419,6 +425,8 @@ class StreamListener(Protocol):
     """Receives streamed assistant text as it arrives. Must not raise."""
 
     def on_text(self, run_id: str, step: int, text: str) -> None: ...
+
+    # Optional: ``on_reasoning(run_id, step, text)`` receives reasoning increments.
 
 
 @dataclass(frozen=True, slots=True)

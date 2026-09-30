@@ -19,6 +19,7 @@ from agent_harness.domain import (
     ModelResponse,
     ModelStreamEvent,
     RetryableModelError,
+    Role,
     ToolCall,
     ToolSpec,
     Usage,
@@ -177,6 +178,8 @@ class OpenAICompatibleClient:
                 if data == "[DONE]":
                     break
                 text = accumulator.add(json.loads(data))
+                if accumulator.reasoning_delta:
+                    yield ModelStreamEvent(reasoning=accumulator.reasoning_delta)
                 if text:
                     yield ModelStreamEvent(text=text)
         except (HttpTransportTimeout, TimeoutError) as exc:
@@ -273,6 +276,10 @@ class OpenAICompatibleClient:
                 "messages": [self._message_payload(message) for message in request.messages],
             }
         )
+        if self._profile.reasoning_history == "keep":
+            for message, item in zip(request.messages, payload["messages"]):  # type: ignore[call-overload]
+                if message.role is Role.ASSISTANT and message.reasoning:
+                    item["reasoning_content"] = message.reasoning
         if request.tools:
             payload["tools"] = [self._tool_payload(tool) for tool in request.tools]
         if request.temperature is not None:
@@ -351,6 +358,9 @@ class OpenAICompatibleClient:
             content_value = message.get("content")
             if content_value is not None and not isinstance(content_value, str):
                 raise ValueError("choice.message.content must be a string or null")
+            reasoning = _reasoning_field(message)
+            if reasoning is None and self._profile.reasoning_tags and content_value:
+                reasoning, content_value = split_think_tags(content_value)
             tool_calls = _parse_tool_calls(message.get("tool_calls", []))
             usage = _parse_usage(raw.get("usage"))
             finish_reason = _finish_reason(choice.get("finish_reason"))
@@ -378,7 +388,48 @@ class OpenAICompatibleClient:
             finish_reason=finish_reason,
             provider_request_id=provider_request_id,
             metadata=metadata,
+            reasoning=reasoning,
         )
+
+
+_REASONING_FIELDS = ("reasoning_content", "reasoning")
+
+
+def _reasoning_field(message: Mapping[str, Any]) -> str | None:
+    """Reasoning text returned beside the answer, if any.
+
+    vLLM, SGLang (``--reasoning-parser``), llama.cpp (``--reasoning-format``), and
+    LiteLLM use ``reasoning_content``; Ollama's OpenAI mode and newer vLLM use
+    ``reasoning``. Other types are ignored rather than rejected.
+    """
+
+    for key in _REASONING_FIELDS:
+        value = message.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def split_think_tags(content: str) -> tuple[str | None, str]:
+    """Split ``<think>...</think>`` reasoning from the start of ``content``.
+
+    Also handles templates that put the opening tag in the prompt, so the output
+    starts with reasoning and only the closing tag appears. An unclosed block is
+    left as content: it may be a truncated answer the user should see.
+    """
+
+    stripped = content.lstrip()
+    if stripped.startswith("<think>"):
+        body = stripped[len("<think>"):]
+    elif "<think>" not in content and "</think>" in content:
+        body = content
+    else:
+        return None, content
+    end = body.find("</think>")
+    if end < 0:
+        return None, content
+    reasoning = body[:end].strip()
+    return (reasoning or None), body[end + len("</think>"):].lstrip()
 
 
 def _parse_tool_calls(value: Any) -> tuple[ToolCall, ...]:
@@ -467,6 +518,9 @@ class _StreamAccumulator:
 
     def __init__(self) -> None:
         self._content: list[str] = []
+        self._reasoning: list[str] = []
+        # The reasoning increment of the chunk most recently added.
+        self.reasoning_delta = ""
         self._tool_calls: dict[int, dict[str, Any]] = {}
         self._finish_reason: Any = None
         self._extra: dict[str, Any] = {}
@@ -474,6 +528,7 @@ class _StreamAccumulator:
     def add(self, chunk: Any) -> str:
         if not isinstance(chunk, dict):
             raise ValueError("stream chunk must be an object")
+        self.reasoning_delta = ""
         for key in ("id", "model", "usage", "timings"):
             if chunk.get(key) is not None:
                 self._extra[key] = chunk[key]
@@ -488,6 +543,11 @@ class _StreamAccumulator:
         delta = choice.get("delta") or {}
         if not isinstance(delta, dict):
             raise ValueError("stream delta must be an object")
+        self.reasoning_delta = next(
+            (delta[key] for key in _REASONING_FIELDS if isinstance(delta.get(key), str) and delta[key]), ""
+        )
+        if self.reasoning_delta:
+            self._reasoning.append(self.reasoning_delta)
         for position, fragment in enumerate(delta.get("tool_calls") or []):
             self._add_tool_fragment(position, fragment)
         text = delta.get("content")
@@ -529,6 +589,7 @@ class _StreamAccumulator:
                     "message": {
                         "content": "".join(self._content) or None,
                         "tool_calls": tool_calls,
+                        "reasoning_content": "".join(self._reasoning) or None,
                     },
                     "finish_reason": self._finish_reason,
                 }

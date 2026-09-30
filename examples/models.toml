@@ -59,6 +59,11 @@ endpoint = "http://127.0.0.1:8080/v1"
 context_window = 16384
 timeout_seconds = 180
 max_retries = 1
+# Thinking models (Qwen3, DeepSeek-R1): start llama-server with
+# --reasoning-format deepseek so reasoning comes back separately. Without a parser,
+# reasoning_tags = true splits <think>...</think> out of the answer instead.
+# reasoning_tags = true
+# reasoning_history = "drop"   # "keep" sends earlier reasoning back (costs context)
 
 [models.llamacpp.parameters]
 temperature = 0.2

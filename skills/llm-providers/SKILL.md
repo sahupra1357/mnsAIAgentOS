@@ -131,6 +131,18 @@ gpu_usd_per_second = 0.0
 
 New fields must be optional with safe defaults so existing profiles and tests still parse.
 
+### Reasoning content (Phase 11b)
+- Parsed in `OpenAICompatibleClient._normalize_raw` and `_StreamAccumulator` from
+  `reasoning_content`, then `reasoning`; Ollama native maps `message.thinking`. Non-string
+  or blank values are ignored, never rejected.
+- `reasoning_tags = true` splits `<think>` blocks only when no separate field is present.
+- `reasoning_history = "keep"` adds `reasoning_content` (Ollama native: `thinking`) to
+  assistant messages in the payload; `"drop"` (default) leaves payloads byte-identical to
+  before. `ContextLimits.counts_reasoning` follows it.
+- Profile fields added after profile hashing existed carry `HASH_OMIT_DEFAULT` metadata,
+  so they are left out of `profile_sha256` at their default. Do the same for any future
+  profile field, or every existing run reports `config_drift` on resume.
+
 ## LiteLLM (reaching providers that are not OpenAI-compatible)
 
 Two routes. Prefer the first; it needs no harness code:

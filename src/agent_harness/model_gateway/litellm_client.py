@@ -157,6 +157,8 @@ class LiteLLMClient(OpenAICompatibleClient):
                     text = accumulator.add(_as_dict(chunk))
                 except (TypeError, ValueError) as exc:
                     raise MalformedResponseError(f"malformed model stream: {exc}") from exc
+                if accumulator.reasoning_delta:
+                    yield ModelStreamEvent(reasoning=accumulator.reasoning_delta)
                 if text:
                     yield ModelStreamEvent(text=text)
         except HarnessError:
