@@ -13,6 +13,10 @@ Each tool declares a stable name, description, JSON-compatible input schema, tim
 
 Reject duplicate tool names and unknown tool calls. Validate arguments before executing implementation code. Keep registration explicit; importing a module must not silently grant capabilities.
 
+Tools can also come from config-declared sources (Python modules, HTTP, web search, MCP
+servers) with a persistent catalog and dynamic loading; see `skills/tool-platform/SKILL.md`.
+`ToolSpec.trust = untrusted` marks output that the orchestrator wraps as data.
+
 ## Execution Policy
 
 - Read-only tools may run automatically when enabled.

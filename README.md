@@ -309,6 +309,13 @@ hand a self-contained task to a subagent:
   PARENT_ID` shows and decides the subagent's pending call.
 - Cancelling the parent cancels its subagents. Resuming the parent resumes an
   unfinished subagent instead of starting a new one.
+- **Nothing is offered until agents are defined.** Without `[[agents]]` the model never
+  sees the `agent` tool.
+- **Nesting.** With the default `max_depth = 2`, a subagent is also offered `agent` and
+  can start its own subagents. Set `max_depth = 1` to let only the top-level run
+  delegate.
+- **Working example.** `examples/subagents.toml` defines a `researcher`, `reviewer`, and
+  `test-runner` with prompt files in `examples/agents/`.
 
 **Task list.** `agent-harness status RUN_ID` and `GET /runs/{id}` show the task list
 and the subagents.
@@ -417,6 +424,62 @@ fallback = ["claude"]                   # use it only when Modal keeps failing
 
 Alternatively, run the LiteLLM Proxy yourself and point an ordinary
 `openai_compatible` profile at it.
+
+## Tools: Catalog, Sources, MCP, and Dynamic Loading
+
+Tools come from **sources** declared in config. `examples/tools.toml` shows all of them.
+
+| Source | Config | Tool names |
+|---|---|---|
+| Built-in tools | always (coding tools when `[coding] enabled`) | `echo`, `read_file`, ... |
+| Web search (Tavily) | `[web_search] enabled = true`, key in `TAVILY_API_KEY` | `web_search` |
+| Your Python code | `[[tools]] kind = "python"`, `module = "pkg.mod:register"` | whatever you register |
+| HTTP APIs | `[[tools]] kind = "http"` with `url`, `method`, `input_schema` | the entry's `name` |
+| MCP servers | `[[mcp_servers]]` with `command = [...]` (stdio) or `transport = "http"` | `<server>__<tool>` |
+
+**The catalog is persistent.** Every tool is recorded in the run store (`tool_catalog`
+table): its source, spec hash, risk, and trust.
+- **Handlers are code:** they are re-attached from their source at every start.
+- **Switches persist:** `agent-harness tools disable NAME` survives restarts.
+- **Removed tools are kept:** a tool its source no longer provides is marked unavailable,
+  not deleted.
+- **Runs record versions:** each run records the version hash of every tool it was
+  offered (`RUN_CREATED.tools`).
+
+```bash
+agent-harness tools list    --config models.toml          # --all includes disabled ones
+agent-harness tools sync    --config models.toml          # discover MCP servers' tools
+agent-harness tools disable web_search --config models.toml
+```
+
+**MCP servers.** The client is built in, and needs no extra dependency.
+- **Transports:** stdio subprocesses and streamable HTTP, with tool discovery across
+  pages.
+- **Lifecycle:** servers start on first use. Commands that execute runs (`run`,
+  `continue`, `resume`, `approve`, `serve`, `worker`) sync servers that set
+  `sync_on_start`. A server that is down keeps the tools from its last sync.
+- **Approval:** MCP tools ask for approval unless you list them in `read_only` (or set
+  `trust_annotations = true` to accept the server's read-only hints).
+- **Schemas:** they are reduced to the subset the harness validates. A tool whose schema
+  cannot be reduced is skipped and reported by `tools sync`.
+- **Secrets:** they are passed by environment-variable **name** (`env = ["GITHUB_TOKEN"]`,
+  `headers_env = {...}`). A stdio server sees only those variables plus `PATH`, `HOME`,
+  and locale variables.
+
+**Untrusted output.** Output from web search, HTTP tools, and MCP servers is wrapped in
+`<untrusted-tool-output>` tags, with a note that it is data, not instructions. This is a
+defence against prompt injection. Set `trust = "trusted"` on an HTTP tool only for
+services you control.
+
+**Hundreds of tools.** With `[tool_loading] mode = "dynamic"` the model is offered only the
+`core` tools plus `search_tools` and `load_tools`.
+- **Finding tools:** `search_tools` ranks the catalog by name and description (SQLite
+  FTS5).
+- **Loading tools:** `load_tools` adds tools to the run. They are saved on the run and
+  appended to the end of the tool list, so prompt caches keep working and a resumed run
+  offers the same tools.
+- **Unloaded tools:** calling a tool that is not loaded returns a message telling the
+  model to load it first.
 
 ## Architecture Diagrams
 

@@ -17,6 +17,9 @@ from uuid import uuid4
 from agent_harness.domain import (
     ConcurrencyError,
     ContextSummary,
+    ToolCatalogEntry,
+    ToolRisk,
+    ToolTrust,
     EventType,
     Message,
     Role,
@@ -112,6 +115,21 @@ class SQLiteRunStore:
                 PRIMARY KEY (tool_name, idempotency_key)
             );
 
+            CREATE TABLE IF NOT EXISTS tool_catalog (
+                name TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                spec_json TEXT NOT NULL,
+                spec_sha256 TEXT NOT NULL,
+                description TEXT NOT NULL,
+                risk TEXT NOT NULL,
+                trust TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                available INTEGER NOT NULL DEFAULT 1,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            );
+
             CREATE TRIGGER IF NOT EXISTS run_events_no_delete
             BEFORE DELETE ON run_events
             BEGIN
@@ -123,6 +141,11 @@ class SQLiteRunStore:
     async def close(self) -> None:
         async with self._lock:
             self._connection.close()
+
+    def close_now(self) -> None:
+        """Close immediately (no event loop needed); used when composition fails."""
+
+        self._connection.close()
 
     async def __aenter__(self) -> SQLiteRunStore:
         return self
@@ -332,6 +355,61 @@ class SQLiteRunStore:
                     (run_id, worker_id),
                 )
 
+    # -- tool catalog (synchronous: startup and admin operations) ------------
+
+    def catalog_entries(self) -> Sequence[ToolCatalogEntry]:
+        rows = self._connection.execute("SELECT * FROM tool_catalog ORDER BY name").fetchall()
+        return [_catalog_entry(row) for row in rows]
+
+    def sync_catalog(self, entries: Sequence[ToolCatalogEntry], *, sources: Sequence[str]) -> None:
+        """Upsert what the sources provide now; keep the operator's enabled flag."""
+
+        now = utc_now().isoformat()
+        seen = {entry.name for entry in entries}
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            for entry in entries:
+                self._connection.execute(
+                    """
+                    INSERT INTO tool_catalog(
+                        name, source, source_kind, spec_json, spec_sha256, description,
+                        risk, trust, enabled, available, first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        source = excluded.source,
+                        source_kind = excluded.source_kind,
+                        spec_json = excluded.spec_json,
+                        spec_sha256 = excluded.spec_sha256,
+                        description = excluded.description,
+                        risk = excluded.risk,
+                        trust = excluded.trust,
+                        available = 1,
+                        last_seen = excluded.last_seen
+                    """,
+                    (entry.name, entry.source, entry.source_kind, entry.spec_json,
+                     entry.spec_sha256, entry.description, entry.risk.value,
+                     entry.trust.value, now, now),
+                )
+            for source in sources:
+                rows = self._connection.execute(
+                    "SELECT name FROM tool_catalog WHERE source = ? AND available = 1", (source,)
+                ).fetchall()
+                for row in rows:
+                    if row["name"] not in seen:
+                        self._connection.execute(
+                            "UPDATE tool_catalog SET available = 0 WHERE name = ?", (row["name"],)
+                        )
+            self._connection.execute("COMMIT")
+        except BaseException:
+            self._rollback()
+            raise
+
+    def set_tool_enabled(self, name: str, enabled: bool) -> bool:
+        cursor = self._connection.execute(
+            "UPDATE tool_catalog SET enabled = ? WHERE name = ?", (1 if enabled else 0, name)
+        )
+        return cursor.rowcount > 0
+
     async def get_tool_result(
         self, tool_name: str, idempotency_key: str
     ) -> tuple[str, ToolResult] | None:
@@ -437,6 +515,7 @@ def _decode_run(value: str) -> RunRecord:
             for item in data.get("todos", ())
         ),
         archived_messages=_decode_messages(data.get("archived_messages", ())),
+        loaded_tools=tuple(data.get("loaded_tools", ())),
         context_summary=(
             ContextSummary(
                 covers=int(data["context_summary"]["covers"]),
@@ -445,6 +524,23 @@ def _decode_run(value: str) -> RunRecord:
             if data.get("context_summary")
             else None
         ),
+    )
+
+
+def _catalog_entry(row: sqlite3.Row) -> ToolCatalogEntry:
+    return ToolCatalogEntry(
+        name=row["name"],
+        source=row["source"],
+        source_kind=row["source_kind"],
+        spec_json=row["spec_json"],
+        spec_sha256=row["spec_sha256"],
+        description=row["description"],
+        risk=ToolRisk(row["risk"]),
+        trust=ToolTrust(row["trust"]),
+        enabled=bool(row["enabled"]),
+        available=bool(row["available"]),
+        first_seen=datetime.fromisoformat(row["first_seen"]),
+        last_seen=datetime.fromisoformat(row["last_seen"]),
     )
 
 

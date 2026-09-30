@@ -77,6 +77,7 @@ class EventType(StrEnum):
     FILE_SNAPSHOT = "file_snapshot"
     REWOUND = "rewound"
     CONTEXT_SUMMARIZED = "context_summarized"
+    TOOLS_LOADED = "tools_loaded"
 
 
 class PermissionMode(StrEnum):
@@ -92,6 +93,17 @@ class PermissionMode(StrEnum):
     ACCEPT_EDITS = "accept_edits"
     PLAN = "plan"
     BYPASS = "bypass"
+
+
+class ToolTrust(StrEnum):
+    """Whether a tool's output may be treated as instructions-free, trusted text.
+
+    Output of ``untrusted`` tools (web search, HTTP tools, MCP servers) is
+    wrapped as data before the model sees it, as a prompt-injection defence.
+    """
+
+    TRUSTED = "trusted"
+    UNTRUSTED = "untrusted"
 
 
 class ToolRisk(StrEnum):
@@ -153,6 +165,7 @@ class ToolSpec:
     # Argument fields holding workspace-relative paths this tool may modify;
     # their pre-images are snapshotted so the change can be rewound.
     writes_paths: tuple[str, ...] = ()
+    trust: ToolTrust = ToolTrust.TRUSTED
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +250,8 @@ class RunRecord:
     archived_messages: list[Message] = field(default_factory=list)
     # Persisted summary of older turns, reused on every later call and on resume.
     context_summary: ContextSummary | None = None
+    # Tools this run loaded with load_tools (dynamic tool loading), in load order.
+    loaded_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,6 +546,41 @@ class RunStore(Protocol):
     ) -> None: ...
 
     async def list_events(self, run_id: str) -> Sequence[RunEvent]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCatalogEntry:
+    """One tool known to the persistent catalog.
+
+    ``available`` is False when the tool's source no longer provides it; the
+    row is kept so older runs can still resolve the name. ``enabled`` is the
+    operator's switch and survives restarts.
+    """
+
+    name: str
+    source: str
+    source_kind: str
+    spec_json: str
+    spec_sha256: str
+    description: str
+    risk: ToolRisk
+    trust: ToolTrust
+    enabled: bool = True
+    available: bool = True
+    first_seen: datetime = field(default_factory=utc_now)
+    last_seen: datetime = field(default_factory=utc_now)
+
+
+class ToolCatalogStore(Protocol):
+    """Durable catalog of tools; synchronous because it is used at startup and by admins."""
+
+    def catalog_entries(self) -> Sequence[ToolCatalogEntry]: ...
+
+    def sync_catalog(self, entries: Sequence[ToolCatalogEntry], *, sources: Sequence[str]) -> None:
+        """Upsert ``entries``; mark tools of the given sources that are absent as unavailable."""
+
+    def set_tool_enabled(self, name: str, enabled: bool) -> bool:
+        """Persist the operator's switch; False if the tool is unknown."""
 
 
 class HarnessError(Exception):

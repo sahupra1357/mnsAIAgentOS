@@ -59,6 +59,9 @@ Read the skill that matches the component before modifying it:
 - Tools, permissions, or execution: `skills/tool-runtime/SKILL.md`
 - Coding-agent tools or sandbox execution: `skills/coding-agent/SKILL.md`
 - Tests, evaluations, or release checks: `skills/harness-verification/SKILL.md`
+- Tool catalog, tool sources, MCP, or dynamic tool loading: `skills/tool-platform/SKILL.md`
+- Planning, delegation, or parallel execution: `skills/planning-delegation/SKILL.md`
+- Storage migrations, Postgres, tenancy, security, or deployment: `skills/production-hardening/SKILL.md`
 
 Read more than one when a change crosses boundaries. These project skills supplement, but do not override, user instructions or repository-wide safety rules.
 

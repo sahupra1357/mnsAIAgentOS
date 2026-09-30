@@ -159,6 +159,18 @@ def _parser() -> argparse.ArgumentParser:
     show = config_sub.add_parser("show", help="print effective settings and where each came from")
     show.add_argument("--config", type=Path, required=True)
 
+    tools = subcommands.add_parser("tools", help="list, sync, enable, or disable tools in the catalog")
+    tools_sub = tools.add_subparsers(dest="tools_command", required=True)
+    tools_list = tools_sub.add_parser("list", help="list offered tools (--all includes disabled/unavailable)")
+    tools_list.add_argument("--all", action="store_true")
+    _common_runtime_arguments(tools_list)
+    tools_sync = tools_sub.add_parser("sync", help="discover tools from the configured MCP servers")
+    _common_runtime_arguments(tools_sync)
+    for action in ("enable", "disable"):
+        toggle = tools_sub.add_parser(action, help=f"{action} a tool (persists across restarts)")
+        toggle.add_argument("name")
+        _common_runtime_arguments(toggle)
+
     plugin = subcommands.add_parser("plugin", help="install, list, or remove plugins")
     plugin_sub = plugin.add_subparsers(dest="plugin_command", required=True)
     install = plugin_sub.add_parser("install", help="validate and copy a plugin (not enabled)")
@@ -235,6 +247,7 @@ async def _run_command(args: argparse.Namespace) -> int:
     stream = _StdoutStream() if args.stream else None
     app = _build(args, stream=stream)
     async with app:
+        await _start_tools(app)
         requested = args.model_profile or app.config.default_model_profile
         profile = app.config.resolve_model_name(requested)
         route = requested if requested != profile else None
@@ -267,6 +280,7 @@ async def _run_command(args: argparse.Namespace) -> int:
 async def _resume_command(args: argparse.Namespace) -> int:
     app = _build(args)
     async with app:
+        await _start_tools(app)
         completed = await app.orchestrator.resume(args.run_id)
         return await _print_result(app, completed)
 
@@ -274,6 +288,7 @@ async def _resume_command(args: argparse.Namespace) -> int:
 async def _approve_command(args: argparse.Namespace) -> int:
     app = _build(args)
     async with app:
+        await _start_tools(app)
         pending = await app.orchestrator.pending_approval(args.run_id)
         if pending is None:
             raise ValueError("run has no pending approval")
@@ -360,6 +375,7 @@ async def _continue_command(args: argparse.Namespace) -> int:
     stream = _StdoutStream() if args.stream else None
     app = _build(args, stream=stream)
     async with app:
+        await _start_tools(app)
         budget = None
         raised = {
             "max_steps": args.max_steps,
@@ -510,6 +526,41 @@ def _plugin_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _start_tools(app: HarnessApplication) -> None:
+    """Sync MCP servers before executing runs; a failing server is reported, not fatal."""
+
+    for server, line in (await app.start_tools()).items():
+        if line.startswith("error"):
+            print(f"mcp {server}: {line} (using tools cached from its last sync)", file=sys.stderr)
+
+
+async def _tools_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    async with app:
+        catalog = app.catalog
+        assert catalog is not None
+        if args.tools_command == "sync":
+            report = await app.sync_tools()
+            if not report:
+                print("no MCP servers are configured; built-in and config tools are always in sync")
+            for server, line in report.items():
+                print(f"{server}: {line}")
+            return 1 if any(line.startswith("error") for line in report.values()) else 0
+        if args.tools_command in {"enable", "disable"}:
+            if not catalog.set_enabled(args.name, args.tools_command == "enable"):
+                raise ValueError(f"unknown tool: {args.name}")
+            print(f"{args.name} {args.tools_command}d")
+            return 0
+        for entry in catalog.entries():
+            if not args.all and not (entry.enabled and entry.available):
+                continue
+            state = "enabled" if entry.enabled else "disabled"
+            if not entry.available:
+                state += ",unavailable"
+            print(f"{entry.name:34} {entry.source:18} {entry.risk.value:11} {entry.trust.value:9} {state}")
+        return 0
+
+
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -534,6 +585,7 @@ async def _serve_command(args: argparse.Namespace) -> int:
     token = _api_token(args)
     app = _build(args)
     async with app:
+        await _start_tools(app)
         api = create_api(app, auth_token=token, worker_count=args.workers)
         server = uvicorn.Server(
             uvicorn.Config(api, host=args.host, port=args.port, lifespan="on", log_level="info")
@@ -550,6 +602,7 @@ async def _worker_command(args: argparse.Namespace) -> int:
         with contextlib.suppress(NotImplementedError, AttributeError):
             loop.add_signal_handler(getattr(signal, signame), stop.set)
     async with app:
+        await _start_tools(app)
         workers = [
             Worker(
                 app.orchestrator,
@@ -634,6 +687,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _config_command(args)
         if args.command == "plugin":
             return _plugin_command(args)
+        if args.command == "tools":
+            return asyncio.run(_tools_command(args))
         if args.command == "cancel":
             return asyncio.run(_cancel_command(args))
         if args.command == "status":

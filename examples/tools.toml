@@ -1,0 +1,59 @@
+# Tool sources: web search, your own Python tools, declarative HTTP tools, and MCP
+# servers. Every tool is recorded in the persistent tool catalog:
+#   agent-harness tools list  --config examples/tools.toml
+#   agent-harness tools sync  --config examples/tools.toml     # discover MCP tools
+#   agent-harness tools disable web_search --config examples/tools.toml
+
+default_model_profile = "ollama"
+
+[models.ollama]
+adapter = "ollama"
+model = "qwen2.5-coder:7b"
+endpoint = "http://127.0.0.1:11434/v1"
+timeout_seconds = 120
+
+# Built-in web search (Tavily). The key is read from the environment, never from config.
+[web_search]
+enabled = true
+api_key_env = "TAVILY_API_KEY"
+max_results = 5
+
+# Your own Python tools: module:function receives a registrar (see examples/tools/).
+[[tools]]
+name = "text-tools"
+kind = "python"
+module = "example_tools:register"
+path = "tools"            # added to the import path, relative to this file
+
+# A declarative HTTP tool. GET sends arguments as the query string; other methods send
+# JSON. Output from HTTP tools is treated as untrusted data by default.
+[[tools]]
+name = "github_repo"
+kind = "http"
+method = "GET"
+url = "https://api.github.com/repos/octocat/hello-world"
+description = "Fetch public metadata of the example GitHub repository."
+input_schema = { type = "object", properties = {} }
+headers_env = { Authorization = "GITHUB_AUTH_HEADER" }   # e.g. "Bearer <token>" in the env var
+
+# An open-source MCP server over stdio. Its tools are named filesystem__<tool>, ask for
+# approval unless listed in read_only, and their output is treated as untrusted data.
+[[mcp_servers]]
+name = "filesystem"
+command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "./docs"]
+read_only = ["read_file", "read_text_file", "list_directory", "search_files", "get_file_info"]
+sync_on_start = true
+
+# A remote MCP server over streamable HTTP (disabled example).
+[[mcp_servers]]
+name = "remote"
+transport = "http"
+url = "https://mcp.example.com/mcp"
+headers_env = { Authorization = "REMOTE_MCP_AUTH_HEADER" }
+enabled = false
+
+# With hundreds of tools, offer only a core set plus search_tools/load_tools.
+[tool_loading]
+mode = "dynamic"
+core = ["web_search", "word_count"]
+max_loaded = 30

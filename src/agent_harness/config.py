@@ -17,6 +17,8 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from agent_harness.coding.config import CodingAgentConfig, parse_coding_config
+from agent_harness.domain import ToolRisk
+from agent_harness.mcp.config import McpServerConfig
 
 
 _PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -323,6 +325,47 @@ class SummarizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WebSearchConfig:
+    """The built-in ``web_search`` tool (Tavily). The key is read from ``api_key_env``."""
+
+    enabled: bool = False
+    provider: str = "tavily"
+    api_key_env: str = "TAVILY_API_KEY"
+    endpoint: str = "https://api.tavily.com/search"
+    max_results: int = 5
+    search_depth: str = "basic"
+    timeout_seconds: float = 20.0
+
+
+@dataclass(frozen=True, slots=True)
+class ToolLoadingConfig:
+    """``mode = "dynamic"`` offers only ``core`` tools plus search_tools/load_tools."""
+
+    mode: str = "all"
+    core: tuple[str, ...] = ()
+    max_loaded: int = 40
+    search_limit: int = 8
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSourceConfig:
+    """One ``[[tools]]`` entry: ``kind = "python"`` or ``kind = "http"``."""
+
+    name: str
+    kind: str
+    module: str | None = None
+    path: str | None = None
+    url: str | None = None
+    method: str = "POST"
+    description: str = ""
+    input_schema: Mapping[str, Any] | None = None
+    headers_env: Mapping[str, str] = field(default_factory=dict)
+    risk: str | None = None
+    trust: str = "untrusted"
+    timeout_seconds: float = 30.0
+
+
+@dataclass(frozen=True, slots=True)
 class SkillsConfig:
     """Skill directories; each ``<dir>/<name>/SKILL.md`` becomes a loadable skill."""
 
@@ -366,6 +409,10 @@ class HarnessConfig:
     tasks: TasksConfig = field(default_factory=TasksConfig)
     instructions: InstructionsConfig = field(default_factory=InstructionsConfig)
     summarization: SummarizationConfig = field(default_factory=SummarizationConfig)
+    tool_sources: tuple[ToolSourceConfig, ...] = ()
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    mcp_servers: tuple[McpServerConfig, ...] = ()
+    tool_loading: ToolLoadingConfig = field(default_factory=ToolLoadingConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     templates: TemplatesConfig = field(default_factory=TemplatesConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
@@ -505,6 +552,10 @@ def load_config(
         tasks=_parse_section(raw, "tasks", TasksConfig),
         instructions=_parse_section(raw, "instructions", InstructionsConfig),
         summarization=_parse_section(raw, "summarization", SummarizationConfig),
+        tool_sources=_parse_tool_sources(raw.get("tools")),
+        web_search=_parse_section(raw, "web_search", WebSearchConfig),
+        mcp_servers=_parse_mcp_servers(raw.get("mcp_servers")),
+        tool_loading=_parse_section(raw, "tool_loading", ToolLoadingConfig),
         skills=_parse_section(raw, "skills", SkillsConfig),
         templates=_parse_section(raw, "templates", TemplatesConfig),
         plugins=_parse_section(raw, "plugins", PluginsConfig),
@@ -547,6 +598,88 @@ def _parse_permissions(raw: Any) -> PermissionsConfig:
     return PermissionsConfig(**raw)
 
 
+_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _parse_tool_sources(raw: Any) -> tuple[ToolSourceConfig, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ConfigError("tools must be an array of tables ([[tools]])")
+    sources: list[ToolSourceConfig] = []
+    names: set[str] = set()
+    for item in raw:
+        unknown = set(item) - set(ToolSourceConfig.__dataclass_fields__)
+        if unknown:
+            raise ConfigError(f"unknown fields in tools: {', '.join(sorted(unknown))}")
+        name = item.get("name")
+        if not isinstance(name, str) or not _TOOL_NAME.fullmatch(name):
+            raise ConfigError("tools.name must be 1-64 letters, digits, '_', '-', or '.'")
+        if name in names:
+            raise ConfigError(f"tool source {name!r} is defined more than once")
+        names.add(name)
+        kind = item.get("kind")
+        if kind == "python":
+            if not isinstance(item.get("module"), str) or ":" not in item["module"]:
+                raise ConfigError(f"tool source {name!r}: python tools need module = 'pkg.mod:function'")
+        elif kind == "http":
+            if not isinstance(item.get("url"), str) or not item.get("description"):
+                raise ConfigError(f"tool source {name!r}: http tools need url and description")
+            if not isinstance(item.get("input_schema"), dict):
+                raise ConfigError(f"tool source {name!r}: http tools need an input_schema table")
+            if item.get("risk") is not None and item["risk"] not in {r.value for r in ToolRisk}:
+                raise ConfigError(f"tool source {name!r}: unknown risk {item['risk']!r}")
+            if item.get("trust", "untrusted") not in {"trusted", "untrusted"}:
+                raise ConfigError(f"tool source {name!r}: trust must be 'trusted' or 'untrusted'")
+            headers = item.get("headers_env", {})
+            if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
+                raise ConfigError(f"tool source {name!r}: headers_env maps header names to env var names")
+        else:
+            raise ConfigError(f"tool source {name!r}: kind must be 'python' or 'http'")
+        values = dict(item)
+        if "timeout_seconds" in values:
+            values["timeout_seconds"] = float(values["timeout_seconds"])
+        sources.append(ToolSourceConfig(**values))
+    return tuple(sources)
+
+
+def _parse_mcp_servers(raw: Any) -> tuple[McpServerConfig, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ConfigError("mcp_servers must be an array of tables ([[mcp_servers]])")
+    servers: list[McpServerConfig] = []
+    names: set[str] = set()
+    fields_allowed = set(McpServerConfig.__dataclass_fields__)
+    for item in raw:
+        unknown = set(item) - fields_allowed
+        if unknown:
+            raise ConfigError(f"unknown fields in mcp_servers: {', '.join(sorted(unknown))}")
+        values = dict(item)
+        for key in ("command", "env", "read_only", "tools"):
+            if key in values:
+                if not isinstance(values[key], list) or not all(isinstance(v, str) for v in values[key]):
+                    raise ConfigError(f"mcp_servers.{key} must be a list of strings")
+                values[key] = tuple(values[key])
+        if "default_risk" in values:
+            try:
+                values["default_risk"] = ToolRisk(values["default_risk"])
+            except ValueError as exc:
+                raise ConfigError(f"mcp_servers.default_risk: {exc}") from exc
+        for key in ("request_timeout_seconds", "call_timeout_seconds"):
+            if key in values:
+                values[key] = float(values[key])
+        try:
+            server = McpServerConfig(**values)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(str(exc)) from exc
+        if server.name in names:
+            raise ConfigError(f"MCP server {server.name!r} is defined more than once")
+        names.add(server.name)
+        servers.append(server)
+    return tuple(servers)
+
+
 def _parse_hooks(raw: Any) -> tuple[HookConfig, ...]:
     if raw is None:
         return ()
@@ -583,6 +716,9 @@ def _parse_section(raw: Mapping[str, Any], name: str, section_type: Any) -> Any:
             converted[key] = tuple(value)
             continue
         expected = str if default is None else type(default)
+        if expected is float and isinstance(value, int) and not isinstance(value, bool):
+            converted[key] = float(value)  # "timeout_seconds = 20" means 20.0
+            continue
         if isinstance(value, bool) != (expected is bool) or not isinstance(value, expected):
             raise ConfigError(f"{name}.{key} must be of type {expected.__name__}")
     return section_type(**converted)
