@@ -418,6 +418,11 @@ fallback = ["claude"]                   # use it only when Modal keeps failing
 Alternatively, run the LiteLLM Proxy yourself and point an ordinary
 `openai_compatible` profile at it.
 
+## Architecture Diagrams
+
+Flow diagrams (SVG, plus editable Excalidraw files) are in [`docs/diagrams/`](docs/diagrams/README.md):
+the end-to-end flow, tool permissions and approval, subagents, and context summarization.
+
 ## Context Window
 
 Profiles that set `context_window` get a bounded view of the history on every model call.

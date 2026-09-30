@@ -112,7 +112,8 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   applies only to profiles with `context_window`. The summary is a model call that
   counts against the budget and is persisted on the run (`context_summary`). A test
   model must answer requests with `metadata["purpose"] == "summary"`.
-- `ModelResolver.resolve` is synchronous; `Execution.md` shows `await` but the code does not.
+- `ModelResolver.resolve` is synchronous (no `await`). `Execution.md` was brought up to date
+  with the Phase 1–6 flow and now shows it correctly.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A

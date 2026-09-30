@@ -1,449 +1,660 @@
-The harness has two entry points:
+# Execution flow
 
-  1. CLI entry point: agent-harness run ...
-  2. Python entry point: build_application(...)
+This document follows one run through the harness, from the command line to the final
+answer. Diagrams of the same flow, including animated walkthroughs, are in
+[`docs/diagrams/`](docs/diagrams/README.md).
 
-  ## 1. CLI entry point
+The harness has four entry points:
 
-  Example:
+1. CLI: `agent-harness run ...` (plus `continue`, `approve`, `resume`, `rewind`, and more)
+2. Python: `build_application(...)`
+3. HTTP API: `agent-harness serve` (needs the `[api]` extra)
+4. Queue workers: `agent-harness worker`
 
-  agent-harness run \
-    --config models.toml \
-    --model-profile local \
-    "Inspect the repository and explain the failing tests"
+All four use the same orchestrator, so a run behaves the same no matter how it started.
 
-  The call flow is:
+## 1. CLI entry point
 
-  main()
-    └── _run_command()
-          ├── build_application()
-          ├── create_run()
-          └── orchestrator.run()
+Example:
 
-  Relevant file: src/agent_harness/cli.py
+```bash
+agent-harness run \
+  --config models.toml \
+  --model-profile local \
+  "Inspect the repository and explain the failing tests"
+```
 
-  ## 2. Application construction
+Useful options: `--mode plan|accept_edits|bypass`, `--stream`, `--max-steps`,
+`--max-wall-seconds`, `--max-tokens`, `--max-cost-usd`, and `--arg key=value` for
+prompt templates (`"/review app.py"`).
 
-  build_application() creates the runtime components:
+The call flow is:
 
-  Configuration
-      ↓
-  ModelGateway
-      ↓
-  ToolRuntime
-      ↓
-  SQLiteRunStore
-      ↓
-  AgentOrchestrator
+```text
+main()
+  └── _run_command()
+        ├── _build() → build_application()
+        ├── expand_prompt()           # "/name args" → template text
+        ├── create_run()
+        ├── orchestrator.run()
+        └── _print_result()           # answer to stdout, status to stderr
+```
 
-  Relevant file: src/agent_harness/application.py
+`--model-profile` accepts a profile name or a route name (`fast`, `strong`). A route is
+resolved to its profile, and the route is recorded on the run.
 
-  It performs these actions:
+Relevant file: `src/agent_harness/cli.py`
 
-  - Loads models.toml
-  - Selects the configured model provider
-  - Creates the tool registry and policies
-  - Creates coding tools if coding mode is enabled
-  - Opens the SQLite persistence layer
-  - Creates the orchestrator
+## 2. Application construction
 
-  The orchestration loop does not know whether the model is OpenAI, local, or another provider.
+`build_application()` creates the runtime components:
 
-  ## 3. Run creation
-
-  The CLI converts the user prompt into a message:
-
-  Message(
-      role=Role.USER,
-      content="Inspect the repository and explain the failing tests",
-  )
-
-  Then it creates a durable run:
-
-  run = await app.orchestrator.create_run(
-      model_profile="local",
-      messages=[message],
-      budget=RunBudget(...),
-  )
-
-  The run is persisted before contacting the model:
-
-  RunStatus.QUEUED
-      ↓
-  RUN_CREATED event
-
-  This gives every run a stable run_id.
-
-  ## 4. Run starts
-
-  orchestrator.run(run_id) loads the run from SQLite.
-
-  If the run is valid and not already finished:
-
-  QUEUED
+```text
+Layered settings (enterprise → user → project → local)
     ↓
-  RUNNING
+Plugins, templates, skills
     ↓
-  RUN_STARTED event
-
-  The orchestrator then enters its execution loop.
-
-  Relevant file: src/agent_harness/orchestrator.py
-
-  ## 5. Model request
-
-  The orchestrator resolves the configured model profile:
-
-  model = await self.models.resolve(run.model_profile)
-
-  It sends:
-
-  - Conversation messages
-  - Tool specifications
-  - Run metadata
-  - Current step information
-
-  The provider adapter converts the normalized request into the provider-specific format.
-
-  For OpenAI-compatible models, this becomes a /chat/completions request.
-
-  MODEL_REQUESTED event
-      ↓
-  Model provider
-      ↓
-  Normalized ModelResponse
-      ↓
-  MODEL_RESPONDED event
-
-  Provider-specific code is isolated in:
-
-  src/agent_harness/model_gateway
-
-  ## 6. Model decision
-
-  The model response has two possible paths.
-
-  ### Final answer path
-
-  If the assistant returns text without tool calls:
-
-  Assistant response
-      ↓
-  Persist response
-      ↓
-  RUN_COMPLETED
-      ↓
-  Return final answer
-
-  The final answer is printed to stdout.
-
-  ### Tool-call path
-
-  If the model requests a tool:
-
-  Assistant tool call
-      ↓
-  Validate tool name and arguments
-      ↓
-  Check policy and risk
-      ↓
-  Execute or request approval
-
-  The tool call is not executed blindly.
-
-  ## 7. Tool validation and policy
-
-  The tool runtime validates:
-
-  - Tool name
-  - Argument schema
-  - Argument types
-  - Required fields
-  - Timeout settings
-  - Idempotency key
-  - Risk classification
-  - Approval policy
-
-  For coding tools, additional controls apply:
-
-  - Workspace boundary checks
-  - Protected file checks
-  - Command allowlists
-  - Dangerous command rejection
-  - Structured argv
-  - Docker sandbox execution
-
-  Relevant directories:
-
-  - src/agent_harness/tools
-  - src/agent_harness/coding
-
-  ## 8. Read-only tool execution
-
-  A read-only tool such as read_file, search_files, or git_diff can execute immediately if it passes validation.
-
-  TOOL_REQUESTED
-      ↓
-  Tool policy check
-      ↓
-  Tool handler
-      ↓
-  Tool result
-      ↓
-  TOOL_RESPONDED
-
-  The tool result is appended to the conversation as a tool message.
-
-  Then the model receives the updated conversation and decides what to do next.
-
-  Tool result
-      ↓
-  Next model request
-
-  ## 9. Approval-required execution
-
-  A side-effecting or high-risk tool may require user approval.
-
-  Example tools:
-
-  - apply_patch
-  - run_tests
-  - run_command
-  - git_commit
-  - create_pull_request
-
-  The handler is not executed before approval.
-
-  Tool requires approval
-      ↓
-  APPROVAL_REQUESTED event
-      ↓
-  RunStatus.AWAITING_INPUT
-      ↓
-  Persist checkpoint
-      ↓
-  Process exits
-
-  The CLI prints an approval request such as:
-
-  {
-    "run_id": "run-123",
-    "call_id": "call-456",
-    "tool_name": "apply_patch",
-    "risk": "side_effect"
-  }
-
-  At this point, the run is safely paused in SQLite.
-
-  ## 10. Resume after approval
-
-  Approve the action:
-
-  agent-harness approve \
-    --config models.toml \
-    --database agent-harness.sqlite3 \
-    RUN_ID \
-    --allow
-
-  Deny the action:
-
-  agent-harness approve \
-    --config models.toml \
-    --database agent-harness.sqlite3 \
-    RUN_ID \
-    --deny
-
-  The approval flow is:
-
-  approve command
-      ↓
-  pending_approval()
-      ↓
-  resolve_approval()
-      ↓
-  APPROVAL_RESOLVED event
-      ↓
-  resume(run_id)
-      ↓
-  Continue orchestration
-
-  If approved, the tool runs.
-
-  If denied, a policy-denied tool result is sent back to the model, allowing it to explain the denial or choose another approach.
-
-  Approval does not bypass dangerous-command guardrails. Commands such as rm, sudo, shell execution, unrestricted Docker access, and unsafe Git operations remain blocked.
-
-  ## 11. Loop continuation
-
-  After a successful tool call:
-
-  Tool result
-      ↓
-  Append tool message
-      ↓
-  Save checkpoint
-      ↓
-  Call model again
-
-  The normal loop is:
-
-  Model
+ModelGateway (Ollama, llama.cpp, Modal, OpenAI-compatible, LiteLLM)
     ↓
-  Tool decision
+ToolRuntime (+ durable idempotency store, artifacts, memory, load_skill)
     ↓
-  Validate
+SQLiteRunStore
     ↓
-  Approve if needed
+AgentOrchestrator (context builder, summarizer, hooks, permissions,
+                   subagents, file snapshots, system context)
+```
+
+Relevant file: `src/agent_harness/application.py`
+
+It performs these actions:
+
+- **Settings:** loads `models.toml` merged with the layered settings. For hermetic runs,
+  point `AGENT_HARNESS_USER_SETTINGS` and `AGENT_HARNESS_ENTERPRISE_SETTINGS` at missing
+  files.
+- **Summarizer:** validates the `[summarization]` section before opening any store.
+- **Discovery:** finds enabled plugins, prompt templates, and skills.
+- **Models:** builds the model gateway, with each profile's adapter, fallback chain, and
+  routes.
+- **Tools:** builds the default or coding tool runtime and attaches the SQLite idempotency
+  store. It also registers `read_artifact`, the memory tools, and `load_skill` when
+  enabled.
+- **Instructions:** prepares the system context: instruction files (`AGENTS.md`, including
+  subdirectory files when enabled) and the skills index.
+- **Hooks and permissions:** configures hooks, permission rules, and the default permission
+  mode.
+- **Subagents and snapshots:** registers subagent definitions and the workspace snapshotter
+  used by rewind.
+- **Orchestrator:** creates it with a `BudgetedContextBuilder` for profiles that set
+  `context_window`.
+
+The orchestration loop does not know whether the model is served by Ollama, llama.cpp,
+Modal, or another provider.
+
+## 3. Run creation
+
+The CLI converts the user prompt into a message (after expanding a template, if one was
+used):
+
+```python
+Message(
+    role=Role.USER,
+    content="Inspect the repository and explain the failing tests",
+)
+```
+
+Then it creates a durable run:
+
+```python
+run = await app.orchestrator.create_run(
+    model_profile="local",
+    route=None,
+    mode=None,                       # default permission mode from settings
+    versions=app.run_versions("local"),
+    messages=[message],
+    budget=RunBudget(...),
+)
+```
+
+`create_run` does four things before any model is contacted:
+
+1. **System context:** for top-level runs, the instruction files and the skills index are
+   inserted as one system message. They are read once and stay fixed for the run.
+2. **`user_prompt` hook:** it can block the prompt or add context.
+3. **Version record:** it computes the hashes of the system prompt, tool specs, model
+   profile, and instruction context, plus the harness version.
+4. **Persist:** it saves the run as queued, with a `RUN_CREATED` event:
+
+```text
+RunStatus.QUEUED
     ↓
-  Execute tool
+RUN_CREATED event (versions, mode, route, template)
+```
+
+This gives every run a stable `run_id`.
+
+## 4. Run starts
+
+`orchestrator.run(run_id)` loads the run from SQLite.
+
+If the run is valid and not already finished or paused:
+
+```text
+QUEUED
+  ↓
+RUNNING
+  ↓
+RUN_STARTED event
+  ↓
+session_start hook (a deny fails the run; context is appended)
+```
+
+When a `RUNNING` run is resumed after a crash, the orchestrator first compares the current
+config against the recorded versions and records `CONFIG_DRIFT` if they differ.
+
+The orchestrator then enters its execution loop. Each iteration:
+
+1. Reloads the run if another process changed it (a cancel, an approval, a steer).
+2. Performs exactly one transition (`_advance`) and checkpoints it.
+
+Relevant file: `src/agent_harness/orchestrator.py`
+
+## 5. Step boundary
+
+At the start of each step the orchestrator:
+
+- **Checks budgets:** steps, wall clock, tokens, and cost (section 13).
+- **Runs pending tool calls first:** any tool calls from the last model response that have
+  not run yet, which makes crash recovery exact.
+- **Applies steering:** messages queued with `agent-harness steer` are injected at this model
+  turn boundary (`STEER_APPLIED`).
+
+## 6. Model request
+
+The request is checkpointed **before** the provider is contacted:
+
+```text
+MODEL_REQUESTED event
     ↓
-  Persist result
+pre_model hook (may deny, or add context for this request only)
     ↓
-  Model again
+ContextBuilder builds the bounded view (+ summary, see below)
+    ↓
+client = self._models.resolve(run.model_profile)     # synchronous
+    ↓
+client.complete(request)  or  client.stream(request)
+    ↓
+Normalized ModelResponse
+    ↓
+MODEL_RESPONDED event (usage, cost, cached tokens, context stats)
+    ↓
+post_model hook
+```
 
-  This continues until the model returns a final answer or the run reaches a stopping condition.
+The request contains the context view of the conversation, the tool specifications (in a
+fixed order), and run metadata. The provider adapter converts it into the
+provider-specific format; all supported servers use OpenAI-compatible `/chat/completions`.
 
-  ## 12. Stopping conditions
+- **Context window:** for profiles with `context_window`, the view is trimmed in large
+  chunks (85% → 60% of the input budget) and keeps the system prompt, the first user
+  message, and tool-call pairs. With `[summarization] enabled = true`, the omitted turns are
+  replaced by a persisted summary (`CONTEXT_SUMMARIZED`) instead of being dropped. If even
+  the minimum view does not fit, the run fails with `ContextWindowExceededError`.
+- **Retries:** `max_model_attempts` (default 3) bounds provider requests per step and
+  profile, including the adapter's own retries.
+- **Fallback:** when the retries run out, the next profile in the fallback chain is used
+  (`MODEL_FALLBACK`).
+- **Streaming:** with `--stream`, text is printed as it arrives, but only the final
+  response is checkpointed.
+- **Cost:** profiles with `pricing` get an estimated `cost_usd`. Without it, cost stays
+  unknown.
 
-  Every run is bounded by:
+Provider-specific code is isolated in `src/agent_harness/model_gateway`.
 
-  - Maximum number of steps
-  - Maximum wall-clock duration
-  - Maximum token usage
-  - Maximum estimated cost
-  - Maximum tool attempts
-  - Cancellation
-  - Permanent model error
-  - Permanent tool error
+## 7. Model decision
 
-  Possible persisted statuses are:
+The model response has two possible paths.
 
-  QUEUED
-  RUNNING
-  AWAITING_INPUT
-  COMPLETED
-  FAILED
-  CANCELLED
-  BUDGET_EXHAUSTED
+### Final answer path
 
-  Because every event and checkpoint is stored, an interrupted run can be resumed without losing its previous messages or tool results.
+If the assistant returns text without tool calls:
 
-  ## 13. Programmatic usage
+```text
+Assistant response
+    ↓
+Steer queued meanwhile? → reopen the turn
+    ↓
+stop hook (may ask to continue, at most 3 times)
+    ↓
+RUN_COMPLETED
+    ↓
+Return final answer
+```
 
-  You can use the harness directly from Python:
+The final answer is printed to stdout.
 
-  import asyncio
+### Tool-call path
 
-  from agent_harness.application import build_application
-  from agent_harness.domain import Message, Role, RunStatus
+If the model requests a tool:
+
+```text
+Assistant tool call
+    ↓
+Repeated-call check
+    ↓
+pre_tool hook
+    ↓
+Permission rules and mode, then tool risk policy
+    ↓
+Execute, request approval, or refuse
+```
+
+The tool call is not executed blindly.
+
+## 8. Tool decision and validation
+
+Each tool call goes through these checks, in order:
+
+1. **Repeated-call check:** more than `max_identical_tool_calls` (5) identical calls since
+   the last non-read-only call are refused. The run fails after `max_refused_repeats` (2)
+   refusals.
+2. **`pre_tool` hook:** it can deny the call or modify its arguments.
+3. **Permission decision** (`permissions.py`); the first match wins:
+   1. deny rules, which always win;
+   2. permission mode: `plan` refuses non-read-only tools; `bypass` and `accept_edits`
+      pre-approve;
+   3. ask rules;
+   4. allow rules;
+   5. otherwise the tool's risk policy (by default, `high_risk` and `destructive` tools
+      ask).
+4. **Built-in tools:** `agent` (subagents), `exit_plan` (plan mode), and `todo_write`
+   (task list) are handled by the orchestrator itself.
+5. **File snapshot:** before a tool that writes files, the touched files are snapshotted
+   (`FILE_SNAPSHOT`) so the run can be rewound.
+6. **ToolRuntime:** checks the tool name, argument schema and types, required fields,
+   timeout, and idempotency key. The idempotency result is stored durably, so a replay
+   after a crash reuses it.
+7. **`post_tool` hook:** it can replace the result or add context.
+8. **Record the result:** outputs larger than the artifact threshold are stored as
+   artifacts and referenced from the event.
+
+For coding tools, additional controls apply:
+
+- Workspace boundary checks
+- Protected file checks
+- Command allowlists
+- Dangerous command rejection
+- Structured argv
+- Docker sandbox execution
+
+These guardrails apply in every permission mode, including `bypass`.
+
+Relevant directories:
+
+- `src/agent_harness/tools`
+- `src/agent_harness/coding`
+- `src/agent_harness/permissions.py`, `src/agent_harness/hooks.py`
+
+## 9. Read-only tool execution
+
+A read-only tool such as `read_file`, `search_files`, or `git_diff` can execute
+immediately if it passes validation.
+
+```text
+TOOL_REQUESTED
+    ↓
+Tool policy check
+    ↓
+Tool handler
+    ↓
+Tool result
+    ↓
+TOOL_RESPONDED
+```
+
+The tool result is appended to the conversation as a tool message.
+
+Then the model receives the updated conversation and decides what to do next.
+
+```text
+Tool result
+    ↓
+Next model request
+```
+
+## 10. Approval-required execution
+
+A tool call pauses for approval when an ask rule matches or the risk policy requires it.
+Plan approvals work the same way: the model calls `exit_plan`, and the run pauses with
+`kind = "plan"`.
+
+Example tools that usually need approval:
+
+- `apply_patch`
+- `run_tests`
+- `run_command`
+- `git_commit`
+- `create_pull_request`
+
+The handler is not executed before approval.
+
+```text
+Tool requires approval
+    ↓
+APPROVAL_REQUESTED event
+    ↓
+RunStatus.AWAITING_INPUT
+    ↓
+Persist checkpoint
+    ↓
+Process exits (code 3)
+```
+
+The CLI prints the run status and the pending request to stderr, for example:
+
+```text
+run_id=run-123 status=awaiting_input
+approval_required={"arguments": {...}, "call_id": "call-456", "kind": "tool", "risk": "side_effect", "tool": "apply_patch"}
+```
+
+At this point, the run is safely paused in SQLite.
+
+If a subagent needs approval, its parent is paused too. `agent-harness approve PARENT_ID`
+shows and decides the subagent's pending call.
+
+## 11. Resume after approval
+
+Approve the action:
+
+```bash
+agent-harness approve \
+  --config models.toml \
+  --database agent-harness.sqlite3 \
+  RUN_ID \
+  --allow
+```
+
+Deny the action, optionally telling the model why:
+
+```bash
+agent-harness approve \
+  --config models.toml \
+  --database agent-harness.sqlite3 \
+  RUN_ID \
+  --deny --feedback "Use the staging database instead"
+```
+
+For a plan approval, `--mode default` or `--mode accept_edits` sets the permission mode
+the run switches to.
+
+The approval flow is:
+
+```text
+approve command
+    ↓
+pending_approval()
+    ↓
+resolve_approval(call_id=..., approved=..., feedback=..., mode=...)
+    ↓
+APPROVAL_RESOLVED event
+    ↓
+resume(run_id)
+    ↓
+Continue orchestration
+```
+
+If approved, the tool runs.
+
+If denied, a policy-denied tool result (with any feedback) is sent back to the model,
+allowing it to explain the denial or choose another approach. A rejected plan returns the
+feedback so the model can revise the plan.
+
+Approval does not bypass dangerous-command guardrails. Commands such as `rm`, `sudo`,
+shell execution, unrestricted Docker access, and unsafe Git operations remain blocked.
+
+## 12. Loop continuation
+
+After a successful tool call:
+
+```text
+Tool result
+    ↓
+Append tool message
+    ↓
+Save checkpoint
+    ↓
+Call model again
+```
+
+The normal loop is:
+
+```text
+Step boundary (budgets, steering)
+  ↓
+Model
+  ↓
+Tool decision
+  ↓
+Validate
+  ↓
+Approve if needed
+  ↓
+Execute tool
+  ↓
+Persist result
+  ↓
+Model again
+```
+
+This continues until the model returns a final answer or the run reaches a stopping
+condition.
+
+## 13. Stopping conditions
+
+Every run is bounded by its `RunBudget`:
+
+| Budget             | Default | Notes                                                         |
+|--------------------|---------|---------------------------------------------------------------|
+| `max_steps`        | 20      | model turns                                                   |
+| `max_wall_seconds` | 300     | idle time between `continue` turns is not counted             |
+| `max_tokens`       | none    | includes summary calls and subagent usage                     |
+| `max_cost_usd`     | none    | only works for profiles with `pricing`                        |
+
+A run also stops on:
+
+- **Retries and repeats:** model retries exhausted with no fallback left
+  (`max_model_attempts`); tool retries exhausted (`max_tool_attempts`); repeated identical
+  tool calls (`max_refused_repeats`).
+- **Cancellation:** `agent-harness cancel`, the API, or a parent run being cancelled.
+- **Permanent errors:** a permanent model or tool error, including
+  `ContextWindowExceededError`.
+- **Hooks:** a `session_start`, `user_prompt`, or `pre_model` hook that denies.
+
+Possible persisted statuses are:
+
+```text
+QUEUED
+RUNNING
+AWAITING_INPUT
+COMPLETED
+FAILED
+CANCELLED
+BUDGET_EXHAUSTED
+```
+
+Because every event and checkpoint is stored, an interrupted run can be resumed without
+losing its previous messages or tool results.
+
+## 14. After a run: follow-ups
+
+A run is not necessarily over when it stops:
+
+| Command                           | What it does                                                         |
+|-----------------------------------|----------------------------------------------------------------------|
+| `continue RUN_ID "message"`       | Adds a user message to a completed run and runs it again (`USER_MESSAGE_ADDED`). With a larger budget it also reopens a `budget_exhausted` run. |
+| `steer RUN_ID "message"`          | Queues a message for a running run, applied at its next model turn.  |
+| `cancel RUN_ID`                   | Cancels the run and any unfinished subagents.                        |
+| `mode RUN_ID plan`                | Changes the permission mode (`MODE_CHANGED`).                        |
+| `resume RUN_ID`                   | Continues a run after a crash or restart.                            |
+| `rewind RUN_ID --to-step N`       | Restores files and the conversation to before step N (dry run without `--yes`). History is archived, not deleted (`REWOUND`). |
+| `status RUN_ID`                   | Shows tokens, cost, cache-hit rate, steps against budget, the task list, and subagents. |
+
+**Subagents.** When the model calls the `agent` tool, the orchestrator creates a child run
+with its own prompt, tools, profile, and a budget capped by what the parent has left. The
+parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
+(`SUBAGENT_FINISHED`), and the child's usage rolls up into the parent. Depth and count are
+limited by `max_depth` and `max_per_run`.
+
+## 15. Other entry points
+
+- **HTTP API:** `agent-harness serve` exposes the same operations and runs in-process queue
+  workers:
+  - Create a run with `POST /runs`, and read it with `GET /runs/{id}`.
+  - Events: `GET /runs/{id}/events`, or live over SSE with `GET /runs/{id}/events/stream`.
+  - Control a run with `POST /runs/{id}/cancel`, `.../resume`, `.../mode`, and `.../rewind`.
+  - Messages: `POST /runs/{id}/messages` continues a run, and `POST /runs/{id}/steer`
+    steers one that is still running.
+  - Approvals: read with `GET /runs/{id}/approval`, decide with `POST /runs/{id}/approval`.
+  - Usage: `GET /runs/{id}/usage`.
+- **Queue workers:** `agent-harness worker` claims queued runs with leases in SQLite, so
+  several workers can share one database. An expired lease makes the run available to
+  another worker, which resumes it.
+- **`agent-harness doctor --model-profile X`:** a live reachability and tool-call check
+  against a real server.
+- **`agent-harness eval`:** runs scenario evaluations, scripted by default and live with
+  `--live`.
+
+## 16. Programmatic usage
+
+You can use the harness directly from Python:
+
+```python
+import asyncio
+
+from agent_harness.application import build_application
+from agent_harness.domain import Message, Role, RunStatus
 
 
-  async def main() -> None:
-      async with build_application(
-          config_path="models.toml",
-          database_path="agent-harness.sqlite3",
-      ) as app:
-          run = await app.orchestrator.create_run(
-              model_profile="local",
-              messages=[
-                  Message(
-                      role=Role.USER,
-                      content="Inspect the repository and summarize the architecture.",
-                  )
-              ],
-          )
+async def main() -> None:
+    async with build_application(
+        config_path="models.toml",
+        database_path="agent-harness.sqlite3",
+    ) as app:
+        run = await app.orchestrator.create_run(
+            model_profile="local",
+            messages=[
+                Message(
+                    role=Role.USER,
+                    content="Inspect the repository and summarize the architecture.",
+                )
+            ],
+        )
 
-          result = await app.orchestrator.run(run.id)
+        result = await app.orchestrator.run(run.id)
 
-          if result.status is RunStatus.AWAITING_INPUT:
-              approval = await app.orchestrator.pending_approval(run.id)
-              print("Approval required:", approval)
-              return
+        if result.status is RunStatus.AWAITING_INPUT:
+            approval = await app.orchestrator.pending_approval(run.id)
+            print("Approval required:", approval)
+            return
 
-          print("Run status:", result.status)
-          print("Messages:", result.messages)
+        print("Run status:", result.status)
+        print("Messages:", result.messages)
 
 
-  asyncio.run(main())
+asyncio.run(main())
+```
 
-  For an approval-aware application:
+For an approval-aware application:
 
-  result = await app.orchestrator.run(run.id)
+```python
+result = await app.orchestrator.run(run.id)
 
-  if result.status is RunStatus.AWAITING_INPUT:
-      approval = await app.orchestrator.pending_approval(run.id)
+if result.status is RunStatus.AWAITING_INPUT:
+    approval = await app.orchestrator.pending_approval(run.id)
 
-      user_allowed = ask_user(approval)
+    user_allowed = ask_user(approval)
 
-      await app.orchestrator.resolve_approval(
-          run.id,
-          approval.call_id,
-          approved=user_allowed,
-      )
+    await app.orchestrator.resolve_approval(
+        run.id,
+        call_id=approval.call_id,
+        approved=user_allowed,
+        feedback=None,        # optional: returned to the model on denial
+    )
 
-      result = await app.orchestrator.resume(run.id)
+    result = await app.orchestrator.resume(run.id)
+```
 
-  ## 14. Process exit codes
+For a follow-up turn on a completed run:
 
-  The CLI distinguishes run results from process errors:
+```python
+await app.orchestrator.continue_run(run.id, "Now add tests for it.")
+result = await app.orchestrator.run(run.id)
+```
 
-   Condition                                      Exit code
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━
-   Run completed successfully                             0
-  ─────────────────────────────────────────────  ───────────
-   Run failed, cancelled, or budget exhausted             1
-  ─────────────────────────────────────────────  ───────────
-   Invalid configuration or command-line input            2
-  ─────────────────────────────────────────────  ───────────
-   Approval is required                                   3
+## 17. Process exit codes
 
-  The final assistant response is written to stdout. Operational information such as run_id, status, and errors is written to stderr.
+The CLI distinguishes run results from process errors:
 
-  ## Complete flow
+| Condition                                           | Exit code |
+|-----------------------------------------------------|-----------|
+| Run completed successfully                          | 0         |
+| Run failed, cancelled, or budget exhausted          | 1         |
+| Invalid configuration or command-line input         | 2         |
+| Approval is required (the run is `awaiting_input`)  | 3         |
 
-  User command
-      ↓
-  CLI main()
-      ↓
-  Build application
-      ↓
-  Load configuration
-      ↓
-  Create model gateway, tools, and store
-      ↓
-  Create durable run
-      ↓
-  Start orchestrator
-      ↓
-  Call model
-      ↓
-  Model returns text or tool call
-      ├── Text
-      │     ↓
-      │   Complete run
-      │     ↓
-      │   Print final answer
-      │
-      └── Tool call
-            ↓
-          Validate arguments
-            ↓
-          Check policy and guardrails
-            ├── Denied
-            │     ↓
-            │   Return policy error to model
-            │
-            ├── Approval required
-            │     ↓
-            │   Persist paused run
-            │     ↓
-            │   Exit with code 3
-            │
-            └── Allowed
-                  ↓
-                Execute tool
-                  ↓
-                Persist result
-                  ↓
-                Call model again
- 
+The final assistant response is written to stdout. Operational information such as
+`run_id`, status, errors, and `approval_required=...` is written to stderr. `doctor` and
+`eval` exit with 1 when a check or scenario fails.
+
+## Complete flow
+
+```text
+User command (CLI, API, or worker)
+    ↓
+Build application
+    ↓
+Load layered settings, plugins, templates, skills
+    ↓
+Create model gateway, tools, and store
+    ↓
+Create durable run
+(system context, user_prompt hook, version hashes, RUN_CREATED)
+    ↓
+Start orchestrator (RUN_STARTED, session_start hook)
+    ↓
+Step boundary: budgets, pending tools, steering
+    ↓
+pre_model hook → context view (+ summary) → call model
+(retries, fallback, cost)
+    ↓
+Model returns text or tool call
+    ├── Text
+    │     ↓
+    │   stop hook (may continue)
+    │     ↓
+    │   Complete run
+    │     ↓
+    │   Print final answer
+    │
+    └── Tool call
+          ↓
+        Repeated-call check → pre_tool hook
+          ↓
+        Permission rules and mode → risk policy → guardrails
+          ├── Denied
+          │     ↓
+          │   Return policy error to model
+          │
+          ├── Approval required (or plan review)
+          │     ↓
+          │   Persist paused run
+          │     ↓
+          │   Exit with code 3 → approve → resume
+          │
+          └── Allowed
+                ↓
+              Snapshot files → execute tool (validation, timeout, idempotency)
+                ↓
+              post_tool hook → persist result (artifact if large)
+                ↓
+              Next step
+```
