@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from typing import Any
 from os import PathLike
 from pathlib import Path
 
@@ -44,7 +46,17 @@ from .mcp.source import McpToolSource
 from .tool_catalog import ToolCatalog
 from .tool_loading import ToolLoadingPolicy
 from .planning import PlanningPolicy
-from .tool_sources import HttpToolSource, PythonToolSource, ToolSourceError, WebSearchSource
+from .tool_sources import (
+    HttpToolSource,
+    PythonToolSource,
+    ToolSourceError,
+    WebSearchSource,
+    host_policy_from,
+)
+from .access import Quota
+from .mcp.connection import McpError
+from .redaction import RedactingRunStore, RedactingTelemetry, Redactor
+from urllib.parse import urlsplit
 
 
 @dataclass(slots=True)
@@ -54,7 +66,7 @@ class HarnessApplication:
     config: HarnessConfig
     models: ModelGateway
     tools: ToolRuntime
-    store: SQLiteRunStore
+    store: Any  # SQLiteRunStore or PostgresRunStore (same interface)
     orchestrator: AgentOrchestrator
     telemetry: TelemetrySink | None = None
     artifacts: ArtifactStore | None = None
@@ -155,7 +167,9 @@ def build_application(
         + [plugin.skills_dir for plugin in plugins if plugin.skills_dir]
     )
     models = ModelGateway(config)
-    store = SQLiteRunStore(Path(database_path))
+    # Configuration errors surface before any database connection is attempted.
+    memory_path = _memory_path(config, base_path, database_path) if config.memory.enabled else None
+    store = open_run_store(database_path, config)
     memory: SQLiteMemoryStore | None = None
     try:
         artifacts = (
@@ -165,7 +179,7 @@ def build_application(
         )
         memory = (
             SQLiteMemoryStore(
-                base_path / config.memory.database if config.memory.database else Path(database_path),
+                memory_path or _memory_path(config, base_path, database_path),
                 namespace=config.memory.namespace,
             )
             if config.memory.enabled
@@ -213,10 +227,14 @@ def build_application(
         agent_sources = [(agent, base_path) for agent in config.agents] + [
             (agent, plugin.root) for plugin in plugins for agent in plugin.agents
         ]
+        redactor = (Redactor(config.redaction.patterns) if config.redaction.enabled else None)
+        if redactor is not None and telemetry is not None:
+            telemetry = RedactingTelemetry(telemetry, redactor)
         orchestrator = AgentOrchestrator(
             models=models,
             tools=tool_runtime,
-            store=store,
+            # Events are masked for secrets on the way into the store.
+            store=RedactingRunStore(store, redactor) if redactor is not None else store,
             settings=settings,
             context=BudgetedContextBuilder(context_limits, policy=context_policy),
             fallbacks=models.fallback_profiles,
@@ -274,10 +292,62 @@ def build_application(
         raise
 
 
+def _host_check(policy: Any) -> Any:
+    if policy is None:
+        return None
+
+    def check(url: str) -> None:
+        host = urlsplit(url).hostname or ""
+        if not policy(host):
+            raise McpError(f"outbound HTTP to {host!r} is not in [network] allowed_hosts")
+
+    return check
+
+
+def quotas_from_config(config: HarnessConfig) -> dict[str, Quota]:
+    return {
+        q.tenant: Quota(q.tenant, q.max_runs_per_day, q.max_tokens_per_day,
+                        q.max_cost_usd_per_day, q.max_concurrent_runs)
+        for q in config.quotas
+    }
+
+
+def _is_postgres_url(value: str) -> bool:
+    return value.startswith(("postgresql://", "postgres://"))
+
+
+def open_run_store(database: str | PathLike[str], config: HarnessConfig) -> Any:
+    """SQLite by default; Postgres for a postgresql:// URL or ``[storage] url_env``."""
+
+    target = str(database)
+    if not _is_postgres_url(target) and config.storage.url_env:
+        from_env = os.environ.get(config.storage.url_env, "")
+        if from_env:
+            target = from_env
+    if _is_postgres_url(target):
+        from .persistence.postgres import PostgresRunStore
+
+        try:
+            return PostgresRunStore(target)
+        except RuntimeError as exc:
+            raise ConfigError(str(exc)) from exc
+    return SQLiteRunStore(Path(target))
+
+
+def _memory_path(config: HarnessConfig, base_path: Path, database: str | PathLike[str]) -> Path:
+    if config.memory.database:
+        return base_path / config.memory.database
+    if _is_postgres_url(str(database)) or config.storage.url_env:
+        raise ConfigError("long-term memory uses SQLite: set [memory] database = \"memory.sqlite3\"")
+    return Path(database)
+
+
 def _load_tool_sources(
-    config: HarnessConfig, runtime: ToolRuntime, store: SQLiteRunStore, base_path: Path
+    config: HarnessConfig, runtime: ToolRuntime, store: Any, base_path: Path
 ) -> tuple[ToolCatalog, list[McpToolSource]]:
     """Attach config-declared tool sources, then sync the persistent catalog."""
+
+    host_policy = host_policy_from(config.network.allowed_hosts if config.network.restrict_egress else None)
 
     try:
         for source in config.tool_sources:
@@ -296,7 +366,7 @@ def _load_tool_sources(
                     risk=ToolRisk(source.risk) if source.risk else None,
                     trust=ToolTrust(source.trust),
                     timeout_seconds=source.timeout_seconds,
-                ).load(runtime)
+                ).load(runtime, host_policy=host_policy)
         if config.web_search.enabled:
             if config.web_search.provider != "tavily":
                 raise ConfigError("web_search.provider must be 'tavily'")
@@ -306,7 +376,7 @@ def _load_tool_sources(
                 max_results=config.web_search.max_results,
                 search_depth=config.web_search.search_depth,
                 timeout_seconds=config.web_search.timeout_seconds,
-            ).load(runtime)
+            ).load(runtime, host_policy=host_policy)
     except (ToolSourceError, ValueError, TypeError) as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -315,7 +385,7 @@ def _load_tool_sources(
     for server in config.mcp_servers:
         if not server.enabled:
             continue
-        mcp_source = McpToolSource(server)
+        mcp_source = McpToolSource(server, host_check=_host_check(host_policy))
         # Until the server is synced, its tools come from the catalog (last sync).
         mcp_source.register(runtime, catalog.cached_specs(server.source))
         mcp_sources.append(mcp_source)

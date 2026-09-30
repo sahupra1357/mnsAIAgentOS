@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import time
+from agent_harness.secrets import resolve_secret
+
 from dataclasses import replace
 from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Mapping
 
@@ -197,18 +199,17 @@ class OpenAICompatibleClient:
         if json_body:
             headers["Content-Type"] = "application/json"
         if self._profile.api_key_env:
-            api_key = self._environ.get(self._profile.api_key_env)
+            api_key = resolve_secret(self._profile.api_key_env, self._environ)
             if not api_key:
                 raise ModelConfigurationError(
-                    f"credential environment variable {self._profile.api_key_env!r} is not set"
+                    f"credential {_describe_ref(self._profile.api_key_env)} is not set"
                 )
             headers["Authorization"] = f"Bearer {api_key}"
         for header, env_name in self._profile.headers_env.items():
-            value = self._environ.get(env_name)
+            value = resolve_secret(env_name, self._environ)
             if not value:
                 raise ModelConfigurationError(
-                    f"credential environment variable {env_name!r} for header "
-                    f"{header!r} is not set"
+                    f"credential {_describe_ref(env_name)} for header {header!r} is not set"
                 )
             headers[header] = value
         return headers
@@ -556,3 +557,11 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
         if key.casefold() == expected and value:
             return value
     return None
+
+
+def _describe_ref(ref: str) -> str:
+    """Name a credential reference in errors (plain names keep the original wording)."""
+
+    if ref.startswith("file:"):
+        return f"secret file {ref[5:]!r}"
+    return f"environment variable {ref[4:] if ref.startswith('env:') else ref!r}"

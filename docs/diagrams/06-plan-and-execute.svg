@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 960" width="1500" height="960" font-family="Helvetica, Arial, sans-serif">
+<rect width="1500" height="960" fill="#ffffff"/>
+<text x="40" y="50" font-size="30" fill="#1e1e1e" font-weight="bold"><tspan x="40" dy="0">Plan-and-execute: the orchestrator owns and drives the plan</tspan></text>
+<g class="node" id="n-task"><rect x="40" y="90" width="250" height="90" rx="12" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="165.0" y="130.1">Task + planner</tspan><tspan x="165.0" y="152.6">instructions</tspan></text></g>
+<g class="edge" id="e-a1"><polyline points="290,135 340,135" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="340,135 329.2,140.2 329.2,129.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-explore"><rect x="340" y="90" width="260" height="90" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="470.0" y="130.1">Explore</tspan><tspan x="470.0" y="152.6">(read-only tools only)</tspan></text></g>
+<g class="edge" id="e-a2"><polyline points="600,135 650,135" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="650,135 639.2,140.2 639.2,129.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-create"><rect x="650" y="90" width="260" height="90" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="780.0" y="130.1">create_plan</tspan><tspan x="780.0" y="152.6">goal + steps</tspan></text></g>
+<g class="edge" id="e-a3"><polyline points="910,135 960,135" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="960,135 949.2,140.2 949.2,129.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-valid"><polygon points="1110.0,70 1260,135.0 1110.0,200 960,135.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1110.0" y="130.6">valid? ids, deps,</tspan><tspan x="1110.0" y="150.6">no cycles, agents</tspan></text></g>
+<g class="edge" id="e-invalid"><polyline points="1260,135 1320,135 1320,60 780,60 780,90" fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="8 6"/><polygon points="780,90 774.8,79.2 785.2,79.2" fill="#ef4444"/></g>
+<g class="node" id="n-stored"><rect x="1000" y="250" width="260" height="80" rx="12" fill="#c3fae8" stroke="#22c55e" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1130.0" y="285.1">PLAN_CREATED</tspan><tspan x="1130.0" y="307.6">plan saved on the run</tspan></text></g>
+<g class="edge" id="e-a4"><polyline points="1110,200 1110,250" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1110,250 1104.8,239.2 1115.2,239.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-loop"><rect x="560" y="250" width="360" height="90" rx="12" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="740.0" y="290.1">Orchestrator picks</tspan><tspan x="740.0" y="312.6">ready steps (deps done)</tspan></text></g>
+<g class="edge" id="e-a5"><polyline points="1000,290 920,290" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="920,290 930.8,284.8 930.8,295.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-agents"><rect x="40" y="420" width="440" height="120" rx="12" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="260.0" y="465.6">Agent steps, ready together</tspan><tspan x="260.0" y="485.6">child runs started by the orchestrator</tspan><tspan x="260.0" y="505.6">IN PARALLEL (budget split)</tspan></text></g>
+<g class="edge" id="e-a_agents"><polyline points="620,340 300,420" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="300,420 309.2,412.3 311.7,422.4" fill="#1e1e1e"/></g>
+<g class="node" id="n-child1"><rect x="40" y="590" width="200" height="70" rx="12" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="140.0" y="620.0">researcher</tspan><tspan x="140.0" y="642.5">child run</tspan></text></g>
+<g class="node" id="n-child2"><rect x="280" y="590" width="200" height="70" rx="12" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="380.0" y="620.0">writer</tspan><tspan x="380.0" y="642.5">child run</tspan></text></g>
+<g class="edge" id="e-a_c1"><polyline points="140,540 140,590" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="140,590 134.8,579.2 145.2,579.2" fill="#1e1e1e"/></g>
+<g class="edge" id="e-a_c2"><polyline points="380,540 380,590" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="380,590 374.8,579.2 385.2,579.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-results"><rect x="40" y="720" width="440" height="90" rx="12" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="260.0" y="760.0">Results collected (plan outbox)</tspan><tspan x="260.0" y="782.5">no model turn needed</tspan></text></g>
+<g class="edge" id="e-a_r1"><polyline points="140,660 140,720" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="140,720 134.8,709.2 145.2,709.2" fill="#1e1e1e"/></g>
+<g class="edge" id="e-a_r2"><polyline points="380,660 380,720" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="380,720 374.8,709.2 385.2,709.2" fill="#1e1e1e"/></g>
+<g class="edge" id="e-a_back"><polyline points="480,765 510,765 510,315 560,315" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="560,315 549.2,320.2 549.2,309.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-main"><rect x="560" y="420" width="420" height="120" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="770.0" y="465.6">Main-model step</tspan><tspan x="770.0" y="485.6">&quot;[Plan] Execute step ...&quot;</tspan><tspan x="770.0" y="505.6">update_plan or a final answer</tspan></text></g>
+<g class="edge" id="e-a_main"><polyline points="760,340 760,420" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="760,420 754.8,409.2 765.2,409.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-failed"><rect x="1040" y="420" width="420" height="120" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1250.0" y="465.6">Step failed</tspan><tspan x="1250.0" y="485.6">&quot;[Plan] ... failed&quot; -&gt; revise_plan</tspan><tspan x="1250.0" y="505.6">(at most max_replans)</tspan></text></g>
+<g class="edge" id="e-a_fail"><polyline points="980,480 1040,480" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1040,480 1029.2,485.2 1029.2,474.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-revise"><rect x="1040" y="720" width="420" height="90" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1250.0" y="760.0">revise_plan</tspan><tspan x="1250.0" y="782.5">completed steps are kept</tspan></text></g>
+<g class="edge" id="e-a_rev"><polyline points="1250,540 1250,720" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1250,720 1244.8,709.2 1255.2,709.2" fill="#1e1e1e"/></g>
+<g class="edge" id="e-a_rev_back"><polyline points="1040,765 1010,765 1010,330 920,330" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="920,330 930.8,324.8 930.8,335.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-final"><rect x="560" y="720" width="420" height="90" rx="12" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="770.0" y="760.0">All steps finished</tspan><tspan x="770.0" y="782.5">-&gt; final answer -&gt; completed</tspan></text></g>
+<g class="edge" id="e-a_final"><polyline points="760,540 760,720" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="760,720 754.8,709.2 765.2,709.2" fill="#1e1e1e"/></g>
+<text x="40" y="876" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">Plans are stored on the run with plan_* events. Approvals inside a child pause the parent; a crash resumes at the same step.</tspan></text>
+<rect x="993.46" y="47.0" width="218.08" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1102.5" y="65.6">invalid: error to model</tspan></text>
+<rect x="1090.56" y="212.0" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1110.0" y="230.6">yes</tspan></text>
+<rect x="404.72" y="367.0" width="110.56" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="460.0" y="385.6">agent steps</tspan></text>
+<rect x="713.68" y="367.0" width="92.64000000000001" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="760.0" y="385.6">own steps</tspan></text>
+<rect x="977.12" y="467.0" width="65.76" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1010.0" y="485.6">failed</tspan></text>
+<rect x="718.16" y="617.0" width="83.68" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="760.0" y="635.6">all done</tspan></text>
+</svg>

@@ -6,10 +6,13 @@ Serve it with any ASGI server (``agent-harness serve`` uses uvicorn from the
 optional ``[api]`` extra), which can also host in-process workers through the
 ASGI lifespan protocol.
 
-Endpoints (all JSON; every route except ``/healthz`` requires
-``Authorization: Bearer <token>`` unless auth was explicitly disabled):
+Endpoints (all JSON; every route except ``/healthz`` and ``/readyz`` requires
+``Authorization: Bearer <key>`` unless auth was explicitly disabled). Keys map to
+a principal with a tenant and a role (viewer < operator < admin; see
+``agent_harness.access``); a principal sees only its tenant's runs:
 
-    GET  /healthz
+    GET  /healthz                   liveness
+    GET  /readyz                    store reachable, schema version
     GET  /profiles
     GET  /templates
     POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?, "mode"?,
@@ -33,13 +36,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import hmac
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 from urllib.parse import parse_qs
 
+from agent_harness.access import Principal, PrincipalDirectory, Quota, QuotaExceeded, check_quota
+from agent_harness.access import Role as AccessRole
 from agent_harness.config import ConfigError, HarnessConfig
 from agent_harness.domain import (
     ArtifactStore,
@@ -95,9 +99,15 @@ class HarnessAPI:
         shutdown_grace_seconds: float = 10.0,
         artifacts: ArtifactStore | None = None,
         templates: Mapping[str, Template] | None = None,
+        principals: PrincipalDirectory | None = None,
+        quotas: Mapping[str, Quota] | None = None,
     ) -> None:
         if auth_token is not None and len(auth_token) < 16:
             raise ValueError("API auth token must be at least 16 characters")
+        self._principals = principals or PrincipalDirectory((), legacy_token=auth_token)
+        if principals is not None and auth_token is not None:
+            self._principals = PrincipalDirectory(principals._keys, legacy_token=auth_token)
+        self._quotas = dict(quotas or {})
         self._orchestrator = orchestrator
         self._store = store
         self._queue = queue
@@ -169,7 +179,10 @@ class HarnessAPI:
         if path == "/healthz" and method == "GET":
             await _json(send, 200, {"ok": True})
             return
-        self._authorize(scope)
+        if path == "/readyz" and method == "GET":
+            await self._ready(send)
+            return
+        principal = self._authorize(scope)
         query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
 
         if path == "/profiles" and method == "GET":
@@ -182,7 +195,8 @@ class HarnessAPI:
             })
             return
         if path == "/runs" and method == "POST":
-            await _json(send, 202, await self._create_run(await self._body(receive)))
+            _require(principal, AccessRole.OPERATOR)
+            await _json(send, 202, await self._create_run(await self._body(receive), principal))
             return
         artifact = _ARTIFACT_ROUTE.match(path)
         if artifact is not None and method == "GET":
@@ -192,37 +206,54 @@ class HarnessAPI:
         if match is None:
             raise ApiError(404, "not found")
         run_id, rest = match["run_id"], match["rest"] or ""
+        _require(principal, AccessRole.VIEWER if method == "GET"
+                 else AccessRole.ADMIN if rest in {"/mode", "/rewind"} else AccessRole.OPERATOR)
+        owned = await self._store.get_run(run_id)
+        if owned is None or not principal.can_access(owned.tenant):
+            raise ApiError(404, f"unknown run: {run_id}")  # other tenants' runs do not exist
         routes: dict[tuple[str, str], Callable[[], Awaitable[None]]] = {
             ("GET", ""): lambda: self._send_run(send, run_id),
             ("GET", "/events"): lambda: self._send_events(send, run_id, query),
             ("GET", "/events/stream"): lambda: self._stream_events(send, run_id, query),
             ("POST", "/cancel"): lambda: self._cancel(send, run_id),
-            ("POST", "/messages"): lambda: self._continue(send, run_id, receive),
+            ("POST", "/messages"): lambda: self._continue(send, run_id, receive, owned.tenant),
             ("POST", "/steer"): lambda: self._steer(send, run_id, receive),
             ("GET", "/usage"): lambda: self._send_usage(send, run_id),
-            ("POST", "/mode"): lambda: self._set_mode(send, run_id, receive),
+            ("POST", "/mode"): lambda: self._set_mode(send, run_id, receive, principal),
             ("POST", "/rewind"): lambda: self._rewind(send, run_id, receive),
             ("POST", "/resume"): lambda: self._resume(send, run_id),
             ("GET", "/approval"): lambda: self._send_approval(send, run_id),
-            ("POST", "/approval"): lambda: self._decide(send, run_id, receive),
+            ("POST", "/approval"): lambda: self._decide(send, run_id, receive, principal),
         }
         handler = routes.get((method, rest))
         if handler is None:
             raise ApiError(404 if not any(r == rest for _, r in routes) else 405, "not found")
         await handler()
 
-    def _authorize(self, scope: Scope) -> None:
-        if self._token is None:
-            return
+    def _authorize(self, scope: Scope) -> Principal:
+        if not self._principals.enabled:
+            return Principal("anonymous", "*", AccessRole.ADMIN)  # auth explicitly disabled
         header = next(
             (value for name, value in scope.get("headers", []) if name.lower() == b"authorization"),
             b"",
         ).decode("latin-1")
         scheme, _, supplied = header.partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(
-            supplied.strip().encode(), self._token.encode()
-        ):
+        principal = self._principals.resolve(supplied.strip()) if scheme.lower() == "bearer" else None
+        if principal is None:
             raise ApiError(401, "missing or invalid bearer token")
+        return principal
+
+    async def _ready(self, send: Send) -> None:
+        try:
+            await self._store.get_run("readyz-probe")
+            version = getattr(self._store, "schema_version", None)
+            payload: dict[str, Any] = {"ok": True}
+            if callable(version):
+                payload["schema_version"] = version()
+        except Exception as exc:  # any store failure means not ready
+            await _json(send, 503, {"ok": False, "error": type(exc).__name__})
+            return
+        await _json(send, 200, payload)
 
     async def _body(self, receive: Receive) -> dict[str, Any]:
         chunks: list[bytes] = []
@@ -261,7 +292,7 @@ class HarnessAPI:
             "routes": dict(self._config.routes),
         }
 
-    async def _create_run(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def _create_run(self, body: dict[str, Any], principal: Principal) -> dict[str, Any]:
         unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode", "template_args",
                                "planning"}
         if unknown:
@@ -282,6 +313,11 @@ class HarnessAPI:
             raise ApiError(400, "model_profile must be a string")
         profile = self._config.resolve_model_name(requested)
         route = requested if requested and requested != profile else None
+        tenant = principal.creation_tenant
+        try:
+            await check_quota(self._store, self._quotas, tenant)
+        except QuotaExceeded as exc:
+            raise ApiError(429, str(exc)) from exc
         messages = [Message(role=Role.USER, content=prompt)]
         if system:
             messages.insert(0, Message(role=Role.SYSTEM, content=system))
@@ -294,6 +330,8 @@ class HarnessAPI:
             mode=_mode(body.get("mode")),
             template={"name": template.name, "sha256": template.sha256} if template else None,
             planning=_optional_bool(body.get("planning"), "planning"),
+            tenant=tenant,
+            created_by=principal.name,
         )
         await self._queue.enqueue(run.id)
         return {"id": run.id, "status": run.status.value, "model_profile": profile}
@@ -393,7 +431,11 @@ class HarnessAPI:
         )
         await send({"type": "http.response.body", "body": data})
 
-    async def _continue(self, send: Send, run_id: str, receive: Receive) -> None:
+    async def _continue(self, send: Send, run_id: str, receive: Receive, tenant: str) -> None:
+        try:
+            await check_quota(self._store, self._quotas, tenant, new_run=False)
+        except QuotaExceeded as exc:
+            raise ApiError(429, str(exc)) from exc
         body = await self._body(receive)
         unknown = set(body) - {"content", "budget"}
         if unknown:
@@ -442,7 +484,7 @@ class HarnessAPI:
         ]
         await _json(send, 200, payload)
 
-    async def _set_mode(self, send: Send, run_id: str, receive: Receive) -> None:
+    async def _set_mode(self, send: Send, run_id: str, receive: Receive, principal: Principal) -> None:
         body = await self._body(receive)
         if set(body) != {"mode"}:
             raise ApiError(400, 'body must be {"mode": ...}')
@@ -450,7 +492,7 @@ class HarnessAPI:
         target = _mode(body["mode"])
         assert target is not None
         try:
-            run = await self._orchestrator.set_mode(run_id, target)
+            run = await self._orchestrator.set_mode(run_id, target, actor=principal.name)
         except ValueError as exc:
             raise ApiError(409, str(exc)) from exc
         await _json(send, 200, {"id": run.id, "mode": run.mode.value})
@@ -507,7 +549,7 @@ class HarnessAPI:
             raise ApiError(404, "run has no pending approval")
         await _json(send, 200, approval)
 
-    async def _decide(self, send: Send, run_id: str, receive: Receive) -> None:
+    async def _decide(self, send: Send, run_id: str, receive: Receive, principal: Principal) -> None:
         body = await self._body(receive)
         unknown = set(body) - {"call_id", "decision", "feedback", "mode"}
         if unknown:
@@ -532,11 +574,18 @@ class HarnessAPI:
                 approved=decision == "allow",
                 feedback=feedback,
                 mode=_mode(body.get("mode")),
+                actor=principal.name,
             )
         except ValueError as exc:
             raise ApiError(409, str(exc)) from exc
         await self._queue.enqueue(run_id)
         await _json(send, 202, {"id": run.id, "status": run.status.value, "decision": decision})
+
+
+def _require(principal: Principal, role: AccessRole) -> None:
+    if principal.role < role:
+        raise ApiError(403, f"this key's role ({principal.role.name.lower()}) cannot do that; "
+                            f"{role.name.lower()} is required")
 
 
 def _mode(value: Any) -> PermissionMode | None:
@@ -650,6 +699,8 @@ def create_api(
 ) -> HarnessAPI:
     """Build the API for a :class:`~agent_harness.application.HarnessApplication`."""
 
+    from agent_harness.access import api_keys_from_config
+    from agent_harness.application import quotas_from_config
     from agent_harness.coding import CODING_AGENT_SYSTEM_PROMPT
 
     if worker_count < 0:
@@ -674,4 +725,6 @@ def create_api(
         workers=workers,
         artifacts=app.artifacts,
         templates=app.templates,
+        principals=PrincipalDirectory(api_keys_from_config(app.config.api_keys), legacy_token=auth_token),
+        quotas=quotas_from_config(app.config),
     )

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from agent_harness.coding.config import CodingAgentConfig, parse_coding_config
 from agent_harness.domain import ToolRisk
+from agent_harness.secrets import is_secret_ref
 from agent_harness.mcp.config import McpServerConfig
 
 
@@ -161,8 +162,10 @@ def _validated_headers_env(raw: Mapping[str, str]) -> dict[str, str]:
             )
         if folded in seen:
             raise ConfigError(f"duplicate header in headers_env: {header!r}")
-        if not isinstance(env_name, str) or not _ENV_NAME.fullmatch(env_name):
-            raise ConfigError(f"headers_env[{header!r}] must name an environment variable")
+        if not is_secret_ref(env_name):
+            raise ConfigError(
+                f"headers_env[{header!r}] must name an environment variable (or env:NAME / file:/path)"
+            )
         seen.add(folded)
         validated[header] = env_name
     return validated
@@ -325,6 +328,40 @@ class SummarizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class QuotaConfig:
+    """One ``[[quotas]]`` entry; ``tenant = "*"`` applies to tenants without their own."""
+
+    tenant: str
+    max_runs_per_day: int | None = None
+    max_tokens_per_day: int | None = None
+    max_cost_usd_per_day: float | None = None
+    max_concurrent_runs: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkConfig:
+    """Egress control for HTTP tools, web search, and MCP over HTTP (not model endpoints)."""
+
+    restrict_egress: bool = False
+    allowed_hosts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RedactionConfig:
+    """Mask secrets in persisted events and telemetry (built-in patterns plus ``patterns``)."""
+
+    enabled: bool = True
+    patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class StorageConfig:
+    """Where runs are stored. ``url_env`` names an env var holding a postgresql:// URL."""
+
+    url_env: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningConfig:
     """Plan-and-execute: the model plans with create_plan, the orchestrator runs the plan."""
 
@@ -423,6 +460,11 @@ class HarnessConfig:
     mcp_servers: tuple[McpServerConfig, ...] = ()
     tool_loading: ToolLoadingConfig = field(default_factory=ToolLoadingConfig)
     planning: PlanningConfig = field(default_factory=PlanningConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    api_keys: tuple[Mapping[str, str], ...] = ()
+    quotas: tuple[QuotaConfig, ...] = ()
+    network: NetworkConfig = field(default_factory=NetworkConfig)
+    redaction: RedactionConfig = field(default_factory=RedactionConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     templates: TemplatesConfig = field(default_factory=TemplatesConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
@@ -567,6 +609,11 @@ def load_config(
         mcp_servers=_parse_mcp_servers(raw.get("mcp_servers")),
         tool_loading=_parse_section(raw, "tool_loading", ToolLoadingConfig),
         planning=_parse_section(raw, "planning", PlanningConfig),
+        storage=_parse_section(raw, "storage", StorageConfig),
+        api_keys=_parse_api_keys(raw.get("api")),
+        quotas=_parse_quotas(raw.get("quotas")),
+        network=_parse_section(raw, "network", NetworkConfig),
+        redaction=_parse_redaction(raw.get("redaction")),
         skills=_parse_section(raw, "skills", SkillsConfig),
         templates=_parse_section(raw, "templates", TemplatesConfig),
         plugins=_parse_section(raw, "plugins", PluginsConfig),
@@ -689,6 +736,64 @@ def _parse_mcp_servers(raw: Any) -> tuple[McpServerConfig, ...]:
         names.add(server.name)
         servers.append(server)
     return tuple(servers)
+
+
+def _parse_api_keys(raw: Any) -> tuple[Mapping[str, str], ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or set(raw) - {"keys"}:
+        raise ConfigError("[api] may only contain keys = [...] ([[api.keys]] tables)")
+    keys = raw.get("keys", [])
+    if not isinstance(keys, list) or not all(isinstance(item, dict) for item in keys):
+        raise ConfigError("api.keys must be an array of tables ([[api.keys]])")
+    allowed = {"name", "tenant", "role", "key_sha256", "key_env"}
+    parsed = []
+    for item in keys:
+        unknown = set(item) - allowed
+        if unknown:
+            raise ConfigError(f"unknown fields in api.keys: {', '.join(sorted(unknown))}")
+        if not all(isinstance(value, str) for value in item.values()):
+            raise ConfigError("api.keys values must be strings")
+        if not item.get("name") or not (item.get("key_sha256") or item.get("key_env")):
+            raise ConfigError("each [[api.keys]] needs a name and key_sha256 or key_env")
+        if item.get("role", "viewer") not in {"viewer", "operator", "admin"}:
+            raise ConfigError("api.keys.role must be viewer, operator, or admin")
+        parsed.append(MappingProxyType(dict(item)))
+    return tuple(parsed)
+
+
+def _parse_quotas(raw: Any) -> tuple[QuotaConfig, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ConfigError("quotas must be an array of tables ([[quotas]])")
+    quotas = []
+    for item in raw:
+        unknown = set(item) - set(QuotaConfig.__dataclass_fields__)
+        if unknown:
+            raise ConfigError(f"unknown fields in quotas: {', '.join(sorted(unknown))}")
+        if not isinstance(item.get("tenant"), str) or not item["tenant"]:
+            raise ConfigError("each [[quotas]] needs a tenant")
+        values = dict(item)
+        for key in ("max_runs_per_day", "max_tokens_per_day", "max_concurrent_runs"):
+            if key in values and (not isinstance(values[key], int) or values[key] < 0):
+                raise ConfigError(f"quotas.{key} must be a non-negative integer")
+        if "max_cost_usd_per_day" in values:
+            if not isinstance(values["max_cost_usd_per_day"], (int, float)):
+                raise ConfigError("quotas.max_cost_usd_per_day must be a number")
+            values["max_cost_usd_per_day"] = float(values["max_cost_usd_per_day"])
+        quotas.append(QuotaConfig(**values))
+    return tuple(quotas)
+
+
+def _parse_redaction(raw: Any) -> RedactionConfig:
+    section = _parse_section({"redaction": raw} if raw is not None else {}, "redaction", RedactionConfig)
+    for pattern in section.patterns:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ConfigError(f"redaction.patterns: invalid regex {pattern!r}: {exc}") from exc
+    return section
 
 
 def _parse_hooks(raw: Any) -> tuple[HookConfig, ...]:

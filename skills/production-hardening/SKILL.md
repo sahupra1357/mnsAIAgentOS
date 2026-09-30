@@ -41,30 +41,38 @@ description: Production concerns — versioned schema migrations, the RunStore c
   principal.
 - **Quotas:** `[[quotas]] tenant, max_runs_per_day, max_tokens_per_day,
   max_cost_usd_per_day, max_concurrent_runs`.
-  - They are checked when a run is created and when a worker claims one.
-  - Usage is aggregated from the store (runs created today, their tokens and cost, and
-    the runs currently active).
+  - They are checked when a run is created and when one is continued (API: HTTP 429;
+    CLI: exit code 2) over a rolling 24-hour window.
+  - Usage is aggregated from indexed run columns (tenant, status, created_at, tokens,
+    cost), not from JSON.
+  - They are not re-checked on worker claim or in the middle of a run: per-run budgets
+    bound in-flight work.
 
 ## Secrets and network (9b)
 
 - **Secret references:** `SecretResolver` resolves `env:NAME` and `file:/path`
   references. Every `*_env` field keeps working.
-- **Egress:** `[network] allowed_hosts = ["api.tavily.com", "*.example.com"]` applies to
-  HTTP tools, web search, and MCP over HTTP. An empty list means no outbound HTTP for
-  tools; model endpoints are not affected. A violation is a permanent tool error naming
-  the host.
+- **Egress:** `[network] restrict_egress = true` plus `allowed_hosts = ["api.tavily.com",
+  "*.example.com"]` applies to HTTP tools, web search, and MCP over HTTP.
+  - With `restrict_egress` and an empty list, tools make no outbound HTTP.
+  - Model endpoints are not affected.
+  - A violation is a tool error naming the host.
 
 ## Data governance (9c)
 
 - **Redaction:** `[redaction]` holds built-in patterns (bearer tokens, `sk-…`/`tvly-…`
   style keys, AWS keys, private-key blocks) plus user regexes.
-  - It is applied to event payloads, telemetry, and tool output before they are
-    persisted or sent to telemetry.
-  - The model still sees the original output within the run, because redaction protects
-    storage, not reasoning.
-- **Retention:** `agent-harness gc --older-than DAYS [--yes]` purges terminal runs older
-  than the cutoff: their events, queue, steering, and idempotency rows, and their
-  artifacts. Without `--yes` it is a dry run.
+  - It is applied to event payloads, run errors, and telemetry attributes by wrapping the
+    store the orchestrator writes through (`RedactingRunStore`).
+  - The conversation snapshot the model resumes from is not rewritten: the model needs
+    its own context, so protect the database at rest.
+- **Retention:** `agent-harness gc --older-than-days DAYS [--yes]` purges terminal runs
+  older than the cutoff: their events, queue, steering, and idempotency rows.
+  - Without `--yes` it is a dry run.
+  - Events stay append-only except inside the purge transaction: a guard row in SQLite, a
+    `SET LOCAL` flag in Postgres.
+  - Artifacts are content-addressed and may be shared, so they are left for a separate
+    cleanup.
 - **Encryption at rest:** not implemented in code. Use volume encryption, or Postgres
   with encrypted storage. This is documented, not faked.
 

@@ -1,0 +1,293 @@
+<title>Harness Flow Tour</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: a workbench. Diagram stage on the left, a step console on the right (stacked on phones). */
+:root {
+  --bg: #f5f4f9;
+  --panel: #ffffff;
+  --fg: #1d1a2b;
+  --muted: #5b566f;
+  --line: #e1deec;
+  --accent: #6d28d9;
+  --accent-soft: #efe9fd;
+  --tour: #e11d48;
+  --tour-soft: #fde7ec;
+  --stage-edge: #e1deec;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #13111b; --panel: #1c1928; --fg: #ecebf4; --muted: #a8a3bf; --line: #2f2a42;
+    --accent: #b197fc; --accent-soft: #2a2341; --tour: #fb7185; --tour-soft: #3b1a25;
+    --stage-edge: #3a3452; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #13111b; --panel: #1c1928; --fg: #ecebf4; --muted: #a8a3bf; --line: #2f2a42;
+  --accent: #b197fc; --accent-soft: #2a2341; --tour: #fb7185; --tour-soft: #3b1a25;
+  --stage-edge: #3a3452; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 1480px; margin: 0 auto; padding-inline: 16px; padding-block: 20px 40px; display: flex; flex-direction: column; gap: 16px; }
+
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+h1 { margin: 0; font-size: clamp(1.35rem, 2.4vw, 1.8rem); font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; }
+h1 code { font-family: var(--font-mono); font-weight: 500; color: var(--accent); }
+.lede { margin: 0; color: var(--muted); max-width: 62ch; }
+.keys { color: var(--muted); font-size: 13px; }
+kbd { font-family: var(--font-mono); font-size: 12px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--panel); color: var(--fg); }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid var(--line); }
+.tab { appearance: none; border: 0; background: none; color: var(--muted); font: inherit; font-weight: 500; padding: 10px 14px; border-bottom: 3px solid transparent; margin-bottom: -1px; cursor: pointer; display: inline-flex; gap: 8px; align-items: baseline; }
+.tab:hover { color: var(--fg); }
+.tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.tab .count { font-family: var(--font-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tab:focus-visible, button:focus-visible, select:focus-visible, .steps button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.bench { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+.stage { background: #ffffff; border: 1px solid var(--stage-edge); border-radius: 10px; overflow-x: auto; }
+.stage svg { display: block; width: 100%; height: auto; min-width: 760px; }
+
+.console { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 14px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); min-width: 0; }
+.counter { font-family: var(--font-mono); font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: 0.04em; text-transform: uppercase; }
+.counter b { color: var(--tour); font-weight: 500; }
+.now h2 { margin: 2px 0 6px; font-size: 1.2rem; line-height: 1.3; text-wrap: balance; }
+.now p { margin: 0; color: var(--fg); }
+.events { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 26px; }
+.events .label { font-size: 12px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; margin-right: 2px; }
+.chip { font-family: var(--font-mono); font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+.events .none { font-size: 13px; color: var(--muted); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button.ctl { appearance: none; font: inherit; font-weight: 500; font-size: 14px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 7px; padding: 7px 12px; cursor: pointer; }
+button.ctl:hover { border-color: var(--accent); }
+button.ctl:disabled { opacity: 0.45; cursor: default; border-color: var(--line); }
+button.play { background: var(--tour); border-color: var(--tour); color: #ffffff; min-width: 84px; }
+button.play:hover { filter: brightness(1.08); border-color: var(--tour); }
+.speed { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+select { font: inherit; font-size: 13px; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+
+.progress { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.progress div { height: 100%; width: 0; background: var(--tour); transition: width 0.3s ease; }
+
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: 42vh; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 10px; }
+.steps button { width: 100%; text-align: left; appearance: none; border: 0; background: none; color: var(--muted); font: inherit; font-size: 14px; padding: 5px 8px; border-radius: 6px; cursor: pointer; display: grid; grid-template-columns: 2.2em 1fr; gap: 6px; }
+.steps button .n { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 2px; }
+.steps button:hover { background: var(--accent-soft); color: var(--fg); }
+.steps li.visited button { color: var(--fg); }
+.steps li.current button { background: var(--tour-soft); color: var(--fg); font-weight: 600; }
+.steps li.current .n { color: var(--tour); }
+
+/* Inside the diagram: dim what the tour has not reached, outline the current node. */
+.stage .node, .stage .edge { transition: opacity 0.35s ease; }
+.stage svg.touring .node { opacity: 0.42; }
+.stage svg.touring .node.visited { opacity: 0.9; }
+.stage svg.touring .node.active { opacity: 1; }
+.stage .node.active > rect, .stage .node.active > polygon { stroke: #1e3a8a; stroke-width: 5; }
+.stage .token { pointer-events: none; }
+
+footer { color: var(--muted); font-size: 13px; }
+footer code { font-family: var(--font-mono); font-size: 12px; }
+
+@media (max-width: 1000px) {
+  .bench { grid-template-columns: minmax(0, 1fr); }
+  .console { position: static; }
+  .steps { max-height: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage .node, .progress div { transition: none; }
+}
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>How a run moves through <code>agent_harness</code></h1>
+      <p class="lede">Four guided walkthroughs of the harness. Press Play to follow a run, or step through at your own pace; each step names the events written to the run's log.</p>
+    </div>
+    <p class="keys"><kbd>←</kbd> <kbd>→</kbd> step &nbsp; <kbd>Space</kbd> play or pause</p>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Diagrams" id="tabs"></nav>
+
+  <div class="bench">
+    <div class="stage" id="stage" aria-live="off"></div>
+    <aside class="console" aria-label="Current step">
+      <div class="counter" id="counter"></div>
+      <div class="progress" aria-hidden="true"><div id="bar"></div></div>
+      <div class="now" aria-live="polite">
+        <h2 id="step-title"></h2>
+        <p id="step-detail"></p>
+      </div>
+      <div class="events" id="events"></div>
+      <div class="controls">
+        <button class="ctl" id="prev" type="button" aria-label="Previous step">Back</button>
+        <button class="ctl play" id="play" type="button">Play</button>
+        <button class="ctl" id="next" type="button" aria-label="Next step">Next</button>
+        <label class="speed" for="speed">Speed
+          <select id="speed">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+      </div>
+      <ol class="steps" id="steps"></ol>
+    </aside>
+  </div>
+
+  <footer>Static and self-animating versions of these diagrams live in the repository under <code>docs/diagrams/</code>.</footer>
+</div>
+
+<script>
+const TOURS = __TOURS__;
+const SLUGS = TOURS.map((t) => t.id.replace(/^\d+-/, ""));
+const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const $ = (id) => document.getElementById(id);
+const state = { tour: 0, index: 0, playing: false, speed: 1, timer: null, frame: null };
+let svg = null, token = null;
+
+function renderTabs() {
+  $("tabs").innerHTML = "";
+  TOURS.forEach((tour, i) => {
+    const b = document.createElement("button");
+    b.className = "tab"; b.type = "button"; b.setAttribute("role", "tab");
+    b.id = "tab-" + SLUGS[i];
+    b.setAttribute("aria-selected", String(i === state.tour));
+    b.innerHTML = `<span>${tour.title}</span><span class="count">${tour.steps.length} steps</span>`;
+    b.addEventListener("click", () => loadTour(i, true));
+    $("tabs").appendChild(b);
+  });
+}
+
+function loadTour(i, fromUser) {
+  stop();
+  state.tour = i;
+  const tour = TOURS[i];
+  $("stage").innerHTML = tour.svg;
+  svg = $("stage").querySelector("svg");
+  svg.classList.add("touring");
+  token = svg.querySelector(".token");
+  $("steps").innerHTML = "";
+  tour.steps.forEach((step, n) => {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.innerHTML = `<span class="n">${String(n + 1).padStart(2, "0")}</span><span>${step.title}</span>`;
+    b.addEventListener("click", () => { stop(); go(n, true); });
+    li.appendChild(b);
+    $("steps").appendChild(li);
+  });
+  renderTabs();
+  if (fromUser) { try { history.replaceState(null, "", "#" + SLUGS[i]); } catch (e) {} }
+  go(0, false);
+}
+
+function placeToken(x, y) {
+  token.setAttribute("transform", `translate(${x} ${y})`);
+  token.setAttribute("opacity", "1");
+}
+
+function hideToken() { token.setAttribute("opacity", "0"); }
+
+// Move the dot along one arrow's polyline; it is only visible while moving.
+function travelLeg(points, done) {
+  const lengths = points.slice(1).map((p, k) => Math.hypot(p[0] - points[k][0], p[1] - points[k][1]));
+  const total = lengths.reduce((a, b) => a + b, 0);
+  const duration = Math.min(1800, Math.max(500, total / 0.24)) / state.speed;
+  const start = performance.now();
+  const tick = (now) => {
+    let d = Math.min(1, (now - start) / duration) * total;
+    let k = 0;
+    while (k < lengths.length - 1 && d > lengths[k]) { d -= lengths[k]; k++; }
+    const t = lengths[k] ? Math.min(1, d / lengths[k]) : 1;
+    const a = points[k], b = points[k + 1];
+    placeToken(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+    if (now - start < duration) state.frame = requestAnimationFrame(tick);
+    else { state.frame = null; hideToken(); done(); }
+  };
+  state.frame = requestAnimationFrame(tick);
+}
+
+// Travel each arrow in turn; the dot hides while the path passes through a box.
+function travel(legs, done) {
+  const next = (i) => {
+    if (i >= legs.length) { done(); return; }
+    if (i === 0) travelLeg(legs[0], () => next(1));
+    else state.timer = setTimeout(() => travelLeg(legs[i], () => next(i + 1)), 300 / state.speed);
+  };
+  next(0);
+}
+
+function go(index, animate) {
+  cancelAnimationFrame(state.frame); clearTimeout(state.timer);
+  const tour = TOURS[state.tour];
+  const step = tour.steps[index];
+  state.index = index;
+
+  // The current box goes dark as the dot leaves; the next one lights up on arrival.
+  hideToken();
+  svg.querySelectorAll(".node").forEach((n) => n.classList.remove("active", "visited"));
+  tour.steps.slice(0, index).forEach((s) => svg.querySelector("#n-" + s.node)?.classList.add("visited"));
+
+  $("counter").innerHTML = `Step <b>${String(index + 1).padStart(2, "0")}</b> of ${tour.steps.length}`;
+  $("bar").style.width = ((index + 1) / tour.steps.length * 100) + "%";
+  $("step-title").textContent = step.title;
+  $("step-detail").textContent = step.detail;
+  $("events").innerHTML = step.events.length
+    ? `<span class="label">Events</span>` + step.events.map((e) => `<span class="chip">${e}</span>`).join("")
+    : `<span class="none">No events written at this step.</span>`;
+  [...$("steps").children].forEach((li, n) => {
+    li.classList.toggle("current", n === index);
+    li.classList.toggle("visited", n < index);
+  });
+  $("steps").children[index]?.scrollIntoView({ block: "nearest" });
+  $("prev").disabled = index === 0;
+  $("next").disabled = index === tour.steps.length - 1;
+
+  const arrived = () => {
+    const node = svg.querySelector("#n-" + step.node);
+    node?.classList.remove("visited");
+    node?.classList.add("active");
+    if (state.playing) {
+      if (index < tour.steps.length - 1) state.timer = setTimeout(() => go(index + 1, true), 2600 / state.speed);
+      else { state.playing = false; syncPlay(); }
+    }
+  };
+  if (animate && step.route.length && !reduced) travel(step.route, arrived);
+  else arrived();
+}
+
+function syncPlay() {
+  const last = state.index === TOURS[state.tour].steps.length - 1;
+  $("play").textContent = state.playing ? "Pause" : (last ? "Replay" : "Play");
+}
+function stop() { state.playing = false; cancelAnimationFrame(state.frame); clearTimeout(state.timer); if (svg) syncPlay(); }
+function togglePlay() {
+  if (state.playing) { stop(); return; }
+  state.playing = true; syncPlay();
+  const last = state.index === TOURS[state.tour].steps.length - 1;
+  go(last ? 0 : state.index + 1, !last);
+}
+
+$("play").addEventListener("click", togglePlay);
+$("prev").addEventListener("click", () => { stop(); if (state.index > 0) go(state.index - 1, false); });
+$("next").addEventListener("click", () => { stop(); const n = TOURS[state.tour].steps.length; if (state.index < n - 1) go(state.index + 1, true); });
+$("speed").addEventListener("change", (e) => { state.speed = Number(e.target.value); });
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("select")) return;
+  if (e.key === "ArrowRight") { e.preventDefault(); $("next").click(); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); $("prev").click(); }
+  else if (e.key === " " && !e.target.closest("button")) { e.preventDefault(); togglePlay(); }
+});
+
+const start = Math.max(0, SLUGS.indexOf(location.hash.replace("#", "")));
+renderTabs();
+loadTour(start, false);
+</script>

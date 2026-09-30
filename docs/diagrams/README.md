@@ -14,3 +14,20 @@ Each diagram comes in three formats:
 | Permissions and approval | [svg](02-permissions-approval.svg) | [animated](02-permissions-approval.animated.svg) (18 steps) | How a tool call is decided (hooks, deny/mode/ask/allow rules, risk policy), human approval, plan mode |
 | Subagents | [svg](03-subagents.svg) | [animated](03-subagents.animated.svg) (11 steps) | The `agent` tool: limits, child run, pause and resume, result and usage roll-up |
 | Context summarization | [svg](04-summarization.svg) | [animated](04-summarization.animated.svg) (13 steps) | Context trimming and persisted summarization, the `pre_compact` hook, failure fallback |
+| Tool platform | [svg](05-tool-platform.svg) | [animated](05-tool-platform.animated.svg) (13 steps) | Tool sources (Python, HTTP, web search, MCP), the persistent catalog, operator switches, dynamic loading, untrusted output |
+| Plan and execute | [svg](06-plan-and-execute.svg) | [animated](06-plan-and-execute.animated.svg) (16 steps) | The orchestrator-owned plan: validation, parallel delegated steps, main-model steps, replanning, finishing |
+| API access and tenancy | [svg](07-api-access.svg) | [animated](07-api-access.animated.svg) (12 steps) | Keys, principals, roles, tenant isolation, quotas, queue and workers, redacted store, health |
+
+## Regenerating
+
+All seven diagrams are defined in `tools/generate.py`: boxes, arrows, tour steps, and
+captions. Edit a diagram function there, then run this from the repository root:
+
+```bash
+python docs/diagrams/tools/generate.py docs/diagrams build/tours.json docs/diagrams/tools/page_template.html
+```
+
+This rewrites the `.svg`, `.animated.svg`, and `.excalidraw` files. It also writes
+`build/tours.html`, the interactive walkthrough page, with Play, Step, and speed
+controls.
+

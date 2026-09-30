@@ -244,6 +244,8 @@ class AgentOrchestrator:
         allowed_tools: Sequence[str] | None = None,
         template: Mapping[str, str] | None = None,
         planning: bool | None = None,
+        tenant: str = "default",
+        created_by: str | None = None,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted.
 
@@ -289,7 +291,10 @@ class AgentOrchestrator:
             depth=depth,
             allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
             planning=use_plan,
+            tenant=tenant,
+            created_by=created_by,
         )
+        _validate_identifier(tenant, "tenant")
         recorded_versions = {
             "system_prompt_sha256": system_prompt_sha256(initial_messages),
             "tools_sha256": tools_sha256(tuple(self._tools.specs())),
@@ -309,6 +314,10 @@ class AgentOrchestrator:
         payload["tools"] = {spec.name: spec_sha256(spec) for spec in self._specs_for(run)}
         if use_plan:
             payload["planning"] = True
+        if tenant != "default":
+            payload["tenant"] = tenant
+        if created_by is not None:
+            payload["created_by"] = created_by
         if template is not None:
             payload["template"] = {str(k): str(v) for k, v in template.items()}
         if prompt_hook is not None:
@@ -554,6 +563,7 @@ class AgentOrchestrator:
         approved: bool,
         feedback: str | None = None,
         mode: PermissionMode | str | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
         """Resolve one paused tool call without executing it in this operation.
 
@@ -579,7 +589,7 @@ class AgentOrchestrator:
         if waiting is not None:
             return await self._resolve_child_approval(
                 run, events, waiting, call_id=call_id, approved=approved,
-                feedback=feedback, mode=target_mode,
+                feedback=feedback, mode=target_mode, actor=actor,
             )
         if request is None or request.payload.get("call_id") != call_id:
             raise ValueError("tool call is not awaiting approval")
@@ -594,6 +604,8 @@ class AgentOrchestrator:
             run.started_at += now - request.created_at
         run.status = RunStatus.RUNNING
         resolution: dict[str, Any] = {"call_id": call.id, "tool": call.name, "approved": approved}
+        if actor is not None:
+            resolution["actor"] = actor
         if target_mode is not None:
             resolution["mode"] = target_mode.value
         if feedback is not None:
@@ -674,8 +686,10 @@ class AgentOrchestrator:
             )
         return result
 
-    async def set_mode(self, run_id: str, mode: PermissionMode | str) -> RunRecord:
-        """Change a run's permission mode (recorded as ``mode_changed``)."""
+    async def set_mode(
+        self, run_id: str, mode: PermissionMode | str, *, actor: str | None = None
+    ) -> RunRecord:
+        """Change a run's permission mode (recorded as ``mode_changed``, with the actor)."""
 
         _validate_identifier(run_id, "run_id")
         target = PermissionMode(mode)
@@ -686,7 +700,7 @@ class AgentOrchestrator:
             raise ValueError(f"run is {run.status.value}")
         if run.mode is not target:
             events = list(await self._store.list_events(run_id))
-            await self._change_mode(run, events, target, reason="set by user")
+            await self._change_mode(run, events, target, reason="set by user", actor=actor)
         return run
 
     async def continue_run(
@@ -855,12 +869,13 @@ class AgentOrchestrator:
         approved: bool,
         feedback: str | None,
         mode: PermissionMode | None,
+        actor: str | None = None,
     ) -> RunRecord:
         """Forward a decision to the subagent the run waits on, then unpause it."""
 
         child_id = str(waiting.payload["child_run_id"])
         await self.resolve_approval(
-            child_id, call_id=call_id, approved=approved, feedback=feedback, mode=mode
+            child_id, call_id=call_id, approved=approved, feedback=feedback, mode=mode, actor=actor
         )
         now = self._clock()
         if run.started_at is not None and now > waiting.created_at:
@@ -1673,17 +1688,21 @@ class AgentOrchestrator:
         await self._record_tool_result(run, events, result, attempt=attempt)
 
     async def _change_mode(
-        self, run: RunRecord, events: list[RunEvent], mode: PermissionMode, *, reason: str
+        self, run: RunRecord, events: list[RunEvent], mode: PermissionMode, *, reason: str,
+        actor: str | None = None,
     ) -> None:
         previous = run.mode
         run.mode = mode
+        payload: dict[str, Any] = {"from": previous.value, "to": mode.value, "reason": reason}
+        if actor is not None:
+            payload["actor"] = actor
         await self._checkpoint(
             run,
             events,
             RunEvent(
                 run_id=run.id,
                 type=EventType.MODE_CHANGED,
-                payload={"from": previous.value, "to": mode.value, "reason": reason},
+                payload=payload,
                 step=run.step_count,
                 created_at=self._clock(),
             ),
@@ -1936,6 +1955,8 @@ class AgentOrchestrator:
             parent_call_id=call_id,
             depth=run.depth + 1,
             allowed_tools=definition.tools,
+            tenant=run.tenant,
+            created_by=run.created_by,
         )
         await self._checkpoint(run, events, *extra_events, RunEvent(
             run_id=run.id,

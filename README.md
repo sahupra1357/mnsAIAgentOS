@@ -522,10 +522,34 @@ services you control.
 - **Unloaded tools:** calling a tool that is not loaded returns a message telling the
   model to load it first.
 
+## Production: Storage, Access, Quotas, Security, Deployment
+
+The full guide is in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md), and `deploy/` has a
+compose setup with Postgres, the API, and two workers.
+
+| Concern | What the harness does |
+|---|---|
+| **Storage** | SQLite by default. With `pip install -e '.[postgres]'`, `--database postgresql://...` or `[storage] url_env` uses Postgres. Both run versioned migrations on start, and both pass one conformance suite (`tests/test_store_conformance.py`). |
+| **API access** | `[[api.keys]]`: each key is a principal with a tenant and a role (viewer, operator, or admin). Keys are configured by SHA-256 or read from the environment. Principals only see their tenant's runs, and approvals and mode changes record who acted. |
+| **Quotas** | `[[quotas]]` limits runs, tokens, and cost per tenant over 24 hours, plus concurrent runs. Checked when a run is created or continued (HTTP 429). |
+| **Secrets** | Credential fields accept `NAME`, `env:NAME`, or `file:/run/secrets/name`. |
+| **Egress** | With `[network] restrict_egress = true`, HTTP tools, web search, and MCP over HTTP may only reach `allowed_hosts`. |
+| **Redaction** | On by default. Tokens and keys are masked in persisted events, run errors, and telemetry. |
+| **Retention** | `agent-harness gc --older-than-days N [--yes]` deletes finished runs. |
+| **Health** | `/healthz` (liveness) and `/readyz` (store reachable, schema version). |
+| **Container** | `Dockerfile`: non-root, with the `api` and `postgres` extras. No secrets are baked in. |
+
 ## Architecture Diagrams
 
-Flow diagrams (SVG, plus editable Excalidraw files) are in [`docs/diagrams/`](docs/diagrams/README.md):
-the end-to-end flow, tool permissions and approval, subagents, and context summarization.
+Flow diagrams are in [`docs/diagrams/`](docs/diagrams/README.md), each as a static SVG, a
+self-running animated SVG, and an editable Excalidraw file. They cover:
+- the end-to-end flow;
+- tool permissions and approval;
+- subagents;
+- context summarization;
+- the tool platform;
+- plan-and-execute;
+- API access and tenancy.
 
 ## Context Window
 
