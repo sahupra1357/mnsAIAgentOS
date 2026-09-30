@@ -145,6 +145,46 @@ class StoreContract:
         self.assertFalse(entries["a"].enabled)  # the operator's switch survives a sync
         self.assertFalse(entries["b"].available)  # kept, but no longer provided
 
+    def test_reservations_are_atomic_and_released(self) -> None:
+        from agent_harness.access import Grant
+
+        async def body() -> None:
+            since = utc_now() - timedelta(days=1)
+
+            def one_at_a_time(usage: Any) -> Any:
+                return "busy" if usage.active_runs >= 1 else Grant(tokens=100, cost_usd=1.0)
+
+            # Two admissions race; exactly one wins (the other sees the first's reservation).
+            first, second = await asyncio.gather(
+                self.store.reserve("acme", "q1", since, one_at_a_time),
+                self.store.reserve("acme", "q2", since, one_at_a_time),
+            )
+            self.assertEqual(sorted(isinstance(d, str) for d in (first, second)), [False, True])
+            winner = "q1" if not isinstance(first, str) else "q2"
+            usage = await self.store.tenant_usage("acme", since)
+            self.assertEqual((usage.active_runs, usage.reserved_tokens, usage.reserved_cost_usd), (1, 100, 1.0))
+
+            record = run(winner, "acme")
+            await self.store.create_run(record, created(record))
+            record.consumed_tokens = 30
+            record.status = RunStatus.RUNNING
+            await self.store.save_checkpoint(record, [], expected_version=0)
+            usage = await self.store.tenant_usage("acme", since)
+            self.assertEqual((usage.tokens, usage.reserved_tokens), (30, 70))  # outstanding = ceiling - used
+
+            await self.store.release_reservation(winner)
+            usage = await self.store.tenant_usage("acme", since)
+            self.assertEqual((usage.reserved_tokens, usage.active_runs), (0, 1))  # the run itself is active
+
+            # Subagents are not counted twice: their parent's consumption includes them.
+            child = RunRecord(id="child", model_profile="p", messages=[Message(Role.USER, "x")],
+                              tenant="acme", parent_run_id=winner, depth=1)
+            await self.store.create_run(child, created(child))
+            child.consumed_tokens = 999
+            await self.store.save_checkpoint(child, [], expected_version=0)
+            self.assertEqual((await self.store.tenant_usage("acme", since)).tokens, 30)
+        asyncio.run(body())
+
     def test_tenant_usage_and_purge(self) -> None:
         async def body() -> None:
             since = utc_now() - timedelta(minutes=1)

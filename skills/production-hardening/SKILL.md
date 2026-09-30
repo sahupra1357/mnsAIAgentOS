@@ -95,3 +95,30 @@ Everything above stays network-free:
 - **Deployment:** the Dockerfile and compose file are validated only by `docker build`
   and `docker compose config` when Docker is present. That is a manual check, not a unit
   test.
+
+## Quota reservation and step checks (Phase 10)
+
+- **Admission** (`AgentOrchestrator._admit`) runs `store.reserve(tenant, run_id, since, decide)`.
+  - `decide` is `access.decide_admission`. It sees usage including other runs' outstanding
+    reservations (ceiling minus consumed), grants at most the remainder, and refuses with a
+    message otherwise.
+  - The store writes the grant in the same transaction: SQLite `BEGIN IMMEDIATE`, Postgres
+    `pg_advisory_xact_lock(hashtext('quota:<tenant>'))`, the in-memory store's lock.
+  - The run's `max_tokens` and `max_cost_usd` are capped to the grant.
+  - `continue_run` re-admits with `new_run=False`.
+- **Release:** `_on_terminal`, run from `_checkpoint` on any terminal status, releases the
+  reservation and the run's tool resources.
+- **Step checks:** `_quota_reason` compares tenant consumption with the limit before each
+  model turn. It is cached for `quota_check_seconds` and skipped for subagents.
+- **Usage accounting:** usage counts top-level runs only (`parent_run_id` column). Tokens and
+  cost use runs updated in the window, which is conservative.
+
+## Memory backends (Phase 10)
+
+- **Selection:** `[memory] backend = "sqlite" | "postgres"`. Postgres takes its URL from
+  `[memory] url_env`, else `[storage] url_env`, else a `postgresql://` `--database`.
+- **Implementation:** `persistence/postgres_memory.py` uses a generated `tsvector` column
+  (the `simple` configuration), a GIN index, and `ts_rank`.
+- **Migration:** both stores support `export_items` / `import_items` (ids and timestamps
+  preserved), which back `agent-harness memory migrate`.
+

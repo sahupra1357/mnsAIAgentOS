@@ -22,7 +22,7 @@ from datetime import timedelta
 from enum import IntEnum
 from typing import Any
 
-from agent_harness.domain import utc_now
+from agent_harness.domain import QuotaExceededError, utc_now
 
 
 class Role(IntEnum):
@@ -114,28 +114,78 @@ class Quota:
     max_concurrent_runs: int | None = None
 
 
-class QuotaExceeded(Exception):
-    """A tenant is over one of its limits."""
+QuotaExceeded = QuotaExceededError  # the public name used by the API and CLI
+
+
+@dataclass(frozen=True, slots=True)
+class Grant:
+    """What an admission reserved: token and cost ceilings (None = no limit)."""
+
+    tokens: int | None = None
+    cost_usd: float | None = None
+
+
+def quota_for(quotas: Mapping[str, Quota], tenant: str) -> Quota | None:
+    return quotas.get(tenant) or quotas.get("*")
+
+
+def decide_admission(
+    quota: Quota,
+    usage: Any,
+    *,
+    tenant: str,
+    tokens: int | None,
+    cost_usd: float | None,
+    new_run: bool,
+) -> Grant | str:
+    """Grant a reservation (possibly smaller than asked) or return why not.
+
+    ``usage`` already includes other runs' outstanding reservations, so two
+    concurrent admissions can never both take the same remaining budget.
+    """
+
+    if new_run and quota.max_runs_per_day is not None and usage.runs >= quota.max_runs_per_day:
+        return f"tenant {tenant!r} reached its limit of {quota.max_runs_per_day} runs per day"
+    if new_run and quota.max_concurrent_runs is not None and usage.active_runs >= quota.max_concurrent_runs:
+        return (f"tenant {tenant!r} already has {usage.active_runs} active runs "
+                f"(limit {quota.max_concurrent_runs})")
+    granted_tokens = tokens
+    if quota.max_tokens_per_day is not None:
+        remaining = quota.max_tokens_per_day - usage.tokens - usage.reserved_tokens
+        if remaining <= 0:
+            return f"tenant {tenant!r} has no tokens left of its {quota.max_tokens_per_day} per day"
+        granted_tokens = remaining if tokens is None else min(tokens, remaining)
+    granted_cost = cost_usd
+    if quota.max_cost_usd_per_day is not None:
+        remaining_cost = quota.max_cost_usd_per_day - usage.cost_usd - usage.reserved_cost_usd
+        if remaining_cost <= 0:
+            return f"tenant {tenant!r} has no budget left of its ${quota.max_cost_usd_per_day:.2f} per day"
+        granted_cost = remaining_cost if cost_usd is None else min(cost_usd, remaining_cost)
+    return Grant(tokens=granted_tokens, cost_usd=granted_cost)
+
+
+def usage_over_limit(quota: Quota, usage: Any, tenant: str) -> str | None:
+    """Step-boundary check: consumption (not reservations) already at the limit."""
+
+    if quota.max_tokens_per_day is not None and usage.tokens >= quota.max_tokens_per_day:
+        return f"tenant quota: {tenant!r} used its {quota.max_tokens_per_day} tokens for the day"
+    if quota.max_cost_usd_per_day is not None and usage.cost_usd >= quota.max_cost_usd_per_day:
+        return f"tenant quota: {tenant!r} spent its ${quota.max_cost_usd_per_day:.2f} for the day"
+    return None
 
 
 async def check_quota(store: Any, quotas: Mapping[str, Quota], tenant: str, *, new_run: bool = True) -> None:
     """Raise ``QuotaExceeded`` when ``tenant`` may not start (or continue) work now.
 
-    Usage is a rolling 24-hour window from the run store. Stores without
-    ``tenant_usage`` (custom stores) are not limited.
+    A read-only check (no reservation). The orchestrator's admission reserves
+    budget atomically; this helper remains for callers that only want to ask.
     """
 
-    quota = quotas.get(tenant) or quotas.get("*")
+    quota = quota_for(quotas, tenant)
     usage_of = getattr(store, "tenant_usage", None)
     if quota is None or usage_of is None:
         return
     usage = await usage_of(tenant, utc_now() - timedelta(days=1))
-    if new_run and quota.max_runs_per_day is not None and usage.runs >= quota.max_runs_per_day:
-        raise QuotaExceeded(f"tenant {tenant!r} reached its limit of {quota.max_runs_per_day} runs per day")
-    if new_run and quota.max_concurrent_runs is not None and usage.active_runs >= quota.max_concurrent_runs:
-        raise QuotaExceeded(f"tenant {tenant!r} already has {usage.active_runs} active runs "
-                            f"(limit {quota.max_concurrent_runs})")
-    if quota.max_tokens_per_day is not None and usage.tokens >= quota.max_tokens_per_day:
-        raise QuotaExceeded(f"tenant {tenant!r} used its {quota.max_tokens_per_day} tokens for the day")
-    if quota.max_cost_usd_per_day is not None and usage.cost_usd >= quota.max_cost_usd_per_day:
-        raise QuotaExceeded(f"tenant {tenant!r} spent its ${quota.max_cost_usd_per_day:.2f} for the day")
+    decision = decide_admission(quota, usage, tenant=tenant, tokens=None, cost_usd=None, new_run=new_run)
+    if isinstance(decision, str):
+        raise QuotaExceeded(decision)

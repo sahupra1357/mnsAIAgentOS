@@ -116,6 +116,19 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     );
     """),
 )
+MIGRATIONS += (
+    (2, """
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
+    CREATE TABLE IF NOT EXISTS quota_reservations (
+        run_id TEXT PRIMARY KEY,
+        tenant TEXT NOT NULL,
+        tokens BIGINT,
+        cost_usd DOUBLE PRECISION,
+        created_at TIMESTAMPTZ NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS quota_reservations_tenant ON quota_reservations(tenant);
+    """),
+)
 LATEST = MIGRATIONS[-1][0]
 
 
@@ -211,11 +224,11 @@ class PostgresRunStore:
             self._connection.execute(
                 """
                 INSERT INTO runs(id, version, snapshot_json, tenant, status, created_at, updated_at,
-                                 consumed_tokens, consumed_cost_usd)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                 consumed_tokens, consumed_cost_usd, parent_run_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (run.id, run.version, snapshot, run.tenant, run.status.value, run.created_at,
-                 run.updated_at, run.consumed_tokens, run.consumed_cost_usd),
+                 run.updated_at, run.consumed_tokens, run.consumed_cost_usd, run.parent_run_id),
             )
             self._insert_event(stored)
 
@@ -369,20 +382,68 @@ class PostgresRunStore:
 
     # -- quotas and retention -------------------------------------------------------------
 
-    async def tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
-        def work() -> TenantUsage:
-            row = self._connection.execute(
-                "SELECT COUNT(*) AS runs, COALESCE(SUM(consumed_tokens), 0) AS tokens, "
-                "COALESCE(SUM(consumed_cost_usd), 0) AS cost FROM runs WHERE tenant = %s AND created_at >= %s",
-                (tenant, since)).fetchone()
-            active = self._connection.execute(
-                "SELECT COUNT(*) AS n FROM runs WHERE tenant = %s AND status IN ('queued', 'running')",
-                (tenant,)).fetchone()["n"]
-            return TenantUsage(runs=int(row["runs"]), tokens=int(row["tokens"]),
-                               cost_usd=float(row["cost"]), active_runs=int(active))
+    def _tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
+        active = "('queued', 'running', 'awaiting_input')"
+        row = self._connection.execute(
+            f"""
+            SELECT
+              (SELECT COUNT(*) FROM runs WHERE tenant = %(t)s AND parent_run_id IS NULL
+                 AND created_at >= %(s)s) AS runs,
+              (SELECT COALESCE(SUM(consumed_tokens), 0) FROM runs WHERE tenant = %(t)s
+                 AND parent_run_id IS NULL AND updated_at >= %(s)s) AS tokens,
+              (SELECT COALESCE(SUM(consumed_cost_usd), 0) FROM runs WHERE tenant = %(t)s
+                 AND parent_run_id IS NULL AND updated_at >= %(s)s) AS cost,
+              (SELECT COUNT(*) FROM runs WHERE tenant = %(t)s AND parent_run_id IS NULL
+                 AND status IN {active}) AS active,
+              (SELECT COUNT(*) FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
+                 WHERE q.tenant = %(t)s AND r.id IS NULL AND q.created_at >= %(s)s) AS pending,
+              (SELECT COALESCE(SUM(GREATEST(0, q.tokens - COALESCE(r.consumed_tokens, 0))), 0)
+                 FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
+                 WHERE q.tenant = %(t)s AND q.tokens IS NOT NULL
+                   AND (r.id IS NULL OR r.status IN {active})) AS rtokens,
+              (SELECT COALESCE(SUM(GREATEST(0, q.cost_usd - COALESCE(r.consumed_cost_usd, 0))), 0)
+                 FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
+                 WHERE q.tenant = %(t)s AND q.cost_usd IS NOT NULL
+                   AND (r.id IS NULL OR r.status IN {active})) AS rcost
+            """,
+            {"t": tenant, "s": since},
+        ).fetchone()
+        pending = int(row["pending"])
+        return TenantUsage(
+            runs=int(row["runs"]) + pending, tokens=int(row["tokens"]), cost_usd=float(row["cost"]),
+            active_runs=int(row["active"]) + pending,
+            reserved_tokens=int(row["rtokens"]), reserved_cost_usd=float(row["rcost"]),
+        )
 
-        usage: TenantUsage = await self._run(work)
+    async def tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
+        usage: TenantUsage = await self._run(lambda: self._tenant_usage(tenant, since))
         return usage
+
+    async def reserve(
+        self, tenant: str, run_id: str, since: datetime, decide: Callable[[TenantUsage], Any]
+    ) -> Any:
+        """Atomic admission: a per-tenant advisory lock serializes concurrent reservations."""
+
+        def work() -> Any:
+            self._connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"quota:{tenant}",))
+            decision = decide(self._tenant_usage(tenant, since))
+            if not isinstance(decision, str):
+                self._connection.execute(
+                    """
+                    INSERT INTO quota_reservations(run_id, tenant, tokens, cost_usd, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id) DO UPDATE SET tokens = EXCLUDED.tokens,
+                        cost_usd = EXCLUDED.cost_usd, created_at = EXCLUDED.created_at
+                    """,
+                    (run_id, tenant, decision.tokens, decision.cost_usd, utc_now()),
+                )
+            return decision
+
+        return await self._run(work)
+
+    async def release_reservation(self, run_id: str) -> None:
+        await self._run(lambda: self._connection.execute(
+            "DELETE FROM quota_reservations WHERE run_id = %s", (run_id,)))
 
     async def purge_runs(self, before: datetime, *, dry_run: bool = True) -> list[str]:
         def work() -> list[str]:
@@ -398,6 +459,7 @@ class PostgresRunStore:
             for run_id in ids:
                 self._connection.execute(
                     "DELETE FROM tool_results WHERE starts_with(idempotency_key, %s)", (f"{run_id}:",))
+            self._connection.execute("DELETE FROM quota_reservations WHERE run_id = ANY(%s)", (ids,))
             self._connection.execute("DELETE FROM runs WHERE id = ANY(%s)", (ids,))
             return ids
 

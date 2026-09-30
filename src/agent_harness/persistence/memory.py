@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import datetime
 from copy import deepcopy
 from dataclasses import replace
-from typing import Sequence
+from typing import Any, Sequence
 from uuid import uuid4
 
 from agent_harness.domain import (
@@ -43,6 +43,8 @@ class InMemoryRunStore:
         self._tool_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._steers: dict[str, list[SteerMessage]] = {}
         self._catalog: dict[str, ToolCatalogEntry] = {}
+        # run_id -> (tenant, token ceiling, cost ceiling, reserved at)
+        self._reservations: dict[str, tuple[str, int | None, float | None, datetime]] = {}
         self._lock = asyncio.Lock()
 
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
@@ -111,11 +113,47 @@ class InMemoryRunStore:
 
     async def tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
         async with self._lock:
-            runs = [r for r in self._runs.values() if r.tenant == tenant]
-            recent = [r for r in runs if r.created_at >= since]
-            active = sum(r.status in {RunStatus.QUEUED, RunStatus.RUNNING} for r in runs)
-            return TenantUsage(runs=len(recent), tokens=sum(r.consumed_tokens for r in recent),
-                               cost_usd=sum(r.consumed_cost_usd for r in recent), active_runs=active)
+            return self._tenant_usage(tenant, since)
+
+    def _tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
+        top = [r for r in self._runs.values() if r.tenant == tenant and r.parent_run_id is None]
+        active_statuses = {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.AWAITING_INPUT}
+        pending = [k for k, v in self._reservations.items()
+                   if v[0] == tenant and k not in self._runs and v[3] >= since]
+        reserved_tokens = 0
+        reserved_cost = 0.0
+        for run_id, (owner, tokens, cost, _) in self._reservations.items():
+            run = self._runs.get(run_id)
+            if owner != tenant or (run is not None and run.status not in active_statuses):
+                continue
+            used_tokens = run.consumed_tokens if run is not None else 0
+            used_cost = run.consumed_cost_usd if run is not None else 0.0
+            if tokens is not None:
+                reserved_tokens += max(0, tokens - used_tokens)
+            if cost is not None:
+                reserved_cost += max(0.0, cost - used_cost)
+        recent = [r for r in top if r.updated_at >= since]
+        return TenantUsage(
+            runs=sum(r.created_at >= since for r in top) + len(pending),
+            tokens=sum(r.consumed_tokens for r in recent),
+            cost_usd=sum(r.consumed_cost_usd for r in recent),
+            active_runs=sum(r.status in active_statuses for r in top) + len(pending),
+            reserved_tokens=reserved_tokens,
+            reserved_cost_usd=reserved_cost,
+        )
+
+    async def reserve(
+        self, tenant: str, run_id: str, since: datetime, decide: Callable[[TenantUsage], Any]
+    ) -> Any:
+        async with self._lock:
+            decision = decide(self._tenant_usage(tenant, since))
+            if not isinstance(decision, str):
+                self._reservations[run_id] = (tenant, decision.tokens, decision.cost_usd, utc_now())
+            return decision
+
+    async def release_reservation(self, run_id: str) -> None:
+        async with self._lock:
+            self._reservations.pop(run_id, None)
 
     async def purge_runs(self, before: datetime, *, dry_run: bool = True) -> list[str]:
         async with self._lock:
@@ -128,6 +166,7 @@ class InMemoryRunStore:
                         self._event_ids.discard(event.id or "")
                     self._queue.pop(run_id, None)
                     self._steers.pop(run_id, None)
+                    self._reservations.pop(run_id, None)
                     for key in [k for k in self._tool_results if k[1].startswith(f"{run_id}:")]:
                         del self._tool_results[key]
             return ids

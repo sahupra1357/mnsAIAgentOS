@@ -139,9 +139,15 @@ run = await app.orchestrator.create_run(
 )
 ```
 
-Before this, the CLI and API check the tenant's **quotas**: runs, tokens, and cost over 24
-hours, plus concurrent runs. A refusal is HTTP 429 from the API, or exit code 2 from the
-CLI (section 20).
+`create_run` first **admits** the run against the tenant's quotas: runs, tokens, and cost
+over 24 hours, plus concurrent runs.
+- **Atomic:** in one store transaction it reads the tenant's usage plus other runs'
+  outstanding reservations, grants at most the remainder, and records a reservation.
+- **Budget:** the run's `max_tokens` and `max_cost_usd` are capped to the grant, so a new run
+  cannot exceed what is left today.
+- **Refusal:** HTTP 429 from the API, or exit code 2 from the CLI (section 20).
+- **Release:** the reservation is released when the run finishes, and `continue` re-admits
+  the run.
 
 `create_run` does four things before any model is contacted:
 
@@ -192,7 +198,9 @@ Relevant file: `src/agent_harness/orchestrator.py`
 
 At the start of each step the orchestrator:
 
-- **Checks budgets:** steps, wall clock, tokens, and cost (section 13).
+- **Checks budgets:** steps, wall clock, tokens, and cost (section 13). It also checks the
+  tenant's quota: consumption across the tenant's runs, cached for a few seconds. A tenant
+  over its limit stops the run with `BUDGET_EXHAUSTED`.
 - **Runs pending tool calls first:** any tool calls from the last model response that have
   not run yet, which makes crash recovery exact.
 - **Runs independent work in parallel:** when one response holds several read-only tool
@@ -729,6 +737,10 @@ All steps finished → "[Plan] … write the final answer" → final answer → 
 - **Switches:** `tools disable NAME` persists.
 - **Removed tools:** a tool its source stopped providing is marked unavailable, not
   deleted.
+- **Sandboxed Python tools** (`sandbox = "container"`): tool definitions are discovered in a
+  one-shot container. Calls run in the run's **warm container** (`docker exec`), with no
+  network by default and a read-only mount of the module. The container is removed when the
+  run ends.
 - **MCP servers:**
   - Tools are named `server__tool`; their schemas are normalized to the validator's
     subset.
@@ -742,7 +754,9 @@ All steps finished → "[Plan] … write the final answer" → final answer → 
 
 | Control | Where it acts |
 |---|---|
-| Quotas (`[[quotas]]`) | Before a run is created or continued (API 429, CLI exit 2) |
+| Quotas (`[[quotas]]`) | Atomic reservation at create and continue (API 429, CLI exit 2); re-checked at every step |
+| Memory backend (`[memory] backend`) | SQLite FTS5 or Postgres full-text search; `memory migrate` copies notes |
+| Warm containers (`mode = "per_run"`, sandboxed tools) | Started on a run's first container call; removed when the run ends |
 | API principals (`[[api.keys]]`) | Every API request: role check, then tenant check on the run |
 | Secret references (`env:`, `file:`) | Whenever a model or tool credential is read |
 | Egress allowlist (`[network]`) | Before HTTP tools, web search, or MCP over HTTP send a request |

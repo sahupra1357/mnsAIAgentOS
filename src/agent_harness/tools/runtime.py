@@ -54,6 +54,32 @@ class ToolRuntime:
         self._idempotency_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._idempotency_lock = asyncio.Lock()
         self._idempotency_store = idempotency_store
+        self._run_finalizers: list[Any] = []
+        self._closers: list[Any] = []
+
+    def add_run_finalizer(self, finalizer: Any) -> None:
+        """``async finalizer(run_id)``: release per-run resources (e.g. a warm container)."""
+
+        self._run_finalizers.append(finalizer)
+
+    def add_closer(self, closer: Any) -> None:
+        """``async closer()``: release everything when the application closes."""
+
+        self._closers.append(closer)
+
+    async def release_run(self, run_id: str) -> None:
+        for finalizer in self._run_finalizers:
+            try:
+                await finalizer(run_id)
+            except Exception:  # cleanup must never fail a finished run
+                continue
+
+    async def close(self) -> None:
+        for closer in self._closers:
+            try:
+                await closer()
+            except Exception:
+                continue
 
     def attach_idempotency_store(self, store: IdempotencyStore) -> None:
         """Back the in-process result cache with durable storage."""

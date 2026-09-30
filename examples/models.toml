@@ -134,3 +134,5 @@ memory = "1g"
 pids_limit = 256
 read_only_root = true
 run_as_host_user = true
+# mode = "per_run"            # one warm container per run (docker exec), removed at the end
+# max_lifetime_seconds = 3600 # a warm container never outlives this

@@ -49,11 +49,16 @@ def create_coding_tool_runtime(
         enable_git_commit=config.enable_git_commit,
         enable_pull_requests=config.enable_pull_requests,
     )
-    return ToolRuntime(
+    tool_runtime = ToolRuntime(
         registry,
         policy=DefaultToolPolicy(config.approval_mode),
         max_output_bytes=config.max_output_bytes,
     )
+    if hasattr(runtime, "release_run"):  # warm per-run containers
+        tool_runtime.add_run_finalizer(runtime.release_run)
+    if hasattr(runtime, "close"):
+        tool_runtime.add_closer(runtime.close)
+    return tool_runtime
 
 
 def _create_execution_runtime(

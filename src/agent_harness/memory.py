@@ -71,7 +71,7 @@ class SQLiteMemoryStore:
         text = text.strip()
         if not text or len(text) > MAX_MEMORY_CHARS:
             raise ValueError(f"memory text must be 1-{MAX_MEMORY_CHARS} characters")
-        item_id = hashlib.sha256(f"{self.namespace}\0{text}".encode()).hexdigest()[:32]
+        item_id = memory_item_id(self.namespace, text)
         created = utc_now()
         clean_metadata = {str(k): str(v) for k, v in (metadata or {}).items()}
         async with self._lock:
@@ -122,6 +122,47 @@ class SQLiteMemoryStore:
                     (self.namespace, *(f"%{_escape_like(t)}%" for t in terms), limit),
                 ).fetchall()
         return tuple(_item(row) for row in rows)
+
+    async def export_items(self) -> list[tuple[str, MemoryItem]]:
+        """Every note in every namespace, oldest first (for migration)."""
+
+        async with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM memory_items ORDER BY created_at, id").fetchall()
+        return [(row["namespace"], _item(row)) for row in rows]
+
+    async def import_items(self, items: Sequence[tuple[str, MemoryItem]]) -> int:
+        """Insert notes keeping their ids and timestamps; existing ids are skipped."""
+
+        inserted = 0
+        async with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                for namespace, item in items:
+                    created = (item.created_at or utc_now()).isoformat()
+                    added = self._connection.execute(
+                        "INSERT OR IGNORE INTO memory_items VALUES (?, ?, ?, ?, ?)",
+                        (item.id, namespace, item.text, json.dumps(dict(item.metadata), sort_keys=True),
+                         created),
+                    ).rowcount
+                    if added and self.full_text:
+                        self._connection.execute(
+                            "INSERT INTO memory_fts(item_id, namespace, text) VALUES (?, ?, ?)",
+                            (item.id, namespace, item.text),
+                        )
+                    inserted += added
+                self._connection.execute("COMMIT")
+            except BaseException:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+        return inserted
+
+
+def memory_item_id(namespace: str, text: str) -> str:
+    """Notes are content-addressed per namespace (identical text is stored once)."""
+
+    return hashlib.sha256(f"{namespace}\0{text}".encode()).hexdigest()[:32]
 
 
 def _escape_like(term: str) -> str:

@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import os
+from typing import Any
 import shutil
 import signal
 import sys
@@ -16,11 +17,11 @@ from dataclasses import replace
 from collections.abc import Sequence
 from pathlib import Path
 
-from .access import QuotaExceeded, check_quota
-from .application import quotas_from_config
 from .application import HarnessApplication, build_application
 from .coding import CODING_AGENT_SYSTEM_PROMPT
 from .config import ConfigError, load_config
+from .application import open_memory_store
+from .memory import SQLiteMemoryStore
 from .domain import HarnessError, Message, Role, RunBudget, RunRecord, utc_now
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
@@ -179,6 +180,16 @@ def _parser() -> argparse.ArgumentParser:
         toggle.add_argument("name")
         _common_runtime_arguments(toggle)
 
+    memory_cmd = subcommands.add_parser("memory", help="long-term memory maintenance")
+    memory_sub = memory_cmd.add_subparsers(dest="memory_command", required=True)
+    migrate = memory_sub.add_parser(
+        "migrate", help="copy every note (all namespaces) into the configured memory backend")
+    migrate.add_argument("--from", dest="source", required=True,
+                         help="sqlite:PATH or postgres:ENV_VAR (env var holding a postgresql:// URL)")
+    migrate.add_argument("--to", dest="target",
+                         help="default: the backend configured in [memory] (same syntax as --from)")
+    _common_runtime_arguments(migrate)
+
     gc = subcommands.add_parser("gc", help="retention: delete finished runs older than N days (dry run by default)")
     gc.add_argument("--older-than-days", type=int, required=True)
     gc.add_argument("--yes", action="store_true", help="actually delete (otherwise only report)")
@@ -272,7 +283,6 @@ async def _run_command(args: argparse.Namespace) -> int:
             messages.append(Message(role=Role.SYSTEM, content=system))
         prompt, template = expand_prompt(args.prompt, app.templates, _named_args(args.arg))
         messages.append(Message(role=Role.USER, content=prompt))
-        await _check_quota(app, "default")
         run = await app.orchestrator.create_run(
             model_profile=profile,
             route=route,
@@ -406,8 +416,6 @@ async def _continue_command(args: argparse.Namespace) -> int:
                 current.budget, **{k: v for k, v in raised.items() if v is not None}
             )
         message, _ = expand_prompt(args.message, app.templates)
-        current_run = await app.store.get_run(args.run_id)
-        await _check_quota(app, current_run.tenant if current_run else "default", new_run=False)
         await app.orchestrator.continue_run(args.run_id, message, budget=budget)
         finished = await app.orchestrator.run(args.run_id)
         return await _print_result(
@@ -551,11 +559,39 @@ def _plugin_command(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _check_quota(app: HarnessApplication, tenant: str, *, new_run: bool = True) -> None:
+def _open_memory_spec(spec: str, config_path: Path) -> Any:
+    """``sqlite:PATH`` or ``postgres:ENV_VAR`` (the env var holds the URL)."""
+
+    kind, _, value = spec.partition(":")
+    if kind == "sqlite" and value:
+        return SQLiteMemoryStore(resolve_path(value, config_path.parent))
+    if kind == "postgres" and value:
+        url = os.environ.get(value)
+        if not url:
+            raise ValueError(f"environment variable {value!r} (a postgresql:// URL) is not set")
+        from .persistence.postgres_memory import PostgresMemoryStore
+
+        return PostgresMemoryStore(url)
+    raise ValueError("a memory location looks like sqlite:PATH or postgres:ENV_VAR")
+
+
+async def _memory_command(args: argparse.Namespace) -> int:
+    source = _open_memory_spec(args.source, args.config)
     try:
-        await check_quota(app.store, quotas_from_config(app.config), tenant, new_run=new_run)
-    except QuotaExceeded as exc:
-        raise ValueError(str(exc)) from exc
+        if args.target:
+            target = _open_memory_spec(args.target, args.config)
+        else:
+            config = load_config(args.config, layered=True)
+            target = open_memory_store(config, args.config.parent, args.database)
+        try:
+            items = await source.export_items()
+            inserted = await target.import_items(items)
+        finally:
+            await target.close()
+    finally:
+        await source.close()
+    print(f"copied {len(items)} notes: {inserted} inserted, {len(items) - inserted} already present")
+    return 0
 
 
 async def _gc_command(args: argparse.Namespace) -> int:
@@ -740,6 +776,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_tools_command(args))
         if args.command == "gc":
             return asyncio.run(_gc_command(args))
+        if args.command == "memory":
+            return asyncio.run(_memory_command(args))
         if args.command == "cancel":
             return asyncio.run(_cancel_command(args))
         if args.command == "status":

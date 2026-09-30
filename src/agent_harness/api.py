@@ -134,6 +134,8 @@ class HarnessAPI:
             await self._dispatch(scope, receive, send)
         except ApiError as exc:
             await _json(send, exc.status, {"error": exc.message})
+        except QuotaExceeded as exc:  # admission is reserved atomically by the orchestrator
+            await _json(send, 429, {"error": str(exc)})
         except KeyError as exc:
             await _json(send, 404, {"error": str(exc.args[0]) if exc.args else "not found"})
         except (ValueError, ConfigError) as exc:
@@ -700,7 +702,6 @@ def create_api(
     """Build the API for a :class:`~agent_harness.application.HarnessApplication`."""
 
     from agent_harness.access import api_keys_from_config
-    from agent_harness.application import quotas_from_config
     from agent_harness.coding import CODING_AGENT_SYSTEM_PROMPT
 
     if worker_count < 0:
@@ -726,5 +727,4 @@ def create_api(
         artifacts=app.artifacts,
         templates=app.templates,
         principals=PrincipalDirectory(api_keys_from_config(app.config.api_keys), legacy_token=auth_token),
-        quotas=quotas_from_config(app.config),
     )

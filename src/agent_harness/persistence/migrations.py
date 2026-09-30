@@ -117,11 +117,27 @@ BEGIN
 END;
 """
 
+# Quota reservations; parent_run_id so tenant usage counts top-level runs only
+# (a parent's consumption already includes its subagents').
+RESERVATIONS = """
+ALTER TABLE runs ADD COLUMN parent_run_id TEXT;
+UPDATE runs SET parent_run_id = json_extract(snapshot_json, '$.parent_run_id');
+CREATE TABLE IF NOT EXISTS quota_reservations (
+    run_id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    tokens INTEGER,
+    cost_usd REAL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS quota_reservations_tenant ON quota_reservations(tenant);
+"""
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline tables", BASELINE),
     (2, "tool catalog", TOOL_CATALOG),
     (3, "queryable run columns", RUN_COLUMNS),
     (4, "retention guard", RETENTION),
+    (5, "quota reservations", RESERVATIONS),
 )
 LATEST = MIGRATIONS[-1][0]
 

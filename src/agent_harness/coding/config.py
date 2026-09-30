@@ -89,6 +89,8 @@ def parse_coding_config(raw: Mapping[str, Any] | None) -> CodingAgentConfig:
         "read_only_root",
         "run_as_host_user",
         "docker_binary",
+        "mode",
+        "max_lifetime_seconds",
     }
     docker_unknown = set(docker_raw) - docker_allowed
     if docker_unknown:

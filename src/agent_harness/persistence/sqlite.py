@@ -100,12 +100,12 @@ class SQLiteRunStore:
                 self._connection.execute(
                     """
                     INSERT INTO runs(id, version, snapshot_json, tenant, status, created_at,
-                                     updated_at, consumed_tokens, consumed_cost_usd)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     updated_at, consumed_tokens, consumed_cost_usd, parent_run_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (run.id, run.version, snapshot_json, run.tenant, run.status.value,
                      run.created_at.isoformat(), run.updated_at.isoformat(),
-                     run.consumed_tokens, run.consumed_cost_usd),
+                     run.consumed_tokens, run.consumed_cost_usd, run.parent_run_id),
                 )
                 self._insert_event(stored_event)
                 self._connection.execute("COMMIT")
@@ -302,20 +302,81 @@ class SQLiteRunStore:
 
     async def tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
         async with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT COUNT(*) AS runs, COALESCE(SUM(consumed_tokens), 0) AS tokens,
-                       COALESCE(SUM(consumed_cost_usd), 0) AS cost
-                FROM runs WHERE tenant = ? AND created_at >= ?
-                """,
-                (tenant, since.isoformat()),
-            ).fetchone()
-            active = self._connection.execute(
-                "SELECT COUNT(*) FROM runs WHERE tenant = ? AND status IN ('queued', 'running')",
-                (tenant,),
-            ).fetchone()[0]
-        return TenantUsage(runs=int(row["runs"]), tokens=int(row["tokens"]),
-                           cost_usd=float(row["cost"]), active_runs=int(active))
+            return self._tenant_usage(tenant, since)
+
+    def _tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
+        """Top-level runs only (a parent's consumption includes its subagents').
+
+        Tokens and cost count runs *updated* in the window, which is
+        conservative: a long run's whole consumption counts while it is active.
+        Reservations whose run does not exist yet (being created) count as runs.
+        """
+
+        window = since.isoformat()
+        row = self._connection.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM runs WHERE tenant = ? AND parent_run_id IS NULL
+                                            AND created_at >= ?) AS runs,
+              (SELECT COALESCE(SUM(consumed_tokens), 0) FROM runs WHERE tenant = ?
+                 AND parent_run_id IS NULL AND updated_at >= ?) AS tokens,
+              (SELECT COALESCE(SUM(consumed_cost_usd), 0) FROM runs WHERE tenant = ?
+                 AND parent_run_id IS NULL AND updated_at >= ?) AS cost,
+              (SELECT COUNT(*) FROM runs WHERE tenant = ? AND parent_run_id IS NULL
+                 AND status IN ('queued', 'running', 'awaiting_input')) AS active,
+              (SELECT COUNT(*) FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
+                 WHERE q.tenant = ? AND r.id IS NULL AND q.created_at >= ?) AS pending,
+              (SELECT COALESCE(SUM(MAX(0, q.tokens - COALESCE(r.consumed_tokens, 0))), 0)
+                 FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
+                 WHERE q.tenant = ? AND q.tokens IS NOT NULL
+                   AND (r.id IS NULL OR r.status IN ('queued', 'running', 'awaiting_input'))) AS rtokens,
+              (SELECT COALESCE(SUM(MAX(0, q.cost_usd - COALESCE(r.consumed_cost_usd, 0))), 0)
+                 FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
+                 WHERE q.tenant = ? AND q.cost_usd IS NOT NULL
+                   AND (r.id IS NULL OR r.status IN ('queued', 'running', 'awaiting_input'))) AS rcost
+            """,
+            (tenant, window, tenant, window, tenant, window, tenant, tenant, window, tenant, tenant),
+        ).fetchone()
+        pending = int(row["pending"])
+        return TenantUsage(
+            runs=int(row["runs"]) + pending, tokens=int(row["tokens"]), cost_usd=float(row["cost"]),
+            active_runs=int(row["active"]) + pending,
+            reserved_tokens=int(row["rtokens"]), reserved_cost_usd=float(row["rcost"]),
+        )
+
+    async def reserve(
+        self, tenant: str, run_id: str, since: datetime, decide: Callable[[TenantUsage], Any]
+    ) -> Any:
+        """Atomically read usage, ask ``decide``, and store the grant it returns.
+
+        ``decide`` returns a grant (with ``tokens``/``cost_usd`` ceilings) or a
+        refusal string; only a grant is stored. ``BEGIN IMMEDIATE`` serializes
+        concurrent admissions, so two runs cannot take the same budget.
+        """
+
+        async with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                decision = decide(self._tenant_usage(tenant, since))
+                if not isinstance(decision, str):
+                    self._connection.execute(
+                        """
+                        INSERT INTO quota_reservations(run_id, tenant, tokens, cost_usd, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(run_id) DO UPDATE SET tokens = excluded.tokens,
+                            cost_usd = excluded.cost_usd, created_at = excluded.created_at
+                        """,
+                        (run_id, tenant, decision.tokens, decision.cost_usd, utc_now().isoformat()),
+                    )
+                self._connection.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+        return decision
+
+    async def release_reservation(self, run_id: str) -> None:
+        async with self._lock:
+            self._connection.execute("DELETE FROM quota_reservations WHERE run_id = ?", (run_id,))
 
     async def purge_runs(self, before: datetime, *, dry_run: bool = True) -> list[str]:
         """Delete finished runs last updated before ``before`` (with their events and rows).
@@ -347,6 +408,7 @@ class SQLiteRunStore:
                         "DELETE FROM tool_results WHERE idempotency_key LIKE ? ESCAPE '\\'",
                         (_like_prefix(run_id) + ":%",),
                     )
+                    self._connection.execute("DELETE FROM quota_reservations WHERE run_id = ?", (run_id,))
                     self._connection.execute("DELETE FROM runs WHERE id = ?", (run_id,))
                 self._connection.execute("DELETE FROM purge_guard")
                 self._connection.execute("COMMIT")

@@ -8,7 +8,7 @@ import time
 from dataclasses import field, replace
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -22,6 +22,8 @@ from agent_harness.agents import (
     child_run_id,
     parse_todos,
 )
+from agent_harness.runcontext import CURRENT_RUN_ID
+from agent_harness.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
 from agent_harness.context import ContextSummarizer, FullHistoryContextBuilder
 from agent_harness.planning import (
     CREATE_PLAN,
@@ -74,6 +76,7 @@ from agent_harness.domain import (
     ModelClient,
     ModelStreamEvent,
     PermissionMode,
+    QuotaExceededError,
     Plan,
     PlanStep,
     PlanStepStatus,
@@ -188,6 +191,8 @@ class AgentOrchestrator:
         summarizer: ContextSummarizer | None = None,
         tool_loading: ToolLoadingPolicy | None = None,
         planning: PlanningPolicy | None = None,
+        quotas: Mapping[str, Quota] | None = None,
+        quota_check_seconds: float = 5.0,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -221,6 +226,9 @@ class AgentOrchestrator:
         self._summarizer = summarizer
         self._tool_loading = tool_loading or ToolLoadingPolicy()
         self._planning = planning or PlanningPolicy()
+        self._quotas = dict(quotas or {})
+        self._quota_check_seconds = quota_check_seconds
+        self._usage_cache: dict[str, tuple[float, Any]] = {}
 
     @property
     def context_builder(self) -> ContextBuilder:
@@ -257,6 +265,14 @@ class AgentOrchestrator:
         _validate_identifier(model_profile, "model_profile")
         selected_budget = budget or RunBudget()
         _validate_budget(selected_budget)
+        _validate_identifier(tenant, "tenant")
+        reserved = False
+        if parent_run_id is None:
+            # Atomic admission: reserve budget against the tenant's quota and cap
+            # this run's budget to what was granted (subagents share the parent's).
+            selected_budget, reserved = await self._admit(
+                tenant, identifier, selected_budget, consumed_tokens=0, consumed_cost=0.0, new_run=True
+            )
         selected_mode = PermissionMode(mode) if mode is not None else self._default_mode
         initial_messages = list(messages)
         for message in initial_messages:
@@ -294,7 +310,6 @@ class AgentOrchestrator:
             tenant=tenant,
             created_by=created_by,
         )
-        _validate_identifier(tenant, "tenant")
         recorded_versions = {
             "system_prompt_sha256": system_prompt_sha256(initial_messages),
             "tools_sha256": tools_sha256(tuple(self._tools.specs())),
@@ -318,6 +333,9 @@ class AgentOrchestrator:
             payload["tenant"] = tenant
         if created_by is not None:
             payload["created_by"] = created_by
+        if reserved:
+            payload["quota_reservation"] = {
+                "max_tokens": selected_budget.max_tokens, "max_cost_usd": selected_budget.max_cost_usd}
         if template is not None:
             payload["template"] = {str(k): str(v) for k, v in template.items()}
         if prompt_hook is not None:
@@ -331,13 +349,90 @@ class AgentOrchestrator:
             payload=payload,
             created_at=now,
         )
-        await self._store.create_run(run, event)
+        try:
+            await self._store.create_run(run, event)
+        except BaseException:
+            release = getattr(self._store, "release_reservation", None)
+            if reserved and release is not None:
+                await release(identifier)
+            raise
         self._emit_event(run, event)
         return run
+
+    async def _admit(
+        self,
+        tenant: str,
+        run_id: str,
+        budget: RunBudget,
+        *,
+        consumed_tokens: int,
+        consumed_cost: float,
+        new_run: bool,
+    ) -> tuple[RunBudget, bool]:
+        """Reserve quota for new work; return the (capped) budget and whether it reserved."""
+
+        quota = quota_for(self._quotas, tenant)
+        reserve = getattr(self._store, "reserve", None)
+        if quota is None or reserve is None:
+            return budget, False
+        want_tokens = None if budget.max_tokens is None else max(0, budget.max_tokens - consumed_tokens)
+        want_cost = None if budget.max_cost_usd is None else max(0.0, budget.max_cost_usd - consumed_cost)
+
+        def decide(usage: Any) -> Any:
+            decision = decide_admission(quota, usage, tenant=tenant, tokens=want_tokens,
+                                        cost_usd=want_cost, new_run=new_run)
+            if isinstance(decision, str):
+                return decision
+            # Store ceilings as absolute consumption, so outstanding = ceiling - consumed.
+            return Grant(
+                tokens=None if decision.tokens is None else consumed_tokens + decision.tokens,
+                cost_usd=None if decision.cost_usd is None else consumed_cost + decision.cost_usd,
+            )
+
+        decision = await reserve(tenant, run_id, self._clock() - _QUOTA_WINDOW, decide)
+        if isinstance(decision, str):
+            raise QuotaExceededError(decision)
+        self._usage_cache.pop(tenant, None)
+        return replace(budget, max_tokens=decision.tokens, max_cost_usd=decision.cost_usd), True
+
+    async def _quota_reason(self, run: RunRecord) -> str | None:
+        """Step-boundary check of the tenant's consumption (cached briefly per tenant)."""
+
+        if run.parent_run_id is not None:
+            return None  # a subagent is bounded by its parent's budget
+        quota = quota_for(self._quotas, run.tenant)
+        usage_of = getattr(self._store, "tenant_usage", None)
+        if quota is None or usage_of is None:
+            return None
+        if quota.max_tokens_per_day is None and quota.max_cost_usd_per_day is None:
+            return None
+        now = self._monotonic()
+        cached = self._usage_cache.get(run.tenant)
+        if cached is None or now - cached[0] >= self._quota_check_seconds:
+            cached = (now, await usage_of(run.tenant, self._clock() - _QUOTA_WINDOW))
+            self._usage_cache[run.tenant] = cached
+        return usage_over_limit(quota, cached[1], run.tenant)
+
+    async def _on_terminal(self, run: RunRecord) -> None:
+        """Release what a finished run held: its quota reservation and run-scoped resources."""
+
+        release = getattr(self._store, "release_reservation", None)
+        if release is not None and run.parent_run_id is None:
+            await release(run.id)
+        finalize = getattr(self._tools, "release_run", None)
+        if finalize is not None:
+            await finalize(run.id)
 
     async def run(self, run_id: str) -> RunRecord:
         """Run or resume a persisted workflow until it reaches a terminal state."""
 
+        token = CURRENT_RUN_ID.set(run_id)  # per-run tool resources (warm containers)
+        try:
+            return await self._run(run_id)
+        finally:
+            CURRENT_RUN_ID.reset(token)
+
+    async def _run(self, run_id: str) -> RunRecord:
         _validate_identifier(run_id, "run_id")
         run = await self._store.get_run(run_id)
         if run is None:
@@ -505,7 +600,7 @@ class AgentOrchestrator:
             await self._perform_model_turn(run, events)
             return run.status.is_terminal
 
-        budget_reason = self._budget_reason(run)
+        budget_reason = self._budget_reason(run) or await self._quota_reason(run)
         if budget_reason is not None:
             await self._exhaust_budget(run, events, budget_reason)
             return True
@@ -735,6 +830,11 @@ class AgentOrchestrator:
         reason = self._budget_reason(run)
         if reason is not None:
             raise ValueError(f"the run's budget is already exhausted ({reason}); raise it")
+        if run.parent_run_id is None:
+            run.budget, _ = await self._admit(
+                run.tenant, run.id, run.budget, consumed_tokens=run.consumed_tokens,
+                consumed_cost=run.consumed_cost_usd, new_run=False,
+            )
         added = [Message(role=Role.USER, content=content)]
         prompt_hook = await self._user_prompt_hook(run.id, added, run.model_profile)
         run.status = RunStatus.RUNNING
@@ -2600,6 +2700,8 @@ class AgentOrchestrator:
         event_log.extend(events)
         for event in events:
             self._emit_event(run, event)
+        if run.status.is_terminal:
+            await self._on_terminal(run)
 
     def _emit_event(self, run: RunRecord, event: RunEvent) -> None:
         self._emit(
@@ -2810,6 +2912,7 @@ def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
     )
 
 
+_QUOTA_WINDOW = timedelta(days=1)
 _ORCHESTRATOR_TOOLS = frozenset({AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, *META_TOOLS, *PLAN_TOOLS})
 
 
