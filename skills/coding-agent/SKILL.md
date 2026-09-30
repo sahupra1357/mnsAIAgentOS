@@ -42,3 +42,19 @@ The Docker backend should mount only the configured workspace at `/workspace`, u
 ## Handoff
 
 Test traversal and symlink rejection, exact patch behavior, dangerous-command rejection, approval pause/resume, Docker command construction, timeout, output limits, Git status/diff, and denial behavior. Never run a real destructive command or contact a real Git hosting service in tests.
+
+## Warm per-run containers (Phase 10)
+
+- **Modes:** `[coding.docker] mode = "per_call"` (the default: one `docker run --rm` per
+  command) or `"per_run"`.
+  - `per_run` starts one container on the run's first command (`docker run -d ... sleep
+    max_lifetime_seconds`), uses `docker exec -w /workspace/...` for later commands, and
+    removes the container when the run ends.
+  - A timed-out command discards the container.
+  - A container that expired or disappeared is restarted once.
+- **Measured locally** (Docker Desktop, image cached): about 150 ms per command with a fresh
+  container, about 55 ms per `exec` in a warm one.
+- **Scope:** only commands run in the container. File tools (`read_file`, `apply_patch`, ...)
+  still run in the harness with workspace path guards.
+- **Mounts:** `--mount type=bind,...` must not carry `,rw`; Docker rejects it.
+

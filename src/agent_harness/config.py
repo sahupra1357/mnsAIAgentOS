@@ -192,11 +192,17 @@ class MemoryConfig:
 
     enabled: bool = False
     namespace: str = "default"
-    database: str | None = None
+    database: str | None = None  # SQLite file (backend = "sqlite")
+    # "sqlite" (default) or "postgres". Postgres reads its URL from the env var
+    # named by url_env, falling back to [storage] url_env.
+    backend: str = "sqlite"
+    url_env: str = ""
 
     def __post_init__(self) -> None:
         if not _PROFILE_NAME.fullmatch(self.namespace):
             raise ConfigError(f"invalid memory.namespace: {self.namespace!r}")
+        if self.backend not in {"sqlite", "postgres"}:
+            raise ConfigError("memory.backend must be 'sqlite' or 'postgres'")
 
 
 _PERMISSION_MODES = {"default", "accept_edits", "plan", "bypass"}
@@ -409,6 +415,14 @@ class ToolSourceConfig:
     risk: str | None = None
     trust: str = "untrusted"
     timeout_seconds: float = 30.0
+    # kind = "python" only: "none" runs in the harness process; "container" runs
+    # the module in a warm per-run sandbox container (see agent_harness.sandbox).
+    sandbox: str = "none"
+    image: str = "python:3.12-slim"
+    network: bool = False
+    env: tuple[str, ...] = ()
+    cpus: float = 1.0
+    memory: str = "512m"
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,6 +694,10 @@ def _parse_tool_sources(raw: Any) -> tuple[ToolSourceConfig, ...]:
         if kind == "python":
             if not isinstance(item.get("module"), str) or ":" not in item["module"]:
                 raise ConfigError(f"tool source {name!r}: python tools need module = 'pkg.mod:function'")
+            if item.get("sandbox", "none") not in {"none", "container"}:
+                raise ConfigError(f"tool source {name!r}: sandbox must be 'none' or 'container'")
+            if item.get("sandbox") == "container" and not item.get("path"):
+                raise ConfigError(f"tool source {name!r}: a sandboxed module needs path (mounted read-only)")
         elif kind == "http":
             if not isinstance(item.get("url"), str) or not item.get("description"):
                 raise ConfigError(f"tool source {name!r}: http tools need url and description")
@@ -695,8 +713,13 @@ def _parse_tool_sources(raw: Any) -> tuple[ToolSourceConfig, ...]:
         else:
             raise ConfigError(f"tool source {name!r}: kind must be 'python' or 'http'")
         values = dict(item)
-        if "timeout_seconds" in values:
-            values["timeout_seconds"] = float(values["timeout_seconds"])
+        for key in ("timeout_seconds", "cpus"):
+            if key in values:
+                values[key] = float(values[key])
+        if "env" in values:
+            if not isinstance(values["env"], list) or not all(isinstance(v, str) for v in values["env"]):
+                raise ConfigError(f"tool source {name!r}: env must be a list of variable names")
+            values["env"] = tuple(values["env"])
         sources.append(ToolSourceConfig(**values))
     return tuple(sources)
 

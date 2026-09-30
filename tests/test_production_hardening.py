@@ -306,7 +306,7 @@ class StorageTests(unittest.TestCase):
                         open_run_store("ignored.sqlite3", config)
             memory = Path(directory) / "memory.toml"
             memory.write_text(MODEL + '[memory]\nenabled = true\n', encoding="utf-8")
-            with self.assertRaisesRegex(ConfigError, "memory uses SQLite"):
+            with self.assertRaisesRegex(ConfigError, "needs a file when runs are in Postgres"):
                 build_application(config_path=memory, database_path="postgresql://u@127.0.0.1:1/x")
 
     def test_gc_command(self) -> None:

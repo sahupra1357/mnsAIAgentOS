@@ -55,8 +55,12 @@ Edit `deploy/models.toml` first so its model profile points at your model server
 - **Quotas.** `[[quotas]] tenant, max_runs_per_day, max_tokens_per_day,
   max_cost_usd_per_day, max_concurrent_runs`.
   - The window is a rolling 24 hours, and `tenant = "*"` is the default for every tenant.
-  - Quotas are checked when a run is created or continued (the API returns HTTP 429).
-  - They are not re-checked mid-run, so combine them with per-run budgets.
+  - **Admission:** creating or continuing a run reserves budget atomically and caps the
+    run's budget to what was granted (HTTP 429 when nothing is left).
+  - **Step checks:** the orchestrator re-checks the tenant at every step (every
+    `quota_check_seconds`).
+  - **Overshoot:** at most one model call's tokens, since usage is known only after the
+    call returns.
 - **Secrets.** Credential fields accept an environment variable name, `env:NAME`, or
   `file:/run/secrets/name`. The file form works with Docker and Kubernetes secret mounts.
   Error messages name the reference, never the value.
@@ -75,9 +79,18 @@ Edit `deploy/models.toml` first so its model profile points at your model server
   the cutoff, and `--yes` deletes them with their events and queue, steering, and
   idempotency rows. Artifacts are content-addressed and may be shared, so clean
   `artifacts/` separately.
-- **Coding mode in containers.** Its Docker sandbox needs a Docker daemon, which the API
-  and worker containers do not have. Run coding workloads on hosts with Docker, or use
-  `execution_runtime = "local"` only inside an already isolated container.
+- **Memory.** `[memory] backend = "postgres"` keeps long-term memory in Postgres, with the
+  URL from `[memory] url_env` or `[storage] url_env`. To move existing notes, run
+  `agent-harness memory migrate --from sqlite:memory.sqlite3 --config models.toml`. It can
+  be rerun safely, and existing notes are skipped.
+- **Docker for sandboxes.** Coding commands and sandboxed Python tools need a Docker daemon
+  where workers run, and the API and worker containers from `deploy/` have none.
+  - Run workers that use them on hosts with Docker, or mount the Docker socket into the
+    worker. The socket gives root-equivalent access to the host, so do this only on
+    dedicated hosts.
+  - `[coding.docker] mode = "per_run"` keeps one warm container per run; measured locally
+    at about 55 ms per command, against about 150 ms for a fresh container per command.
+  - Coding images need the tools the agent runs: `python:3.12-slim` has no `git`.
 
 ## Health
 

@@ -616,6 +616,9 @@ class TenantUsage:
     tokens: int = 0
     cost_usd: float = 0.0
     active_runs: int = 0
+    # Budget reserved by active runs and not yet consumed (quota reservations).
+    reserved_tokens: int = 0
+    reserved_cost_usd: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,6 +677,10 @@ class PermanentModelError(HarnessError):
 
 class ContextWindowExceededError(PermanentModelError):
     """Even the minimum required context does not fit the model's window."""
+
+
+class QuotaExceededError(HarnessError):
+    """A tenant may not start or continue work now (see ``agent_harness.access``)."""
 
 
 class ConcurrencyError(HarnessError):

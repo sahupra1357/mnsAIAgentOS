@@ -119,6 +119,13 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   subagent is itself offered `agent` and can start its own children. Set
   `max_depth = 1` to let only the top-level run delegate. `examples/subagents.toml` is a
   complete example.
+- **Quotas (Phase 10).** Admission is atomic in the store (`reserve`). A run's budget is
+  capped to its grant, so a new run cannot overshoot the day's remainder. One model call can
+  still overshoot, because tokens are known only after it returns. Changing the orchestrator's
+  quota mapping takes effect at the next step boundary.
+- **Docker mounts (fixed in Phase 10).** `--mount ...,rw` is invalid; bind mounts are read-write
+  by default. The coding runtime used it, so its Docker backend failed against a real daemon.
+  Coding images need the tools the agent runs: `python:3.12-slim` has no `git`.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A
@@ -296,6 +303,21 @@ Order matters: 6.1 is the foundation for most of the rest.
    `agent-harness gc`. Encryption at rest is delegated to the volume or database.
 7. Deployment: Dockerfile, compose file (API, workers, Postgres), `/readyz`, and
    `docs/DEPLOYMENT.md`.
+
+**Phase 10 – Isolation, quota enforcement, memory backends** [production-hardening, tool-platform, coding-agent] — on `phase-10-isolation-quotas-memory`
+1. Quota reservation: admission reads usage plus outstanding reservations, stores a
+   reservation atomically (SQLite `BEGIN IMMEDIATE`, Postgres per-tenant advisory lock),
+   and caps the run's budget to the grant; released when the run ends. `continue`
+   re-admits. Tenant usage counts top-level runs only (subagents are in their parent).
+2. Step-boundary quota checks: before each model turn the orchestrator re-checks the
+   tenant's consumption (cached `quota_check_seconds`) and stops with `BUDGET_EXHAUSTED`.
+3. Warm per-run containers (`sandbox/containers.py`): one container per run, reused with
+   `docker exec`, removed when the run ends (or after `max_lifetime_seconds`).
+   `[coding.docker] mode = "per_run"`; sandboxed Python tools
+   (`[[tools]] kind = "python", sandbox = "container"`) run in the run's container via
+   `agent_harness.sandbox_runner`. The current run is a context variable (`runcontext.py`).
+4. Memory backends: `[memory] backend = "sqlite" | "postgres"` (Postgres full-text search);
+   `agent-harness memory migrate --from sqlite:PATH` copies every note.
 
 ## Validation
 

@@ -25,6 +25,17 @@ kind = "python"
 module = "example_tools:register"
 path = "tools"            # added to the import path, relative to this file
 
+# The same kind of module, but run in a sandbox container (no network, read-only mount of
+# the module, resource limits). Needs Docker; discovered with `tools sync`.
+# [[tools]]
+# name = "text-tools-sandboxed"
+# kind = "python"
+# module = "example_tools:register"
+# path = "tools"
+# sandbox = "container"
+# image = "python:3.12-slim"
+# network = false
+
 # A declarative HTTP tool. GET sends arguments as the query string; other methods send
 # JSON. Output from HTTP tools is treated as untrusted data by default.
 [[tools]]

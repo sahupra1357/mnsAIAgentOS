@@ -99,3 +99,22 @@ in the orchestrator, where the tool message is built, so every source is covered
 - **Catalog:** tests cover persistence across two app instances on the same database, the
   enable/disable flag surviving a restart, a disappeared tool marked unavailable, and
   dynamic loading surviving resume.
+
+## Sandboxed Python tools (Phase 10)
+
+- **Config:** `[[tools]] kind = "python", sandbox = "container", path = "tools"` (the directory
+  is required, and is mounted read-only).
+- **Container:**
+  - the module's directory and the `agent_harness` package are mounted read-only;
+  - no network unless `network = true`;
+  - read-only root, dropped capabilities, and CPU, memory, and process limits;
+  - the host user id;
+  - `env = [...]` passes named variables.
+- **Discovery:** `tools sync` runs `python -m agent_harness.sandbox_runner list MOD:FUNC` in a
+  one-shot container, and the specs are cached in the catalog (like MCP).
+- **Calls:** each call runs `sandbox_runner call MOD:FUNC TOOL` in the **run's warm container**,
+  with the arguments on stdin and `{"ok": ...}` or `{"error": ...}` on stdout.
+- **Timeouts:** a timeout discards the container.
+- **Testing:** use a fake docker invoker that runs the inner command locally (see
+  `tests/test_sandbox_containers.py`).
+

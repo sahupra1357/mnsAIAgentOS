@@ -70,12 +70,13 @@ class HarnessApplication:
     orchestrator: AgentOrchestrator
     telemetry: TelemetrySink | None = None
     artifacts: ArtifactStore | None = None
-    memory: SQLiteMemoryStore | None = None
+    memory: Any = None  # SQLiteMemoryStore or PostgresMemoryStore
     templates: dict[str, Template] = field(default_factory=dict)
     skills: dict[str, Skill] = field(default_factory=dict)
     plugins: list[Plugin] = field(default_factory=list)
     catalog: ToolCatalog | None = None
     mcp_sources: list[McpToolSource] = field(default_factory=list)
+    sandbox_sources: list[Any] = field(default_factory=list)  # SandboxedPythonSource
 
     async def sync_tools(self) -> dict[str, str]:
         """Discover tools from live MCP servers and record them in the catalog.
@@ -85,7 +86,7 @@ class HarnessApplication:
         """
 
         report: dict[str, str] = {}
-        for source in self.mcp_sources:
+        for source in [*self.mcp_sources, *self.sandbox_sources]:
             try:
                 specs = await source.discover()
             except Exception as exc:  # a broken server must not stop the others
@@ -108,7 +109,7 @@ class HarnessApplication:
     async def start_tools(self) -> dict[str, str]:
         """Sync the MCP servers configured with ``sync_on_start`` (used before executing runs)."""
 
-        if not any(source.config.sync_on_start for source in self.mcp_sources):
+        if not any(s.config.sync_on_start for s in [*self.mcp_sources, *self.sandbox_sources]):
             return {}
         return await self.sync_tools()
 
@@ -125,6 +126,9 @@ class HarnessApplication:
     async def close(self) -> None:
         for source in self.mcp_sources:
             await source.close()
+        close_tools = getattr(self.tools, "close", None)
+        if close_tools is not None:
+            await close_tools()  # warm sandbox containers
         await self.store.close()
         if self.memory is not None:
             await self.memory.close()
@@ -168,9 +172,12 @@ def build_application(
     )
     models = ModelGateway(config)
     # Configuration errors surface before any database connection is attempted.
-    memory_path = _memory_path(config, base_path, database_path) if config.memory.enabled else None
+    if config.memory.enabled and config.memory.backend == "sqlite":
+        _memory_path(config, base_path, database_path)
+    elif config.memory.enabled:
+        memory_postgres_url(config, database_path)
     store = open_run_store(database_path, config)
-    memory: SQLiteMemoryStore | None = None
+    memory: Any = None  # SQLiteMemoryStore or PostgresMemoryStore
     try:
         artifacts = (
             LocalArtifactStore(base_path / config.artifacts.directory)
@@ -178,12 +185,7 @@ def build_application(
             else None
         )
         memory = (
-            SQLiteMemoryStore(
-                memory_path or _memory_path(config, base_path, database_path),
-                namespace=config.memory.namespace,
-            )
-            if config.memory.enabled
-            else None
+            open_memory_store(config, base_path, database_path) if config.memory.enabled else None
         )
         tool_runtime = tools
         if tool_runtime is None:
@@ -205,7 +207,7 @@ def build_application(
                 tool_runtime.register(MEMORY_WRITE_SPEC, write)
             if skills:
                 tool_runtime.register(load_skill_spec(skills), load_skill_handler(skills))
-        catalog, mcp_sources = _load_tool_sources(config, tool_runtime, store, base_path)
+        catalog, mcp_sources, sandbox_sources = _load_tool_sources(config, tool_runtime, store, base_path)
         system_context = None
         if config.instructions.enabled or skills:
             subdirectory_filenames: tuple[str, ...] = ()
@@ -268,10 +270,12 @@ def build_application(
             summarizer=summarizer,
             tool_loading=_tool_loading(config, tool_runtime),
         planning=_planning(config),
+        quotas=quotas_from_config(config),
         )
         return HarnessApplication(
             catalog=catalog,
             mcp_sources=mcp_sources,
+            sandbox_sources=sandbox_sources,
             config=config,
             models=models,
             tools=tool_runtime,
@@ -334,23 +338,53 @@ def open_run_store(database: str | PathLike[str], config: HarnessConfig) -> Any:
     return SQLiteRunStore(Path(target))
 
 
+def memory_postgres_url(config: HarnessConfig, database: str | PathLike[str]) -> str:
+    """The Postgres URL for memory: [memory] url_env, else [storage] url_env, else a URL --database."""
+
+    for variable in (config.memory.url_env, config.storage.url_env):
+        if variable and os.environ.get(variable):
+            return os.environ[variable]
+    if _is_postgres_url(str(database)):
+        return str(database)
+    raise ConfigError("memory.backend = 'postgres' needs a URL: set [memory] url_env (or [storage] url_env)")
+
+
+def open_memory_store(config: HarnessConfig, base_path: Path, database: str | PathLike[str]) -> Any:
+    """The configured long-term memory store (SQLite FTS5 or Postgres full-text search)."""
+
+    if config.memory.backend == "postgres":
+        from .persistence.postgres_memory import PostgresMemoryStore
+
+        try:
+            return PostgresMemoryStore(memory_postgres_url(config, database), namespace=config.memory.namespace)
+        except RuntimeError as exc:
+            raise ConfigError(str(exc)) from exc
+    return SQLiteMemoryStore(_memory_path(config, base_path, database), namespace=config.memory.namespace)
+
+
 def _memory_path(config: HarnessConfig, base_path: Path, database: str | PathLike[str]) -> Path:
     if config.memory.database:
         return base_path / config.memory.database
     if _is_postgres_url(str(database)) or config.storage.url_env:
-        raise ConfigError("long-term memory uses SQLite: set [memory] database = \"memory.sqlite3\"")
+        raise ConfigError(
+        "memory.backend = 'sqlite' needs a file when runs are in Postgres: set [memory] database "
+        "= \"memory.sqlite3\", or use backend = \"postgres\""
+    )
     return Path(database)
 
 
 def _load_tool_sources(
     config: HarnessConfig, runtime: ToolRuntime, store: Any, base_path: Path
-) -> tuple[ToolCatalog, list[McpToolSource]]:
+) -> tuple[ToolCatalog, list[McpToolSource], list[Any]]:
     """Attach config-declared tool sources, then sync the persistent catalog."""
 
     host_policy = host_policy_from(config.network.allowed_hosts if config.network.restrict_egress else None)
 
+    sandboxed = [s for s in config.tool_sources if s.kind == "python" and s.sandbox == "container"]
     try:
         for source in config.tool_sources:
+            if source in sandboxed:
+                continue  # registered below from the catalog cache; they run in containers
             if source.kind == "python":
                 assert source.module is not None
                 PythonToolSource(source.name, source.module, source.path).load(runtime, base=base_path)
@@ -389,8 +423,28 @@ def _load_tool_sources(
         # Until the server is synced, its tools come from the catalog (last sync).
         mcp_source.register(runtime, catalog.cached_specs(server.source))
         mcp_sources.append(mcp_source)
+    sandbox_sources: list[Any] = []
+    if sandboxed:
+        from .sandbox.containers import WarmContainerPool
+        from .sandbox.python_tools import SandboxConfig, SandboxedPythonSource
+
+        pool = WarmContainerPool(name_prefix="ah-tools")
+        runtime.add_run_finalizer(pool.release)
+        runtime.add_closer(pool.close)
+        for entry in sandboxed:
+            assert entry.module is not None and entry.path is not None
+            try:
+                sandbox_source = SandboxedPythonSource(SandboxConfig(
+                    name=entry.name, module=entry.module, path=resolve_path(entry.path, base_path),
+                    image=entry.image, network=entry.network, env=entry.env,
+                    cpus=entry.cpus, memory=entry.memory,
+                ), pool)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            sandbox_source.register(runtime, catalog.cached_specs(entry.name))
+            sandbox_sources.append(sandbox_source)
     catalog.sync()
-    return catalog, mcp_sources
+    return catalog, mcp_sources, sandbox_sources
 
 
 def _planning(config: HarnessConfig) -> PlanningPolicy:

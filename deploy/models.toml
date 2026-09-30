@@ -13,10 +13,10 @@ max_retries = 2
 [storage]
 url_env = "AGENT_HARNESS_DATABASE_URL"
 
-# Long-term memory is SQLite-only; keep it on a volume if you enable it.
+# Long-term memory can live in Postgres too (full-text search); it reuses the storage URL.
 [memory]
 enabled = false
-database = "/data/memory.sqlite3"
+backend = "postgres"
 
 # API keys: principals with a tenant and a role. The key itself comes from the env.
 [[api.keys]]

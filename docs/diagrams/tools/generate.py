@@ -387,7 +387,7 @@ def end_to_end() -> Diagram:
     d.box(25, 470, 280, 250, "build_application\n\nlayered settings, profiles\ntool sources + MCP\n"
           "tool catalog sync\nplugins, hooks, subagents\nAGENTS.md, skills, planning", "purple", id="comp")
     d.arrow([(165, 720), (165, 770)], id="to_create")
-    d.box(25, 770, 280, 140, "quota check, create_run\nsystem prompt + hashes\ntenant, planning\nRUN_CREATED (queued)",
+    d.box(25, 770, 280, 140, "quota reservation,\ncreate_run (hashes,\ntenant, planning)\nRUN_CREATED (queued)",
           "blue", id="create")
     d.box(25, 1000, 280, 120, "Follow-ups re-enter:\ncontinue, approve,\nresume, rewind", "yellow", id="follow")
 
@@ -409,8 +409,8 @@ def end_to_end() -> Diagram:
     d.arrow([(830, 580), (830, 540)], id="pt_appr")
     d.box(690, 445, 280, 95, "Needs approval?\nyes -> AWAITING_INPUT", "orange", id="approval")
     d.arrow([(830, 445), (830, 410)], "no", id="appr_rt")
-    d.box(690, 275, 280, 135, "ToolRuntime\nvalidation, timeout,\nidempotency, snapshot\n(read-only in parallel)",
-          "purple", id="runtime")
+    d.box(690, 275, 280, 135, "ToolRuntime: validation,\ntimeout, idempotency;\nsandbox: warm per-run\ncontainer (docker exec)",
+          "purple", id="runtime", size=16)
     d.arrow([(830, 275), (830, 240)], id="rt_post")
     d.box(690, 105, 280, 135, "post_tool hook\nuntrusted output wrapped\nlarge output -> artifact", "purple",
           id="post_tool")
@@ -428,8 +428,8 @@ def end_to_end() -> Diagram:
     d.arrow([(970, 165), (1040, 160)], color="#22c55e", dashed=True, id="checkpoint")
     d.box(1040, 240, 260, 80, "Artifacts\nsnapshots, big outputs", "teal", id="artifacts")
     d.arrow([(970, 340), (1040, 280)], color="#22c55e", dashed=True, id="snap")
-    d.box(1040, 340, 260, 80, "Tool catalog (persistent)\n+ memory (SQLite FTS)", "teal", id="memory", size=16)
-    d.zone(1340, 55, 255, 410, "5. Observability, controls", "pink")
+    d.box(1040, 340, 260, 80, "Tool catalog (persistent)\n+ memory (SQLite / Postgres)", "teal", id="memory", size=16)
+    d.zone(1340, 55, 255, 410, "5. Ops and controls", "pink")
     d.box(1355, 100, 225, 110, "Telemetry\nJSON logs, spans,\nmetrics, cache hits", "pink", id="telemetry")
     d.arrow([(1300, 160), (1355, 155)], color="#ec4899", dashed=True, id="tel")
     d.box(1355, 230, 225, 95, "Version record\nprompt, tools,\nprofile hashes", "pink", id="versions")
@@ -489,7 +489,7 @@ def end_to_end() -> Diagram:
            "Risky calls pause the run as AWAITING_INPUT until a person approves or denies.",
            ["APPROVAL_REQUESTED", "APPROVAL_RESOLVED"])
     d.step("runtime", "appr_rt", "Run the tool",
-           "Validation, timeout, idempotency, snapshot; several read-only calls run in parallel.",
+           "Validation, timeout, idempotency; commands and sandboxed tools use the run's warm container.",
            ["TOOL_REQUESTED", "FILE_SNAPSHOT"])
     d.step("post_tool", "rt_post", "Record the result",
            "post_tool hook; untrusted output wrapped as data; large outputs become artifacts.",
@@ -840,15 +840,15 @@ def api_access() -> Diagram:
     d.diamond(1100, 75, 240, 130, "run in my\ntenant?", id="tenant")
     d.box(1360, 105, 120, 70, "404", "red", id="e404")
     d.arrow([(1340, 140), (1360, 140)], color="#ef4444", id="n404")
-    d.diamond(1100, 400, 240, 130, "quota OK?\n(POST /runs)", size=16, id="quota")
+    d.diamond(1100, 400, 240, 130, "reserve quota\n(atomic)?", size=16, id="quota")
     d.arrow([(1220, 205), (1220, 400)], "yes", id="b5")
     d.box(1360, 430, 120, 70, "429", "red", id="e429")
     d.arrow([(1340, 465), (1360, 465)], color="#ef4444", id="n429")
-    d.box(780, 425, 260, 80, "create_run\ntenant + created_by", "green", id="create")
+    d.box(780, 425, 260, 80, "create_run: budget\ncapped to the grant", "green", id="create", size=16)
     d.arrow([(1100, 465), (1040, 465)], "yes", id="b6")
     d.box(460, 425, 260, 80, "Queue\n(Postgres: SKIP LOCKED)", "teal", id="queue")
     d.arrow([(780, 465), (720, 465)], id="b7")
-    d.box(140, 425, 260, 80, "Worker\nlease, run, checkpoint", "purple", id="worker")
+    d.box(140, 425, 260, 80, "Worker: lease, run;\nquota re-checked each step", "purple", id="worker", size=16)
     d.arrow([(460, 465), (400, 465)], id="b8")
     d.box(140, 600, 580, 90, "Run store (SQLite / Postgres): migrations on open,\nevents masked by redaction",
           "teal", id="store", size=16)
@@ -863,11 +863,15 @@ def api_access() -> Diagram:
     d.step("principal", "b2", "Principal", "The key names a principal with a tenant and a role.")
     d.step("role", "b3", "Authorize", "viewer reads; operator acts on runs; admin changes modes and rewinds.")
     d.step("tenant", "b4", "Tenant isolation", "Runs of other tenants answer 404, so their existence is not leaked.")
-    d.step("quota", "b5", "Quotas", "Runs, tokens, and cost per day and concurrent runs; over the limit -> 429.")
-    d.step("create", "b6", "Create the run", "Stamped with the tenant and the key's name.", ["RUN_CREATED"])
+    d.step("quota", "b5", "Reserve quota",
+           "One transaction reads usage + other reservations and reserves budget; nothing left -> 429.")
+    d.step("create", "b6", "Create the run",
+           "Budget capped to the reservation; stamped with the tenant and the key's name.", ["RUN_CREATED"])
     d.step("queue", "b7", "Enqueue", "Workers on any host claim runs with leases.")
-    d.step("worker", "b8", "Execute", "A worker leases the run, executes it, and checkpoints every step.")
-    d.step("store", "b9", "Durable and masked", "Secrets are masked in events as they are written.")
+    d.step("worker", "b8", "Execute",
+           "A worker leases the run; the tenant's quota is re-checked before every model call.")
+    d.step("store", "b9", "Durable and masked",
+           "Secrets masked in events; the reservation is released when the run finishes.")
     d.step("actor", "jump", "Accountable decisions", "Approvals and mode changes record which key acted.",
            ["APPROVAL_RESOLVED", "MODE_CHANGED"])
     d.step("ready", "jump", "Health", "/readyz checks the store and reports the schema version.")

@@ -475,6 +475,7 @@ Tools come from **sources** declared in config. `examples/tools.toml` shows all 
 | Built-in tools | always (coding tools when `[coding] enabled`) | `echo`, `read_file`, ... |
 | Web search (Tavily) | `[web_search] enabled = true`, key in `TAVILY_API_KEY` | `web_search` |
 | Your Python code | `[[tools]] kind = "python"`, `module = "pkg.mod:register"` | whatever you register |
+| Your Python code, sandboxed | the same, plus `sandbox = "container"` and `path = "tools"`: runs in the run's warm container, no network by default | whatever you register |
 | HTTP APIs | `[[tools]] kind = "http"` with `url`, `method`, `input_schema` | the entry's `name` |
 | MCP servers | `[[mcp_servers]]` with `command = [...]` (stdio) or `transport = "http"` | `<server>__<tool>` |
 
@@ -507,6 +508,16 @@ agent-harness tools disable web_search --config models.toml
   `headers_env = {...}`). A stdio server sees only those variables plus `PATH`, `HOME`,
   and locale variables.
 
+**Sandboxed Python tools.** With `sandbox = "container"`, your module runs in a container
+instead of the harness process:
+- **Isolation:** no network unless `network = true`, a read-only root, dropped capabilities,
+  CPU/memory/process limits, and your module mounted read-only.
+- **Discovery:** its tool definitions are read inside a one-shot container during
+  `tools sync` and cached in the catalog.
+- **Calls:** each call runs in the run's warm container, about 50–150 ms per call once warm.
+
+Docker must be available where runs execute.
+
 **Untrusted output.** Output from web search, HTTP tools, and MCP servers is wrapped in
 `<untrusted-tool-output>` tags, with a note that it is data, not instructions. This is a
 defence against prompt injection. Set `trust = "trusted"` on an HTTP tool only for
@@ -531,7 +542,9 @@ compose setup with Postgres, the API, and two workers.
 |---|---|
 | **Storage** | SQLite by default. With `pip install -e '.[postgres]'`, `--database postgresql://...` or `[storage] url_env` uses Postgres. Both run versioned migrations on start, and both pass one conformance suite (`tests/test_store_conformance.py`). |
 | **API access** | `[[api.keys]]`: each key is a principal with a tenant and a role (viewer, operator, or admin). Keys are configured by SHA-256 or read from the environment. Principals only see their tenant's runs, and approvals and mode changes record who acted. |
-| **Quotas** | `[[quotas]]` limits runs, tokens, and cost per tenant over 24 hours, plus concurrent runs. Checked when a run is created or continued (HTTP 429). |
+| **Quotas** | `[[quotas]]` limits runs, tokens, and cost per tenant over 24 hours, plus concurrent runs. Admission **reserves** budget atomically and caps the run's budget to the grant. The orchestrator re-checks at every step. Refusals are HTTP 429 or CLI exit 2. |
+| **Memory** | `[memory] backend = "sqlite"` (FTS5) or `"postgres"` (full-text search). `agent-harness memory migrate --from sqlite:memory.sqlite3` copies every note. |
+| **Sandboxing** | `[coding.docker] mode = "per_run"` keeps one warm container per run for coding commands. Sandboxed Python tools run in the run's container. The container is removed when the run ends. |
 | **Secrets** | Credential fields accept `NAME`, `env:NAME`, or `file:/run/secrets/name`. |
 | **Egress** | With `[network] restrict_egress = true`, HTTP tools, web search, and MCP over HTTP may only reach `allowed_hosts`. |
 | **Redaction** | On by default. Tokens and keys are masked in persisted events, run errors, and telemetry. |
