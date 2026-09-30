@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 860" width="1500" height="860" font-family="Helvetica, Arial, sans-serif">
+<rect width="1500" height="860" fill="#ffffff"/>
+<text x="40" y="50" font-size="30" fill="#1e1e1e" font-weight="bold"><tspan x="40" dy="0">API access: keys, roles, tenants, quotas</tspan></text>
+<g class="node" id="n-req"><rect x="40" y="100" width="220" height="80" rx="12" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="150.0" y="135.1">HTTP request</tspan><tspan x="150.0" y="157.6">Bearer &lt;key&gt;</tspan></text></g>
+<g class="edge" id="e-b1"><polyline points="260,140 300,140" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="300,140 289.2,145.2 289.2,134.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-auth"><polygon points="410.0,75 520,140.0 410.0,205 300,140.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="410.0" y="146.3">known key?</tspan></text></g>
+<g class="node" id="n-e401"><rect x="300" y="290" width="220" height="70" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="410.0" y="331.3">401</tspan></text></g>
+<g class="edge" id="e-n401"><polyline points="410,205 410,290" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="410,290 404.8,279.2 415.2,279.2" fill="#ef4444"/></g>
+<g class="edge" id="e-b2"><polyline points="520,140 560,140" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="560,140 549.2,145.2 549.2,134.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-principal"><rect x="560" y="100" width="240" height="80" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="680.0" y="135.1">Principal</tspan><tspan x="680.0" y="157.6">name, tenant, role</tspan></text></g>
+<g class="edge" id="e-b3"><polyline points="800,140 840,140" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="840,140 829.2,145.2 829.2,134.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-role"><polygon points="950.0,75 1060,140.0 950.0,205 840,140.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="950.0" y="125.6">role allows?</tspan><tspan x="950.0" y="145.6">viewer&lt;operator</tspan><tspan x="950.0" y="165.6">&lt;admin</tspan></text></g>
+<g class="node" id="n-e403"><rect x="840" y="290" width="220" height="70" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="950.0" y="331.3">403</tspan></text></g>
+<g class="edge" id="e-n403"><polyline points="950,205 950,290" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="950,290 944.8,279.2 955.2,279.2" fill="#ef4444"/></g>
+<g class="edge" id="e-b4"><polyline points="1060,140 1100,140" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1100,140 1089.2,145.2 1089.2,134.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-tenant"><polygon points="1220.0,75 1340,140.0 1220.0,205 1100,140.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1220.0" y="135.1">run in my</tspan><tspan x="1220.0" y="157.6">tenant?</tspan></text></g>
+<g class="node" id="n-e404"><rect x="1360" y="105" width="120" height="70" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1420.0" y="146.3">404</tspan></text></g>
+<g class="edge" id="e-n404"><polyline points="1340,140 1360,140" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="1360,140 1349.2,145.2 1349.2,134.8" fill="#ef4444"/></g>
+<g class="node" id="n-quota"><polygon points="1220.0,400 1340,465.0 1220.0,530 1100,465.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1220.0" y="460.6">quota OK?</tspan><tspan x="1220.0" y="480.6">(POST /runs)</tspan></text></g>
+<g class="edge" id="e-b5"><polyline points="1220,205 1220,400" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1220,400 1214.8,389.2 1225.2,389.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-e429"><rect x="1360" y="430" width="120" height="70" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1420.0" y="471.3">429</tspan></text></g>
+<g class="edge" id="e-n429"><polyline points="1340,465 1360,465" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="1360,465 1349.2,470.2 1349.2,459.8" fill="#ef4444"/></g>
+<g class="node" id="n-create"><rect x="780" y="425" width="260" height="80" rx="12" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="910.0" y="460.1">create_run</tspan><tspan x="910.0" y="482.6">tenant + created_by</tspan></text></g>
+<g class="edge" id="e-b6"><polyline points="1100,465 1040,465" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="1040,465 1050.8,459.8 1050.8,470.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-queue"><rect x="460" y="425" width="260" height="80" rx="12" fill="#c3fae8" stroke="#22c55e" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="590.0" y="460.1">Queue</tspan><tspan x="590.0" y="482.6">(Postgres: SKIP LOCKED)</tspan></text></g>
+<g class="edge" id="e-b7"><polyline points="780,465 720,465" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="720,465 730.8,459.8 730.8,470.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-worker"><rect x="140" y="425" width="260" height="80" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="270.0" y="460.1">Worker</tspan><tspan x="270.0" y="482.6">lease, run, checkpoint</tspan></text></g>
+<g class="edge" id="e-b8"><polyline points="460,465 400,465" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="400,465 410.8,459.8 410.8,470.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-store"><rect x="140" y="600" width="580" height="90" rx="12" fill="#c3fae8" stroke="#22c55e" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="430.0" y="640.6">Run store (SQLite / Postgres): migrations on open,</tspan><tspan x="430.0" y="660.6">events masked by redaction</tspan></text></g>
+<g class="edge" id="e-b9"><polyline points="270,505 270,600" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="270,600 264.8,589.2 275.2,589.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-actor"><rect x="780" y="600" width="260" height="90" rx="12" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="910.0" y="640.0">Approve / mode change</tspan><tspan x="910.0" y="662.5">actor recorded</tspan></text></g>
+<g class="node" id="n-ready"><rect x="1100" y="600" width="380" height="90" rx="12" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="1290.0" y="640.0">/healthz  /readyz</tspan><tspan x="1290.0" y="662.5">(no key; store + schema version)</tspan></text></g>
+<text x="40" y="766" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">Keys come from [[api.keys]] by SHA-256 or env var; tenant &#x27;*&#x27; sees every tenant. Quotas: runs, tokens, cost per 24h, and concurrent runs.</tspan></text>
+<rect x="395.04" y="234.5" width="29.92" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="410.0" y="253.1">no</tspan></text>
+<rect x="520.56" y="127.0" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="540.0" y="145.6">yes</tspan></text>
+<rect x="935.04" y="234.5" width="29.92" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="950.0" y="253.1">no</tspan></text>
+<rect x="1060.56" y="127.0" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1080.0" y="145.6">yes</tspan></text>
+<rect x="1200.56" y="289.5" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1220.0" y="308.1">yes</tspan></text>
+<rect x="1050.56" y="452.0" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1070.0" y="470.6">yes</tspan></text>
+</svg>

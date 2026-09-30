@@ -541,8 +541,15 @@ compose setup with Postgres, the API, and two workers.
 
 ## Architecture Diagrams
 
-Flow diagrams (SVG, plus editable Excalidraw files) are in [`docs/diagrams/`](docs/diagrams/README.md):
-the end-to-end flow, tool permissions and approval, subagents, and context summarization.
+Flow diagrams are in [`docs/diagrams/`](docs/diagrams/README.md), each as a static SVG, a
+self-running animated SVG, and an editable Excalidraw file. They cover:
+- the end-to-end flow;
+- tool permissions and approval;
+- subagents;
+- context summarization;
+- the tool platform;
+- plan-and-execute;
+- API access and tenancy.
 
 ## Context Window
 

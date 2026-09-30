@@ -24,9 +24,13 @@ agent-harness run \
   "Inspect the repository and explain the failing tests"
 ```
 
-Useful options: `--mode plan|accept_edits|bypass`, `--stream`, `--max-steps`,
-`--max-wall-seconds`, `--max-tokens`, `--max-cost-usd`, and `--arg key=value` for
-prompt templates (`"/review app.py"`).
+Useful options:
+- **Permission mode:** `--mode plan|accept_edits|bypass`.
+- **Planning:** `--plan` / `--no-plan` turn plan-and-execute on or off (section 18).
+- **Output:** `--stream`.
+- **Budgets:** `--max-steps`, `--max-wall-seconds`, `--max-tokens`, `--max-cost-usd`.
+- **Templates:** `--arg key=value` fills a prompt template (`"/review app.py"`).
+- **Storage:** `--database` takes a SQLite file or a `postgresql://` URL.
 
 The call flow is:
 
@@ -58,10 +62,15 @@ ModelGateway (Ollama, llama.cpp, Modal, OpenAI-compatible, LiteLLM)
     ↓
 ToolRuntime (+ durable idempotency store, artifacts, memory, load_skill)
     ↓
-SQLiteRunStore
+Tool sources: [[tools]] python/http, web_search, [[mcp_servers]]
     ↓
-AgentOrchestrator (context builder, summarizer, hooks, permissions,
-                   subagents, file snapshots, system context)
+Run store: SQLite, or Postgres (migrations run on open)
+    ↓
+Tool catalog sync (persistent; operator switches applied)
+    ↓
+AgentOrchestrator (context builder, summarizer, hooks, permissions, subagents,
+                   file snapshots, system context, tool loading, planning;
+                   writes through the redacting store)
 ```
 
 Relevant file: `src/agent_harness/application.py`
@@ -84,8 +93,20 @@ It performs these actions:
   mode.
 - **Subagents and snapshots:** registers subagent definitions and the workspace snapshotter
   used by rewind.
+- **Tool sources:** loads `[[tools]]` (Python modules and HTTP tools), the built-in
+  `web_search`, and `[[mcp_servers]]`.
+  - MCP tools come from the catalog cache until `tools sync`; the servers themselves start
+    on first use.
+  - Egress rules from `[network]` apply to HTTP tools, web search, and MCP over HTTP
+    (section 19).
+- **Store:** opens SQLite, or Postgres for a `postgresql://` URL or `[storage] url_env`.
+  Versioned migrations run first. Configuration errors are raised before any connection
+  is made.
+- **Catalog:** records every registered tool in the persistent `tool_catalog` and hides
+  tools an operator disabled.
 - **Orchestrator:** creates it with a `BudgetedContextBuilder` for profiles that set
-  `context_window`.
+  `context_window`, the tool-loading and planning policies, and a store wrapper that
+  masks secrets in events (`[redaction]`).
 
 The orchestration loop does not know whether the model is served by Ollama, llama.cpp,
 Modal, or another provider.
@@ -112,13 +133,21 @@ run = await app.orchestrator.create_run(
     versions=app.run_versions("local"),
     messages=[message],
     budget=RunBudget(...),
+    planning=None,                   # --plan / --no-plan, else [planning] enabled
+    tenant="default",                # the API sets the caller's tenant
+    created_by=None,                 # the API sets the caller's key name
 )
 ```
+
+Before this, the CLI and API check the tenant's **quotas**: runs, tokens, and cost over 24
+hours, plus concurrent runs. A refusal is HTTP 429 from the API, or exit code 2 from the
+CLI (section 20).
 
 `create_run` does four things before any model is contacted:
 
 1. **System context:** for top-level runs, the instruction files and the skills index are
-   inserted as one system message. They are read once and stay fixed for the run.
+   inserted as one system message. They are read once and stay fixed for the run. In
+   plan-and-execute mode the planner instructions are added as well.
 2. **`user_prompt` hook:** it can block the prompt or add context.
 3. **Version record:** it computes the hashes of the system prompt, tool specs, model
    profile, and instruction context, plus the harness version.
@@ -127,7 +156,8 @@ run = await app.orchestrator.create_run(
 ```text
 RunStatus.QUEUED
     ↓
-RUN_CREATED event (versions, mode, route, template)
+RUN_CREATED event (versions, mode, route, template, planning, tenant,
+                   tools: the spec hash of every tool offered)
 ```
 
 This gives every run a stable `run_id`.
@@ -165,6 +195,11 @@ At the start of each step the orchestrator:
 - **Checks budgets:** steps, wall clock, tokens, and cost (section 13).
 - **Runs pending tool calls first:** any tool calls from the last model response that have
   not run yet, which makes crash recovery exact.
+- **Runs independent work in parallel:** when one response holds several read-only tool
+  calls, or several `agent` calls, they run concurrently before the ordered loop records
+  them (section 8).
+- **Advances the plan:** in plan-and-execute mode the orchestrator may delegate ready
+  agent steps, or give the model its next step, before calling it (section 18).
 - **Applies steering:** messages queued with `agent-harness steer` are injected at this model
   turn boundary (`STEER_APPLIED`).
 
@@ -191,7 +226,12 @@ post_model hook
 ```
 
 The request contains the context view of the conversation, the tool specifications (in a
-fixed order), and run metadata. The provider adapter converts it into the
+fixed order), and run metadata. Which tools are offered depends on the run:
+- **Normally:** every enabled tool, minus any subagent tool restrictions.
+- **`[tool_loading] mode = "dynamic"`:** only the `core` tools, `search_tools` /
+  `load_tools`, and the tools this run has loaded. Loaded tools are appended in load
+  order, so the list only grows at the end.
+- **Plan-and-execute before a plan exists:** only read-only tools plus `create_plan`. The provider adapter converts it into the
 provider-specific format; all supported servers use OpenAI-compatible `/chat/completions`.
 
 - **Context window:** for profiles with `context_window`, the view is trimmed in large
@@ -223,6 +263,9 @@ Assistant response
     ↓
 Steer queued meanwhile? → reopen the turn
     ↓
+Plan-and-execute? → the answer completes the current step; the orchestrator
+                    gives the next step (or asks for the final answer)
+    ↓
 stop hook (may ask to continue, at most 3 times)
     ↓
 RUN_COMPLETED
@@ -252,7 +295,17 @@ The tool call is not executed blindly.
 
 ## 8. Tool decision and validation
 
-Each tool call goes through these checks, in order:
+**Parallel prefetch.** When one response holds several calls, eligible work starts
+concurrently first:
+- **Read-only calls:** they run together under the same idempotency keys, so the ordered
+  loop below finds their results immediately.
+- **`agent` calls:** their subagents are created one by one and then run together, with
+  the parent's remaining tokens and cost split between them.
+
+Calls that a rule denies or asks about are not prefetched, and nothing is prefetched when
+a `pre_tool` hook is configured. Events and ordering are the same as without prefetch.
+
+Each tool call then goes through these checks, in order:
 
 1. **Repeated-call check:** more than `max_identical_tool_calls` (5) identical calls since
    the last non-read-only call are refused. The run fails after `max_refused_repeats` (2)
@@ -266,16 +319,22 @@ Each tool call goes through these checks, in order:
    4. allow rules;
    5. otherwise the tool's risk policy (by default, `high_risk` and `destructive` tools
       ask).
-4. **Built-in tools:** `agent` (subagents), `exit_plan` (plan mode), and `todo_write`
-   (task list) are handled by the orchestrator itself.
+4. **Built-in tools:** the orchestrator handles these itself: `agent` (subagents),
+   `exit_plan` (plan mode), `todo_write` (task list), `search_tools` / `load_tools`
+   (dynamic loading, `TOOLS_LOADED`), and `create_plan` / `update_plan` /
+   `revise_plan` (plan-and-execute). A call to a tool that exists but is not loaded
+   tells the model to load it first.
 5. **File snapshot:** before a tool that writes files, the touched files are snapshotted
    (`FILE_SNAPSHOT`) so the run can be rewound.
 6. **ToolRuntime:** checks the tool name, argument schema and types, required fields,
    timeout, and idempotency key. The idempotency result is stored durably, so a replay
    after a crash reuses it.
 7. **`post_tool` hook:** it can replace the result or add context.
-8. **Record the result:** outputs larger than the artifact threshold are stored as
-   artifacts and referenced from the event.
+8. **Record the result:**
+   - Output from untrusted tools (web search, HTTP tools, MCP) is wrapped in
+     `<untrusted-tool-output>` tags with a note that it is data.
+   - Outputs larger than the artifact threshold are stored as artifacts and referenced
+     from the event.
 
 For coding tools, additional controls apply:
 
@@ -467,6 +526,8 @@ A run also stops on:
 - **Cancellation:** `agent-harness cancel`, the API, or a parent run being cancelled.
 - **Permanent errors:** a permanent model or tool error, including
   `ContextWindowExceededError`.
+- **Plan failure:** a plan step fails after the plan was already revised `max_replans`
+  times.
 - **Hooks:** a `session_start`, `user_prompt`, or `pre_model` hook that denies.
 
 Possible persisted statuses are:
@@ -496,18 +557,31 @@ A run is not necessarily over when it stops:
 | `mode RUN_ID plan`                | Changes the permission mode (`MODE_CHANGED`).                        |
 | `resume RUN_ID`                   | Continues a run after a crash or restart.                            |
 | `rewind RUN_ID --to-step N`       | Restores files and the conversation to before step N (dry run without `--yes`). History is archived, not deleted (`REWOUND`). |
-| `status RUN_ID`                   | Shows tokens, cost, cache-hit rate, steps against budget, the task list, and subagents. |
+| `status RUN_ID`                   | Shows tokens, cost, cache-hit rate, steps against budget, the task list, subagents, and the plan. |
+| `tools list / sync / enable / disable` | Shows the persistent tool catalog, discovers MCP tools, and switches tools on or off across restarts. |
+| `gc --older-than-days N [--yes]`  | Retention: deletes finished runs older than N days (dry run without `--yes`). |
 
 **Subagents.** When the model calls the `agent` tool, the orchestrator creates a child run
 with its own prompt, tools, profile, and a budget capped by what the parent has left. The
 parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
-(`SUBAGENT_FINISHED`), and the child's usage rolls up into the parent. Depth and count are
-limited by `max_depth` and `max_per_run`.
+(`SUBAGENT_FINISHED`), and the child's usage rolls up into the parent.
+- **Limits:** depth and count are limited by `max_depth` (default 2, so subagents may
+  start their own) and `max_per_run`.
+- **Parallel calls:** several `agent` calls in one response run concurrently.
+- **Examples:** `examples/subagents.toml` has three working definitions.
 
 ## 15. Other entry points
 
 - **HTTP API:** `agent-harness serve` exposes the same operations and runs in-process queue
-  workers:
+  workers.
+  - **Principals:** each API key (`[[api.keys]]`) is a principal with a tenant and a role.
+  - **Roles:** `viewer` reads; `operator` also creates, continues, steers, cancels,
+    resumes, and approves; `admin` also changes modes and rewinds.
+  - **Tenant isolation:** runs in other tenants return 404.
+  - **Audit:** approvals and mode changes record the acting key.
+  - **Health:** `GET /healthz` and `GET /readyz` need no key.
+
+  Endpoints:
   - Create a run with `POST /runs`, and read it with `GET /runs/{id}`.
   - Events: `GET /runs/{id}/events`, or live over SSE with `GET /runs/{id}/events/stream`.
   - Control a run with `POST /runs/{id}/cancel`, `.../resume`, `.../mode`, and `.../rewind`.
@@ -515,8 +589,9 @@ limited by `max_depth` and `max_per_run`.
     steers one that is still running.
   - Approvals: read with `GET /runs/{id}/approval`, decide with `POST /runs/{id}/approval`.
   - Usage: `GET /runs/{id}/usage`.
-- **Queue workers:** `agent-harness worker` claims queued runs with leases in SQLite, so
-  several workers can share one database. An expired lease makes the run available to
+- **Queue workers:** `agent-harness worker` claims queued runs with leases, so several
+  workers can share one database. On Postgres the claim uses `FOR UPDATE SKIP LOCKED` and
+  workers can run on many hosts. An expired lease makes the run available to
   another worker, which resumes it.
 - **`agent-harness doctor --model-profile X`:** a live reachability and tool-call check
   against a real server.
@@ -598,12 +673,84 @@ The CLI distinguishes run results from process errors:
 |-----------------------------------------------------|-----------|
 | Run completed successfully                          | 0         |
 | Run failed, cancelled, or budget exhausted          | 1         |
-| Invalid configuration or command-line input         | 2         |
+| Invalid configuration or command-line input, or a quota refusal | 2 |
 | Approval is required (the run is `awaiting_input`)  | 3         |
 
 The final assistant response is written to stdout. Operational information such as
 `run_id`, status, errors, and `approval_required=...` is written to stderr. `doctor` and
 `eval` exit with 1 when a check or scenario fails.
+
+## 18. Plan-and-execute
+
+Turn it on with `run --plan`, `"planning": true` on the API, or `[planning] enabled = true`.
+The model proposes the plan, and the orchestrator owns and drives it. Diagrams:
+`docs/diagrams/06-plan-and-execute`.
+
+```text
+Explore with read-only tools
+    ↓
+create_plan(goal, steps with ids, depends_on, optional agent)
+    ↓ validated: unique ids, known dependencies, no cycles, known agents
+PLAN_CREATED (the plan is stored on the run)
+    ↓
+Orchestrator loop over ready steps (dependencies completed)
+    ├── agent steps → child runs started by the orchestrator, several at once,
+    │                 results collected without a model turn
+    ├── other steps → "[Plan] Execute step …" for the main model;
+    │                 update_plan or a final answer completes the step
+    └── a failed step → "[Plan] … failed" → revise_plan (at most max_replans)
+    ↓
+All steps finished → "[Plan] … write the final answer" → final answer → completed
+```
+
+- **One message per boundary:** the orchestrator adds at most one user message per
+  boundary. Delegated results wait in `plan.outbox` until the next message, so a pause or
+  crash loses nothing.
+- **Children:** plan children have deterministic ids. A resume finds them instead of
+  starting new ones, and an approval inside a child pauses the parent.
+- **Events:** `plan_created`, `plan_step_updated`, and `plan_revised`. `status` and
+  `GET /runs/{id}` show the plan.
+
+## 19. Tool sources, the catalog, and MCP
+
+```text
+[[tools]] python / http    [web_search]    [[mcp_servers]] stdio / http
+          └──────────────┬───────┴───────────────┘
+                   ToolRuntime registry (handlers are code)
+                         ↓
+         tool_catalog table: source, spec hash, risk, trust,
+         enabled (operator switch), available (still provided)
+                         ↓
+         offered to the model (all, or core + loaded in dynamic mode)
+```
+
+- **Persistence:** the catalog survives restarts. Every process re-attaches handlers from
+  the configured sources and then syncs the catalog.
+- **Switches:** `tools disable NAME` persists.
+- **Removed tools:** a tool its source stopped providing is marked unavailable, not
+  deleted.
+- **MCP servers:**
+  - Tools are named `server__tool`; their schemas are normalized to the validator's
+    subset.
+  - They ask for approval unless listed in `read_only`, and their output is untrusted.
+  - A stdio server sees only the environment variables named in `env` (plus
+    `PATH`/`HOME`).
+  - Servers start on first use and are synced before runs execute when `sync_on_start`
+    is set.
+
+## 20. Production controls
+
+| Control | Where it acts |
+|---|---|
+| Quotas (`[[quotas]]`) | Before a run is created or continued (API 429, CLI exit 2) |
+| API principals (`[[api.keys]]`) | Every API request: role check, then tenant check on the run |
+| Secret references (`env:`, `file:`) | Whenever a model or tool credential is read |
+| Egress allowlist (`[network]`) | Before HTTP tools, web search, or MCP over HTTP send a request |
+| Redaction (`[redaction]`) | As events, run errors, and telemetry are written |
+| Migrations | When a store is opened (a newer schema is refused) |
+| Retention (`gc`) | On demand. Events stay append-only except during a purge |
+
+See `docs/DEPLOYMENT.md` for the container, compose file, and upgrade procedure.
 
 ## Complete flow
 
@@ -614,20 +761,22 @@ Build application
     ↓
 Load layered settings, plugins, templates, skills
     ↓
-Create model gateway, tools, and store
+Create model gateway, tools + tool sources + MCP, store (migrate), tool catalog
     ↓
-Create durable run
-(system context, user_prompt hook, version hashes, RUN_CREATED)
+Quota check (tenant) → create durable run
+(system context, planner instructions, user_prompt hook, version hashes, RUN_CREATED)
     ↓
 Start orchestrator (RUN_STARTED, session_start hook)
     ↓
-Step boundary: budgets, pending tools, steering
+Step boundary: budgets, pending tools (parallel prefetch), plan step or delegation, steering
     ↓
-pre_model hook → context view (+ summary) → call model
-(retries, fallback, cost)
+pre_model hook → context view (+ summary) → offered tools (all / core + loaded)
+→ call model (retries, fallback, cost)
     ↓
 Model returns text or tool call
     ├── Text
+    │     ↓
+    │   plan-and-execute: complete the step → next step or final answer
     │     ↓
     │   stop hook (may continue)
     │     ↓
@@ -654,7 +803,8 @@ Model returns text or tool call
                 ↓
               Snapshot files → execute tool (validation, timeout, idempotency)
                 ↓
-              post_tool hook → persist result (artifact if large)
+              post_tool hook → persist result (untrusted output wrapped,
+              artifact if large, secrets masked in events)
                 ↓
               Next step
 ```
