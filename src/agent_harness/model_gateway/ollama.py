@@ -81,6 +81,9 @@ class OllamaClient(OpenAICompatibleClient):
             payload["options"] = options
         if request.tools:
             payload["tools"] = [self._tool_payload(tool) for tool in request.tools]
+        if request.response_schema is not None:
+            # Native structured outputs; /api/chat has no tool_choice, so it is not sent.
+            payload["format"] = request.response_schema
         return payload
 
     def _preprocess_response(self, raw: dict[str, Any]) -> dict[str, Any]:

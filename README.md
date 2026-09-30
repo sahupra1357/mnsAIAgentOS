@@ -456,6 +456,43 @@ fallback = ["claude"]                   # use it only when Modal keeps failing
 Alternatively, run the LiteLLM Proxy yourself and point an ordinary
 `openai_compatible` profile at it.
 
+## Structured Output
+
+A run can be required to end with a JSON result that matches a schema:
+
+```bash
+agent-harness run --config models.toml --output-schema examples/schemas/incident_summary.json \
+  "Summarize the incident in incident.md"
+# stdout: the validated JSON result
+```
+
+Over HTTP, pass `"output_schema": {...}` to `POST /runs`; `GET /runs/{id}` returns the
+validated value as `result` (and the final text as `output`, as before). In code:
+`create_run(..., output_schema=schema)`, then read `run.output`.
+
+- **Schema vocabulary:** the same subset tools use (`type`, `properties`, `required`,
+  `additionalProperties`, `items`, `enum`, min/max bounds, `pattern`). Anything else is
+  rejected when the run is created.
+- **Run without tools:** the schema is sent as `response_format` (`json_schema`), or as
+  `format` for native Ollama, so the server constrains the reply.
+- **Run with tools:** constraining every reply would stop tool calls, so the model gets a
+  `submit_result` tool whose parameters are the schema (non-object schemas are wrapped
+  as `{"result": ...}`). A valid call ends the run without another model turn. An
+  invalid call returns the validation error to the model.
+- **Plain-text answers:** a final answer that parses as valid JSON is accepted in both
+  modes. Otherwise the model is asked again; with tools, that request sets
+  `tool_choice` to `submit_result`. After 2 rejected answers the run fails. Each
+  rejection is an `output_rejected` event.
+- **Continue:** a continued run must produce a new result.
+- **Limits:** `output_schema` cannot be combined with plan-and-execute (`--plan`).
+  Servers differ in how strictly they enforce `response_format` and `tool_choice`
+  (Ollama's native API has no `tool_choice`), so the harness always validates the result
+  itself.
+
+`ModelRequest.response_schema` and `ModelRequest.tool_choice` (`"auto" | "none" |
+"required" | <tool name>`) are also available to custom callers of a model client. Both
+default to `None`, which leaves the request payload unchanged.
+
 ## Planning and Parallel Delegation
 
 **Plan-and-execute.** Turn it on for one run with `agent-harness run --plan "..."` or

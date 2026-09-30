@@ -287,6 +287,13 @@ class OpenAICompatibleClient:
         if request.max_output_tokens is not None:
             # Chat-completions implementations broadly support max_tokens.
             payload["max_tokens"] = request.max_output_tokens
+        if request.response_schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "output", "schema": request.response_schema, "strict": True},
+            }
+        if request.tool_choice is not None:
+            payload["tool_choice"] = tool_choice_payload(request.tool_choice)
         return payload
 
     @staticmethod
@@ -390,6 +397,17 @@ class OpenAICompatibleClient:
             metadata=metadata,
             reasoning=reasoning,
         )
+
+
+_TOOL_CHOICE_MODES = frozenset({"auto", "none", "required"})
+
+
+def tool_choice_payload(choice: str) -> object:
+    """OpenAI-style ``tool_choice``: a mode string, or one named function."""
+
+    if choice in _TOOL_CHOICE_MODES:
+        return choice
+    return {"type": "function", "function": {"name": choice}}
 
 
 _REASONING_FIELDS = ("reasoning_content", "reasoning")

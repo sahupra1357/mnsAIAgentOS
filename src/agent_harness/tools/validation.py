@@ -106,6 +106,12 @@ def validate_arguments(arguments: Mapping[str, Any], schema: Mapping[str, Any]) 
     _validate(arguments, schema, path="$")
 
 
+def validate_value(value: Any, schema: Mapping[str, Any]) -> None:
+    """Validate any JSON value (not only an argument object) against a schema."""
+
+    _validate(value, schema, path="$")
+
+
 def _validate(value: Any, schema: Mapping[str, Any], *, path: str) -> None:
     if "enum" in schema and value not in schema["enum"]:
         raise ArgumentValidationError(f"{path}: value is not in the allowed enum")

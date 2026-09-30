@@ -81,6 +81,7 @@ class EventType(StrEnum):
     PLAN_CREATED = "plan_created"
     PLAN_STEP_UPDATED = "plan_step_updated"
     PLAN_REVISED = "plan_revised"
+    OUTPUT_REJECTED = "output_rejected"
 
 
 class PermissionMode(StrEnum):
@@ -183,6 +184,10 @@ class ModelRequest:
     # None defers to the selected model profile's configured timeout.
     timeout_seconds: float | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    # A JSON Schema the reply must match (sent as response_format / format), or None.
+    response_schema: JsonObject | None = None
+    # "auto" | "none" | "required" | the name of one offered tool; None leaves it to the server.
+    tool_choice: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +270,10 @@ class RunRecord:
     # Ownership (Phase 9): the tenant whose quotas and API keys govern the run.
     tenant: str = "default"
     created_by: str | None = None
+    # Structured output (Phase 11c): the JSON Schema the final result must match,
+    # and the validated result once the run produced it.
+    output_schema: JsonObject | None = None
+    output: Any = None
 
 
 @dataclass(frozen=True, slots=True)
