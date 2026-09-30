@@ -43,6 +43,7 @@ from .domain import ToolRisk, ToolTrust
 from .mcp.source import McpToolSource
 from .tool_catalog import ToolCatalog
 from .tool_loading import ToolLoadingPolicy
+from .planning import PlanningPolicy
 from .tool_sources import HttpToolSource, PythonToolSource, ToolSourceError, WebSearchSource
 
 
@@ -248,6 +249,7 @@ def build_application(
             ),
             summarizer=summarizer,
             tool_loading=_tool_loading(config, tool_runtime),
+        planning=_planning(config),
         )
         return HarnessApplication(
             catalog=catalog,
@@ -319,6 +321,17 @@ def _load_tool_sources(
         mcp_sources.append(mcp_source)
     catalog.sync()
     return catalog, mcp_sources
+
+
+def _planning(config: HarnessConfig) -> PlanningPolicy:
+    try:
+        return PlanningPolicy(
+            enabled=config.planning.enabled,
+            max_plan_steps=config.planning.max_plan_steps,
+            max_replans=config.planning.max_replans,
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _tool_loading(config: HarnessConfig, runtime: ToolRuntime) -> ToolLoadingPolicy:

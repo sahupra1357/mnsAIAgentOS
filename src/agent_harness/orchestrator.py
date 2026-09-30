@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import field, replace
@@ -22,6 +23,24 @@ from agent_harness.agents import (
     parse_todos,
 )
 from agent_harness.context import ContextSummarizer, FullHistoryContextBuilder
+from agent_harness.planning import (
+    CREATE_PLAN,
+    CREATE_PLAN_SPEC,
+    PLAN_TOOLS,
+    PLANNER_INSTRUCTIONS,
+    REVISE_PLAN_SPEC,
+    UPDATE_PLAN,
+    UPDATE_PLAN_SPEC,
+    PlanningPolicy,
+    blocked_steps,
+    parse_steps,
+    plan_payload,
+    plan_summary,
+    ready_steps,
+    step_instruction,
+    truncate_result,
+    with_step,
+)
 from agent_harness.tool_loading import (
     LOAD_TOOLS_SPEC,
     META_TOOLS,
@@ -55,6 +74,9 @@ from agent_harness.domain import (
     ModelClient,
     ModelStreamEvent,
     PermissionMode,
+    Plan,
+    PlanStep,
+    PlanStepStatus,
     StreamListener,
     TodoStatus,
     TelemetryRecord,
@@ -165,6 +187,7 @@ class AgentOrchestrator:
         snapshots: FileSnapshotter | None = None,
         summarizer: ContextSummarizer | None = None,
         tool_loading: ToolLoadingPolicy | None = None,
+        planning: PlanningPolicy | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -197,6 +220,7 @@ class AgentOrchestrator:
         self._snapshots = snapshots
         self._summarizer = summarizer
         self._tool_loading = tool_loading or ToolLoadingPolicy()
+        self._planning = planning or PlanningPolicy()
 
     @property
     def context_builder(self) -> ContextBuilder:
@@ -219,6 +243,7 @@ class AgentOrchestrator:
         depth: int = 0,
         allowed_tools: Sequence[str] | None = None,
         template: Mapping[str, str] | None = None,
+        planning: bool | None = None,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted.
 
@@ -241,6 +266,13 @@ class AgentOrchestrator:
             context = self._system_context()
             if context.text:
                 initial_messages.insert(0, Message(role=Role.SYSTEM, content=context.text))
+        use_plan = parent_run_id is None and (
+            planning if planning is not None else self._planning.enabled
+        )
+        if use_plan:
+            head = next((i for i, m in enumerate(initial_messages) if m.role is not Role.SYSTEM),
+                        len(initial_messages))
+            initial_messages.insert(head, Message(role=Role.SYSTEM, content=PLANNER_INSTRUCTIONS))
         prompt_hook = await self._user_prompt_hook(identifier, initial_messages, model_profile)
 
         now = self._clock()
@@ -256,6 +288,7 @@ class AgentOrchestrator:
             parent_call_id=parent_call_id,
             depth=depth,
             allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
+            planning=use_plan,
         )
         recorded_versions = {
             "system_prompt_sha256": system_prompt_sha256(initial_messages),
@@ -274,6 +307,8 @@ class AgentOrchestrator:
             payload["context_sources"] = list(context.sources)
             recorded_versions["context_sha256"] = context.sha256
         payload["tools"] = {spec.name: spec_sha256(spec) for spec in self._specs_for(run)}
+        if use_plan:
+            payload["planning"] = True
         if template is not None:
             payload["template"] = {str(k): str(v) for k, v in template.items()}
         if prompt_hook is not None:
@@ -433,6 +468,7 @@ class AgentOrchestrator:
             return True
 
         if pending:
+            await self._prefetch_parallel(run, events, pending)
             for call in pending:
                 if self._wall_limit_reached(run):
                     await self._exhaust_budget(run, events, "wall-clock limit")
@@ -446,6 +482,8 @@ class AgentOrchestrator:
             # A steer that arrived while the model was answering reopens the turn.
             if await self._apply_steers(run, events):
                 return False
+            if run.planning and await self._plan_on_final(run, events):
+                return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
             if await self._stop_hook_continues(run, events):
                 return False
             await self._complete(run, events)
@@ -462,6 +500,9 @@ class AgentOrchestrator:
         if budget_reason is not None:
             await self._exhaust_budget(run, events, budget_reason)
             return True
+
+        if run.planning and run.plan is not None and await self._plan_next(run, events):
+            return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
 
         await self._apply_steers(run, events)
         await self._perform_model_turn(run, events)
@@ -800,6 +841,7 @@ class AgentOrchestrator:
             tool_calls=sum(e.type is EventType.TOOL_REQUESTED for e in events),
             fallbacks=sum(e.type is EventType.MODEL_FALLBACK for e in events),
             subagents=sum(e.type is EventType.SUBAGENT_STARTED for e in events),
+            plan=run.plan,
             todos=run.todos,
         )
 
@@ -1417,6 +1459,9 @@ class AgentOrchestrator:
         if call.name in META_TOOLS and self._tool_loading.dynamic:
             await self._meta_tool(run, events, call, attempt)
             return
+        if call.name in PLAN_TOOLS and run.planning:
+            await self._plan_tool(run, events, call, attempt)
+            return
         if call.name == AGENT_TOOL:
             await self._run_subagent(run, events, call, attempt)
             return
@@ -1531,6 +1576,16 @@ class AgentOrchestrator:
             specs += (self._agent_spec,)
         if self._task_tracking:
             specs += (TODO_SPEC,)
+        if run.planning:
+            if run.plan is None:
+                # Explore read-only, then plan: nothing can change before the plan exists.
+                specs = tuple(
+                    s for s in specs
+                    if s.risk is ToolRisk.READ_ONLY and s.name not in {AGENT_TOOL, TODO_TOOL}
+                ) + (CREATE_PLAN_SPEC,)
+                loaded = tuple(s for s in loaded if s.risk is ToolRisk.READ_ONLY)
+            else:
+                specs += (UPDATE_PLAN_SPEC, REVISE_PLAN_SPEC)
         return specs + loaded
 
     def _permission(
@@ -1847,6 +1902,334 @@ class AgentOrchestrator:
                     await self.cancel(child.id)
         return replace(plan, applied=True, notes=notes)
 
+    async def _ensure_child(
+        self,
+        run: RunRecord,
+        events: list[RunEvent],
+        *,
+        definition: SubagentDefinition,
+        task: str,
+        child_id: str,
+        call_id: str,
+        share: int = 1,
+        extra_events: Sequence[RunEvent] = (),
+    ) -> str | None:
+        """Create the child run once (idempotent); return a refusal message or None."""
+
+        if await self._store.get_run(child_id) is not None:
+            return None
+        if run.depth >= self._agent_limits.max_depth:
+            return "Subagents cannot spawn further subagents at this depth."
+        spawned = sum(e.type is EventType.SUBAGENT_STARTED for e in events)
+        if spawned >= self._agent_limits.max_per_run:
+            return f"This run already used its {self._agent_limits.max_per_run} subagents."
+        budget = self._child_budget(run, definition, share=share)
+        if budget is None:
+            return "Not enough budget is left to run a subagent."
+        await self.create_run(
+            model_profile=definition.profile or run.model_profile,
+            messages=[Message(Role.SYSTEM, definition.prompt), Message(Role.USER, task)],
+            budget=budget,
+            run_id=child_id,
+            mode=run.mode,
+            parent_run_id=run.id,
+            parent_call_id=call_id,
+            depth=run.depth + 1,
+            allowed_tools=definition.tools,
+        )
+        await self._checkpoint(run, events, *extra_events, RunEvent(
+            run_id=run.id,
+            type=EventType.SUBAGENT_STARTED,
+            payload={"child_run_id": child_id, "agent": definition.name, "tool_call_id": call_id},
+            step=run.step_count,
+            created_at=self._clock(),
+        ))
+        return None
+
+    async def _prefetch_parallel(
+        self, run: RunRecord, events: list[RunEvent], pending: Sequence[ToolCall]
+    ) -> None:
+        """Run independent work from one model response concurrently.
+
+        * Read-only tool calls are executed together up front with the same
+          idempotency keys the sequential loop uses, so the loop then gets the
+          recorded results instantly; events, hooks, and ordering are unchanged.
+        * Several ``agent`` calls create their children one by one, then run
+          them concurrently; the loop then collects each finished child.
+
+        Skipped when a ``pre_tool`` hook exists (it could change arguments or
+        deny a call) and for calls a permission rule denies or asks about.
+        """
+
+        if len(pending) < 2 or (self._hooks is not None and self._hooks.has(HookEvent.PRE_TOOL)):
+            return
+        specs = self._spec_map(run)
+        reads: list[tuple[ToolCall, bool]] = []
+        agents: list[ToolCall] = []
+        for call in pending:
+            spec = specs.get(call.name)
+            if spec is None or _pending_tool_request(events, run.step_count, call.id) is not None:
+                continue
+            permission = self._permission(spec, call, run.mode)
+            if permission.action in {"deny", "ask"}:
+                continue
+            if call.name == AGENT_TOOL:
+                agents.append(call)
+            elif (
+                spec.risk is ToolRisk.READ_ONLY
+                and not spec.writes_paths
+                and call.name not in _ORCHESTRATOR_TOOLS
+            ):
+                reads.append((call, permission.action == "allow"))
+        if len(reads) >= 2:
+            await asyncio.gather(
+                *(
+                    self._tools.execute(
+                        call, idempotency_key=f"{run.id}:{run.step_count}:{call.id}", approved=approved
+                    )
+                    for call, approved in reads
+                ),
+                return_exceptions=True,
+            )
+        if len(agents) >= 2:
+            children: list[str] = []
+            for call in agents:
+                definition = self._agents.get(str(call.arguments.get("agent", "")))
+                task = call.arguments.get("task")
+                if definition is None or not isinstance(task, str) or not task.strip():
+                    continue  # the sequential loop reports the problem
+                child_id = child_run_id(run.id, run.step_count, call.id)
+                if await self._ensure_child(run, events, definition=definition, task=task,
+                                            child_id=child_id, call_id=call.id,
+                                            share=len(agents)) is None:
+                    children.append(child_id)
+            if len(children) >= 2:
+                await asyncio.gather(*(self.run(child_id) for child_id in children))
+
+    # -- plan-and-execute ------------------------------------------------------
+
+    async def _plan_tool(
+        self, run: RunRecord, events: list[RunEvent], call: ToolCall, attempt: int
+    ) -> None:
+        """``create_plan``, ``update_plan``, and ``revise_plan``."""
+
+        def respond(status: ToolResultStatus, message: str, **output: Any) -> ToolResult:
+            return ToolResult(call.id, call.name, status, output, message)
+
+        plan = run.plan
+        extra: tuple[RunEvent, ...] = ()
+        policy = self._planning
+        try:
+            if call.name == CREATE_PLAN:
+                if plan is not None:
+                    raise ValueError("A plan already exists. Use revise_plan to change it.")
+                steps = parse_steps(call.arguments.get("steps"), agents=self._agents,
+                                    max_steps=policy.max_plan_steps)
+                plan = Plan(goal=str(call.arguments.get("goal", "")).strip(), steps=steps)
+                run.plan = plan
+                extra = (self._plan_event(run, EventType.PLAN_CREATED, plan_payload(plan)),)
+                result = respond(ToolResultStatus.SUCCESS,
+                                 f"Plan accepted with {len(steps)} steps. The orchestrator now runs it; "
+                                 "follow its instructions.", steps=len(steps))
+            elif plan is None:
+                raise ValueError("There is no plan yet. Call create_plan first.")
+            elif call.name == UPDATE_PLAN:
+                step = plan.step(str(call.arguments.get("step_id", "")))
+                if step is None:
+                    raise ValueError(f"Unknown step {call.arguments.get('step_id')!r}.")
+                if step.agent is not None or step.status.is_terminal:
+                    raise ValueError(f"Step {step.id!r} is not yours to update (it is {step.status.value}"
+                                     + (f", delegated to {step.agent}" if step.agent else "") + ").")
+                status = PlanStepStatus(str(call.arguments.get("status")))
+                updated = replace(step, status=status,
+                                  result=truncate_result(str(call.arguments.get("result", ""))))
+                run.plan = with_step(plan, updated)
+                extra = (self._plan_event(run, EventType.PLAN_STEP_UPDATED,
+                                          {"step_id": step.id, "status": status.value, "by": "model"}),)
+                result = respond(ToolResultStatus.SUCCESS, f"Step {step.id} marked {status.value}.")
+            else:  # REVISE_PLAN
+                if plan.replans >= policy.max_replans:
+                    raise ValueError(f"The plan was already revised {plan.replans} times (the limit).")
+                kept = tuple(s for s in plan.steps if s.status is PlanStepStatus.COMPLETED)
+                steps = parse_steps(call.arguments.get("steps"), agents=self._agents,
+                                    max_steps=policy.max_plan_steps, kept=kept)
+                plan = replace(plan, steps=kept + steps, revision=plan.revision + 1,
+                               replans=plan.replans + 1, phase="executing")
+                run.plan = plan
+                extra = (self._plan_event(run, EventType.PLAN_REVISED, {
+                    **plan_payload(plan), "reason": str(call.arguments.get("reason", ""))[:500]}),)
+                result = respond(ToolResultStatus.SUCCESS,
+                                 f"Plan revised ({len(steps)} new steps). The orchestrator continues with it.")
+        except ValueError as exc:
+            result = respond(ToolResultStatus.VALIDATION_ERROR, f"Plan not changed: {exc}")
+        self._append_tool_message(run, result)
+        await self._record_tool_result(run, events, result, attempt=attempt, extra_events=extra)
+
+    def _plan_event(self, run: RunRecord, kind: EventType, payload: Mapping[str, Any]) -> RunEvent:
+        return RunEvent(run_id=run.id, type=kind, payload=dict(payload),
+                        step=run.step_count, created_at=self._clock())
+
+    async def _plan_on_final(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """The model gave a final answer in plan-and-execute mode; True if the run goes on."""
+
+        plan = run.plan
+        text = run.messages[-1].content if run.messages else ""
+        if plan is None:
+            reminder = "[Plan] Before answering, call create_plan with your plan for this task."
+            if any(m.role is Role.USER and m.content == reminder for m in run.messages):
+                return False  # asked once already; accept the answer without a plan
+            await self._plan_inject(run, events, reminder, {"reminder": "create_plan"})
+            return True
+        if plan.phase == "executing":
+            current = next((s for s in plan.steps
+                            if s.status is PlanStepStatus.IN_PROGRESS and s.agent is None), None)
+            if current is not None:
+                # A final answer while working on a step completes that step.
+                run.plan = with_step(plan, replace(current, status=PlanStepStatus.COMPLETED,
+                                                   result=truncate_result(text)))
+                await self._checkpoint(run, events, self._plan_event(
+                    run, EventType.PLAN_STEP_UPDATED,
+                    {"step_id": current.id, "status": "completed", "by": "final_answer"}))
+            return await self._plan_next(run, events)
+        # finalizing (the answer we asked for) or replanning (the model gave up): finish.
+        run.plan = replace(plan, phase="done")
+        await self._checkpoint(run, events, self._plan_event(
+            run, EventType.PLAN_STEP_UPDATED, {"phase": "done", "after": plan.phase}))
+        return False
+
+    async def _plan_next(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Advance the plan at a boundary; True if it delegated, messaged, paused, or failed."""
+
+        plan = run.plan
+        if plan is None or plan.phase != "executing":
+            return False
+        if any(s.status is PlanStepStatus.IN_PROGRESS and s.agent is None for s in plan.steps):
+            return False  # the model is working on a step
+        acted = False
+
+        # Delegate agent steps, several at once when they are ready together.
+        while True:
+            plan = run.plan
+            assert plan is not None
+            ready = [s for s in ready_steps(plan) if s.agent]
+            for step in ready:
+                await self._start_plan_child(run, events, step, share=len(ready))
+                acted = True
+            plan = run.plan
+            assert plan is not None
+            running = [s for s in plan.steps
+                       if s.status is PlanStepStatus.IN_PROGRESS and s.agent and s.child_run_id]
+            if not running:
+                break
+            finished = await asyncio.gather(*(self.run(str(s.child_run_id)) for s in running))
+            acted = True
+            waiting = None
+            for step, child in zip(running, finished):
+                if child.status is RunStatus.AWAITING_INPUT:
+                    waiting = waiting or child
+                    continue
+                await self._finish_plan_child(run, events, step, child)
+            if waiting is not None:
+                run.status = RunStatus.AWAITING_INPUT
+                await self._checkpoint(run, events, RunEvent(
+                    run_id=run.id, type=EventType.SUBAGENT_WAITING,
+                    payload={"child_run_id": waiting.id, "plan": True},
+                    step=run.step_count, created_at=self._clock(),
+                ))
+                return True
+
+        plan = run.plan
+        assert plan is not None
+        updates = [replace(s, status=PlanStepStatus.SKIPPED, result="A step it depends on did not complete.")
+                   for s in blocked_steps(plan)]
+        for skipped in updates:
+            plan = with_step(plan, skipped)
+        failed = [s for s in plan.steps if s.status is PlanStepStatus.FAILED]
+        ready = [s for s in ready_steps(plan) if s.agent is None]
+        notes = [plan.outbox] if plan.outbox else []
+        if failed:
+            if plan.replans >= self._planning.max_replans:
+                run.plan = replace(plan, phase="done", outbox="")
+                await self._fail(run, events, f"plan failed: step {failed[0].id!r} failed and the plan "
+                                 f"was already revised {plan.replans} times")
+                return True
+            plan = replace(plan, phase="replanning")
+            listing = "\n".join(f"- {s.id}: {s.title}: {s.result or 'no details'}" for s in failed)
+            notes.append(f"[Plan] These steps failed:\n{listing}\nCall revise_plan to replace the "
+                         "unfinished steps, or explain why the task cannot be done.")
+        elif ready:
+            step = replace(ready[0], status=PlanStepStatus.IN_PROGRESS)
+            plan = with_step(plan, step)
+            notes.append(step_instruction(step, plan))
+        elif all(s.status.is_terminal for s in plan.steps):
+            plan = replace(plan, phase="finalizing")
+            notes.append("[Plan] All steps are finished.\n" + plan_summary(plan)
+                         + "\nNow write the final answer for the user.")
+        if not notes:
+            run.plan = plan
+            return acted
+        run.plan = replace(plan, outbox="")
+        await self._plan_inject(run, events, "\n\n".join(notes), {"phase": run.plan.phase})
+        return True
+
+    async def _plan_inject(
+        self, run: RunRecord, events: list[RunEvent], text: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Deliver an orchestrator message to the model (one user message per boundary)."""
+
+        run.messages.append(Message(role=Role.USER, content=text))
+        await self._checkpoint(run, events, self._plan_event(
+            run, EventType.PLAN_STEP_UPDATED, {"message": True, **payload}))
+
+    async def _start_plan_child(
+        self, run: RunRecord, events: list[RunEvent], step: PlanStep, *, share: int
+    ) -> None:
+        plan = run.plan
+        assert plan is not None and step.agent is not None
+        definition = self._agents[step.agent]
+        child_id = child_run_id(run.id, run.step_count, f"plan-r{plan.revision}-{step.id}")
+        task = f"{step.title}\n\n{step.instructions}".strip() + f"\n\n(Part of the overall goal: {plan.goal})"
+        started = replace(step, status=PlanStepStatus.IN_PROGRESS, child_run_id=child_id)
+        run.plan = with_step(plan, started)
+        refusal = await self._ensure_child(
+            run, events, definition=definition, task=task, child_id=child_id,
+            call_id=f"plan-{step.id}", share=share,
+            extra_events=(self._plan_event(run, EventType.PLAN_STEP_UPDATED,
+                                           {"step_id": step.id, "status": "in_progress",
+                                            "agent": step.agent, "child_run_id": child_id}),),
+        )
+        if refusal is not None:
+            run.plan = with_step(run.plan, replace(started, status=PlanStepStatus.FAILED,
+                                                   result=refusal, child_run_id=None))
+            await self._checkpoint(run, events, self._plan_event(
+                run, EventType.PLAN_STEP_UPDATED, {"step_id": step.id, "status": "failed", "reason": refusal}))
+
+    async def _finish_plan_child(
+        self, run: RunRecord, events: list[RunEvent], step: PlanStep, child: RunRecord
+    ) -> None:
+        output = next((m.content for m in reversed(child.messages)
+                       if m.role is Role.ASSISTANT and not m.tool_calls), "")
+        completed = child.status is RunStatus.COMPLETED
+        result = truncate_result(output if completed else f"did not finish ({child.status.value}): {child.error or ''}")
+        plan = run.plan
+        assert plan is not None
+        status = PlanStepStatus.COMPLETED if completed else PlanStepStatus.FAILED
+        note = f"[Plan] Step {step.id} ({step.agent}) {status.value}:\n{result}"
+        plan = with_step(plan, replace(step, status=status, result=result))
+        run.plan = replace(plan, outbox=(plan.outbox + "\n\n" + note).strip())
+        # Roll the child's usage into the parent in the same checkpoint as the result.
+        run.consumed_tokens += child.consumed_tokens
+        run.consumed_cost_usd += child.consumed_cost_usd
+        await self._checkpoint(run, events,
+            RunEvent(run_id=run.id, type=EventType.SUBAGENT_FINISHED,
+                     payload={"child_run_id": child.id, "status": child.status.value,
+                              "tokens": child.consumed_tokens, "cost_usd": child.consumed_cost_usd,
+                              "plan_step": step.id},
+                     step=run.step_count, created_at=self._clock()),
+            self._plan_event(run, EventType.PLAN_STEP_UPDATED,
+                             {"step_id": step.id, "status": status.value, "by": step.agent}),
+        )
+
     async def _meta_tool(
         self, run: RunRecord, events: list[RunEvent], call: ToolCall, attempt: int
     ) -> None:
@@ -1925,8 +2308,14 @@ class AgentOrchestrator:
             ),),
         )
 
-    def _child_budget(self, run: RunRecord, definition: SubagentDefinition) -> RunBudget | None:
-        """The child's budget: its own limits, capped by what the parent has left."""
+    def _child_budget(
+        self, run: RunRecord, definition: SubagentDefinition, *, share: int = 1
+    ) -> RunBudget | None:
+        """The child's budget: its own limits, capped by what the parent has left.
+
+        ``share`` > 1 when several children run concurrently: the parent's
+        remaining tokens and cost are split evenly between them.
+        """
 
         steps = min(definition.max_steps, run.budget.max_steps - run.step_count)
         if steps < 1:
@@ -1939,13 +2328,13 @@ class AgentOrchestrator:
             return None
         tokens = definition.max_tokens
         if run.budget.max_tokens is not None:
-            remaining = run.budget.max_tokens - run.consumed_tokens
+            remaining = (run.budget.max_tokens - run.consumed_tokens) // max(1, share)
             if remaining < 1:
                 return None
             tokens = min(tokens, remaining) if tokens is not None else remaining
         cost = definition.max_cost_usd
         if run.budget.max_cost_usd is not None:
-            remaining_cost = run.budget.max_cost_usd - run.consumed_cost_usd
+            remaining_cost = (run.budget.max_cost_usd - run.consumed_cost_usd) / max(1, share)
             if remaining_cost <= 0:
                 return None
             cost = min(cost, remaining_cost) if cost is not None else remaining_cost
@@ -1975,34 +2364,12 @@ class AgentOrchestrator:
             await refuse("The task must be a non-empty string.")
             return
         child_id = child_run_id(run.id, run.step_count, call.id)
-        child = await self._store.get_run(child_id)
-        if child is None:
-            spawned = sum(e.type is EventType.SUBAGENT_STARTED for e in events)
-            if spawned >= self._agent_limits.max_per_run:
-                await refuse(f"This run already used its {self._agent_limits.max_per_run} subagents.")
-                return
-            budget = self._child_budget(run, definition)
-            if budget is None:
-                await refuse("Not enough budget is left to run a subagent.")
-                return
-            await self.create_run(
-                model_profile=definition.profile or run.model_profile,
-                messages=[Message(Role.SYSTEM, definition.prompt), Message(Role.USER, task)],
-                budget=budget,
-                run_id=child_id,
-                mode=run.mode,
-                parent_run_id=run.id,
-                parent_call_id=call.id,
-                depth=run.depth + 1,
-                allowed_tools=definition.tools,
-            )
-            await self._checkpoint(run, events, RunEvent(
-                run_id=run.id,
-                type=EventType.SUBAGENT_STARTED,
-                payload={"child_run_id": child_id, "agent": name, "tool_call_id": call.id},
-                step=run.step_count,
-                created_at=self._clock(),
-            ))
+        refusal = await self._ensure_child(
+            run, events, definition=definition, task=task, child_id=child_id, call_id=call.id
+        )
+        if refusal is not None:
+            await refuse(refusal)
+            return
         finished = await self.run(child_id)
         if finished.status is RunStatus.AWAITING_INPUT:
             run.status = RunStatus.AWAITING_INPUT
@@ -2354,6 +2721,9 @@ _ANNOTATION_EVENTS = frozenset(
         EventType.REWOUND,
         EventType.CONTEXT_SUMMARIZED,
         EventType.TOOLS_LOADED,
+        EventType.PLAN_CREATED,
+        EventType.PLAN_STEP_UPDATED,
+        EventType.PLAN_REVISED,
     }
 )
 
@@ -2417,6 +2787,9 @@ def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
             and latest.payload.get("retryable") is True
         )
     )
+
+
+_ORCHESTRATOR_TOOLS = frozenset({AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, *META_TOOLS, *PLAN_TOOLS})
 
 
 def _wrap_untrusted(tool_name: str, content: str) -> str:

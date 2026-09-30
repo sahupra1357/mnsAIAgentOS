@@ -12,7 +12,8 @@ Endpoints (all JSON; every route except ``/healthz`` requires
     GET  /healthz
     GET  /profiles
     GET  /templates
-    POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?, "mode"?}
+    POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?, "mode"?,
+                                     "planning"?}
     GET  /runs/{id}
     GET  /runs/{id}/events?after=N
     GET  /runs/{id}/events/stream?after=N   (server-sent events)
@@ -54,6 +55,7 @@ from agent_harness.domain import (
     RunStore,
 )
 from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.planning import plan_payload
 from agent_harness.templates import Template, TemplateError, expand_prompt
 from agent_harness.worker import Worker, run_is_settled
 
@@ -260,7 +262,8 @@ class HarnessAPI:
         }
 
     async def _create_run(self, body: dict[str, Any]) -> dict[str, Any]:
-        unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode", "template_args"}
+        unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode", "template_args",
+                               "planning"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         prompt = _required_text(body.get("prompt"), "prompt")
@@ -290,6 +293,7 @@ class HarnessAPI:
             versions=self._run_versions(profile) if self._run_versions else None,
             mode=_mode(body.get("mode")),
             template={"name": template.name, "sha256": template.sha256} if template else None,
+            planning=_optional_bool(body.get("planning"), "planning"),
         )
         await self._queue.enqueue(run.id)
         return {"id": run.id, "status": run.status.value, "model_profile": profile}
@@ -325,6 +329,7 @@ class HarnessAPI:
                 for e in await self._store.list_events(run_id)
                 if e.type is EventType.SUBAGENT_STARTED
             ],
+            "plan": plan_payload(run.plan) if run.plan is not None else None,
         }
         if run.status is RunStatus.AWAITING_INPUT:
             payload["pending_approval"] = await self._approval_payload(run_id)
@@ -560,6 +565,12 @@ def _text(value: Any, field: str, *, required: bool) -> str | None:
     if len(value) > MAX_TEXT_CHARS:
         raise ApiError(400, f"{field} exceeds {MAX_TEXT_CHARS} characters")
     return value
+
+
+def _optional_bool(value: Any, name: str) -> bool | None:
+    if value is None or isinstance(value, bool):
+        return value
+    raise ApiError(400, f"{name} must be a boolean")
 
 
 def _budget(raw: Any) -> RunBudget | None:

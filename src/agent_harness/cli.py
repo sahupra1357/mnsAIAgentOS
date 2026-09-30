@@ -61,6 +61,11 @@ def _parser() -> argparse.ArgumentParser:
         choices=["default", "accept_edits", "plan", "bypass"],
         help="permission mode for this run (default from [permissions] mode)",
     )
+    planning = run.add_mutually_exclusive_group()
+    planning.add_argument("--plan", dest="planning", action="store_true", default=None,
+                          help="plan-and-execute: the model plans, the orchestrator runs the plan")
+    planning.add_argument("--no-plan", dest="planning", action="store_false",
+                          help="turn off plan-and-execute even if [planning] enabled = true")
 
     resume = subcommands.add_parser("resume", help="resume a durable run by ID")
     _common_runtime_arguments(resume)
@@ -265,6 +270,7 @@ async def _run_command(args: argparse.Namespace) -> int:
             mode=args.mode,
             versions=app.run_versions(profile),
             template={"name": template.name, "sha256": template.sha256} if template else None,
+            planning=args.planning,
             messages=messages,
             budget=RunBudget(
                 max_steps=args.max_steps,
@@ -447,6 +453,14 @@ async def _status_command(args: argparse.Namespace) -> int:
     marks = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
     for item in usage.todos:
         print(f"  {marks[item.status.value]} {item.content}")
+    if usage.plan is not None:
+        plan = usage.plan
+        print(f"plan:   {plan.goal} (revision {plan.revision}, {plan.phase})")
+        step_marks = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]",
+                      "failed": "[!]", "skipped": "[-]"}
+        for step in plan.steps:
+            who = f" -> {step.agent}" if step.agent else ""
+            print(f"  {step_marks[step.status.value]} {step.id}: {step.title}{who}")
     return 0
 
 

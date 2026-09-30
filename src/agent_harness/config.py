@@ -325,6 +325,15 @@ class SummarizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningConfig:
+    """Plan-and-execute: the model plans with create_plan, the orchestrator runs the plan."""
+
+    enabled: bool = False
+    max_plan_steps: int = 20
+    max_replans: int = 2
+
+
+@dataclass(frozen=True, slots=True)
 class WebSearchConfig:
     """The built-in ``web_search`` tool (Tavily). The key is read from ``api_key_env``."""
 
@@ -413,6 +422,7 @@ class HarnessConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     mcp_servers: tuple[McpServerConfig, ...] = ()
     tool_loading: ToolLoadingConfig = field(default_factory=ToolLoadingConfig)
+    planning: PlanningConfig = field(default_factory=PlanningConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     templates: TemplatesConfig = field(default_factory=TemplatesConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
@@ -556,6 +566,7 @@ def load_config(
         web_search=_parse_section(raw, "web_search", WebSearchConfig),
         mcp_servers=_parse_mcp_servers(raw.get("mcp_servers")),
         tool_loading=_parse_section(raw, "tool_loading", ToolLoadingConfig),
+        planning=_parse_section(raw, "planning", PlanningConfig),
         skills=_parse_section(raw, "skills", SkillsConfig),
         templates=_parse_section(raw, "templates", TemplatesConfig),
         plugins=_parse_section(raw, "plugins", PluginsConfig),
