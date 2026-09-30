@@ -99,6 +99,21 @@ temperature = 0.2
 # model = "anthropic/claude-sonnet-5"
 # api_key_env = "ANTHROPIC_API_KEY"
 
+# --- Subagents ---------------------------------------------------------------------
+# Define [[agents]] to give the model an `agent` tool that delegates a task to a child
+# run. Nothing is offered while no agents are defined. A complete working example with
+# a researcher, reviewer, and test runner is in examples/subagents.toml.
+# [[agents]]
+# name = "helper"
+# description = "Solves one self-contained arithmetic question."
+# prompt = "You are a careful assistant. Use the calculator, then answer briefly."
+# tools = ["calculator"]      # tool subset; omit for every registered tool
+# max_steps = 5
+#
+# [subagents]
+# max_depth = 1               # default 2: subagents may start their own subagents
+# max_per_run = 8
+
 # Enable repository coding tools by setting enabled = true. The default Docker
 # backend has no network and pauses before writes, commands, commits, or PRs.
 [coding]

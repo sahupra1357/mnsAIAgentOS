@@ -150,6 +150,13 @@ is deleted.
 - Enforce a depth limit and a count limit. Resume handles both levels: resuming the parent
   resumes an unfinished child first. Idempotency key for the spawn = parent key.
 - Subagent definitions live in files (name, description, allowed tools, profile, prompt).
+- Nothing is offered until `[[agents]]` are defined; then the model gets an `agent` tool
+  whose description lists the agents. `[subagents] max_depth` defaults to 2, so a child
+  is offered `agent` too and can start its own subagents; use `max_depth = 1` to allow
+  delegation from the top-level run only. `examples/subagents.toml` has three working
+  definitions (researcher, reviewer, test-runner) with prompt files in
+  `examples/agents/`.
+- Orchestrator-initiated and parallel subagents are Phase 8 (`skills/planning-delegation`).
 
 ## 5–7. Permission rules, modes, and plan mode
 - Rule syntax: `tool` or `tool(field=glob, ...)`, where field paths address

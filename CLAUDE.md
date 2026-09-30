@@ -114,6 +114,11 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   model must answer requests with `metadata["purpose"] == "summary"`.
 - `ModelResolver.resolve` is synchronous (no `await`). `Execution.md` was brought up to date
   with the Phase 1–6 flow and now shows it correctly.
+- **Subagent nesting (6c).** Subagents exist only when `[[agents]]` are defined; the
+  model is then offered an `agent` tool. `[subagents] max_depth` defaults to 2, so a
+  subagent is itself offered `agent` and can start its own children. Set
+  `max_depth = 1` to let only the top-level run delegate. `examples/subagents.toml` is a
+  complete example.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A
@@ -247,6 +252,51 @@ Order matters: 6.1 is the foundation for most of the rest.
 15. Usage display: `status`/API endpoint showing per-run tokens, cost, cache-hit rate,
     and steps against the budget.
 
+**Phase 7 – Tool platform** [tool-platform] — on `phase-7-tool-platform`
+1. Persistent tool catalog (`tool_catalog` table): what every source provides, spec
+   hashes, trust, operator enable/disable that survives restarts, and unavailable
+   tools kept for old runs. Each run records the tool versions it was offered.
+2. Config-driven tool sources: `[[tools]]` with kind `python` (module:function), `http`
+   (declarative JSON tools), and the built-in `web_search` (Tavily, key from env).
+   CLI `tools list|sync|enable|disable`.
+3. Stdlib MCP client (`mcp/`): stdio and streamable HTTP, tool discovery with
+   pagination, schema normalization to the validator's subset, `server__tool` names,
+   approval by default unless listed `read_only`, lazy server start, clean shutdown.
+4. Untrusted tool output: `ToolSpec.trust`; untrusted results are wrapped in
+   `<untrusted-tool-output>` tags and the system context says they are data.
+5. Dynamic tool loading: `[tool_loading] mode = "dynamic"` with a pinned `core` set and
+   `search_tools` / `load_tools` meta-tools (SQLite FTS5 ranking). Loaded tools are
+   persisted on the run and appended in order (prefix-cache friendly).
+
+**Phase 8 – Planning and delegation** [planning-delegation] — on `phase-8-planning-delegation`
+1. Orchestrator-owned plan on the run (`Plan`, `PlanStep`) with `PLAN_CREATED`,
+   `PLAN_STEP_UPDATED`, `PLAN_REVISED` events; `create_plan`, `update_plan`,
+   `revise_plan` tools.
+2. Plan-and-execute mode (`[planning]`, `run --plan`): plan first with read-only tools,
+   then the orchestrator drives step by step, replans on failure (bounded), and asks for
+   the final answer when all steps are done.
+3. Orchestrator-initiated delegation: plan steps with an `agent` run as child runs
+   without a model turn.
+4. Parallelism: concurrent prefetch of read-only tool calls; several subagents (tool
+   calls or ready plan steps) run concurrently with the remaining budget split.
+5. Example subagents (`examples/subagents.toml`, `examples/agents/`) and the nesting
+   note.
+
+**Phase 9 – Production hardening** [production-hardening] — on `phase-9-production-hardening`
+1. Versioned schema migrations for SQLite (and Postgres), plus a RunStore conformance
+   suite run against every store.
+2. Optional Postgres store behind a `[postgres]` extra, verified against a real server
+   when `AGENT_HARNESS_TEST_POSTGRES_DSN` is set.
+3. API principals with tenants and roles (viewer/operator/admin), run ownership, and
+   the acting principal recorded on approvals and mode changes.
+4. Per-tenant quotas (runs, tokens, cost per day; concurrent runs).
+5. Secret references (`env:`, `file:`) and a network egress allowlist for HTTP tools,
+   web search, and MCP over HTTP.
+6. Redaction of secrets in persisted events and telemetry; retention with
+   `agent-harness gc`. Encryption at rest is delegated to the volume or database.
+7. Deployment: Dockerfile, compose file (API, workers, Postgres), `/readyz`, and
+   `docs/DEPLOYMENT.md`.
+
 ## Validation
 
 `docs/VALIDATION.md` describes six stages: static, unit, scenarios, smoke, benchmarks,
@@ -269,6 +319,9 @@ and gates.
 | Coding tools, Docker sandbox                  | `skills/coding-agent/SKILL.md`                  |
 | Streaming, tracing, API, workers, memory      | `skills/harness-operations/SKILL.md`            |
 | Conversation, hooks, subagents, permissions   | `skills/interactive-extensibility/SKILL.md`     |
+| Tool catalog, tool sources, MCP, tool loading | `skills/tool-platform/SKILL.md`                 |
+| Plans, delegation, parallel execution         | `skills/planning-delegation/SKILL.md`           |
+| Migrations, Postgres, tenancy, security, deploy | `skills/production-hardening/SKILL.md`        |
 | Tests, evaluations, release checks            | `skills/harness-verification/SKILL.md`          |
 
 The same skills are exposed to Claude Code via symlinks in `.claude/skills/`.

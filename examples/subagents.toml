@@ -1,0 +1,60 @@
+# A complete configuration with three example subagents. Run it with:
+#   agent-harness run --config examples/subagents.toml --model-profile ollama \
+#     "Review my uncommitted changes and run the tests"
+# The main agent sees an `agent` tool listing these subagents and decides when to
+# delegate. Each child run gets its own prompt, tool subset, and a budget capped by
+# what the parent has left; only its final answer returns to the parent.
+
+default_model_profile = "ollama"
+
+[models.ollama]
+adapter = "ollama"
+model = "qwen2.5-coder:7b"
+endpoint = "http://127.0.0.1:11434/v1"
+timeout_seconds = 120
+max_retries = 2
+
+[models.local]
+adapter = "openai_compatible"
+model = "your-model-name"
+endpoint = "http://127.0.0.1:8000/v1"
+timeout_seconds = 60
+max_retries = 2
+
+# Subagents use the coding tools, so coding mode is on. The Docker backend has no
+# network access and pauses before commands and writes.
+[coding]
+enabled = true
+workspace = "."
+execution_runtime = "docker"
+approval_mode = "side_effects"
+enable_git_commit = false
+enable_pull_requests = false
+
+# Nesting: by default (max_depth = 2) a subagent is also offered the `agent` tool and
+# can start its own subagents. max_depth = 1 lets only the top-level run delegate.
+[subagents]
+max_depth = 1
+max_per_run = 6
+
+[[agents]]
+name = "researcher"
+description = "Answers one question about the codebase by searching and reading files. Read-only."
+prompt_file = "agents/researcher.md"
+tools = ["read_file", "search_files", "search_documentation"]
+max_steps = 12
+
+[[agents]]
+name = "reviewer"
+description = "Reviews the current uncommitted changes and reports real problems, most severe first. Read-only."
+prompt_file = "agents/reviewer.md"
+tools = ["git_status", "git_diff", "read_file", "search_files"]
+max_steps = 12
+
+[[agents]]
+name = "test-runner"
+description = "Runs the test suite and explains any failures with their likely cause. Cannot edit files."
+prompt_file = "agents/test-runner.md"
+tools = ["run_tests", "read_file", "search_files"]
+max_steps = 8
+# profile = "local"   # optional: run this subagent on a different model profile

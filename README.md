@@ -309,6 +309,13 @@ hand a self-contained task to a subagent:
   PARENT_ID` shows and decides the subagent's pending call.
 - Cancelling the parent cancels its subagents. Resuming the parent resumes an
   unfinished subagent instead of starting a new one.
+- **Nothing is offered until agents are defined.** Without `[[agents]]` the model never
+  sees the `agent` tool.
+- **Nesting.** With the default `max_depth = 2`, a subagent is also offered `agent` and
+  can start its own subagents. Set `max_depth = 1` to let only the top-level run
+  delegate.
+- **Working example.** `examples/subagents.toml` defines a `researcher`, `reviewer`, and
+  `test-runner` with prompt files in `examples/agents/`.
 
 **Task list.** `agent-harness status RUN_ID` and `GET /runs/{id}` show the task list
 and the subagents.
