@@ -102,6 +102,16 @@ def _parser() -> argparse.ArgumentParser:
         help="for plan approvals: permission mode to switch to",
     )
 
+    answer = subcommands.add_parser(
+        "answer", help="answer the question a paused run asked (ask_user), then continue it"
+    )
+    _common_runtime_arguments(answer)
+    answer.add_argument("run_id")
+    answer_text = answer.add_mutually_exclusive_group(required=True)
+    answer_text.add_argument("text", nargs="?", help="the answer")
+    answer_text.add_argument("--decline", action="store_true", help="decline to answer")
+    answer.add_argument("--call-id", help="call ID of the question, if it must be checked")
+
     mode = subcommands.add_parser("mode", help="change a run's permission mode")
     _common_runtime_arguments(mode)
     mode.add_argument("run_id")
@@ -362,6 +372,27 @@ async def _approve_command(args: argparse.Namespace) -> int:
         return await _print_result(app, resumed)
 
 
+async def _answer_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    async with app:
+        await _start_tools(app)
+        pending = await app.orchestrator.pending_approval(args.run_id)
+        if pending is None or pending.kind != "question":
+            raise ValueError("run is not waiting for an answer")
+        if args.call_id and args.call_id != pending.call_id:
+            raise ValueError(f"pending call ID is {pending.call_id!r}")
+        if args.decline:
+            resolved = await app.orchestrator.resolve_approval(
+                args.run_id, call_id=pending.call_id, approved=False
+            )
+        else:
+            resolved = await app.orchestrator.answer(
+                args.run_id, call_id=pending.call_id, answer=args.text
+            )
+        resumed = await app.orchestrator.resume(resolved.id)
+        return await _print_result(app, resumed)
+
+
 async def _print_result(
     app: HarnessApplication, run: RunRecord, *, streamed: bool = False, show_reasoning: bool = False
 ) -> int:
@@ -370,6 +401,11 @@ async def _print_result(
         print(f"error={run.error}", file=sys.stderr)
     if run.status.value == "awaiting_input":
         pending = await app.orchestrator.pending_approval(run.id)
+        if pending is not None and pending.kind == "question":
+            print(f"question: {pending.arguments.get('question', '')}", file=sys.stderr)
+            for option in pending.arguments.get("options") or ():
+                print(f"  - {option}", file=sys.stderr)
+            print(f"answer with: agent-harness answer {run.id} \"<text>\"", file=sys.stderr)
         if pending is not None:
             print(
                 "approval_required="
@@ -883,6 +919,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_status_command(args))
         if args.command == "runs":
             return asyncio.run(_runs_command(args))
+        if args.command == "answer":
+            return asyncio.run(_answer_command(args))
     except (ConfigError, HarnessError, KeyError, ValueError, SettingsError, OSError) as exc:
         print(f"agent-harness: {exc}", file=sys.stderr)
         return 2

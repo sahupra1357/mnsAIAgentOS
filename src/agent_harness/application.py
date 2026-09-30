@@ -258,6 +258,7 @@ def build_application(
                 max_depth=config.subagents.max_depth, max_per_run=config.subagents.max_per_run
             ),
             task_tracking=config.tasks.enabled,
+            ask_user=config.interaction.ask_user,
             system_context=system_context,
             snapshots=(
                 WorkspaceSnapshotter(

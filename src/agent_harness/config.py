@@ -319,6 +319,17 @@ class TasksConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class InteractionConfig:
+    """``ask_user``: offer runs a tool that pauses to ask the user a question.
+
+    Off by default: headless workers have nobody to answer, and a paused run
+    waits until ``answer`` (CLI) or ``POST /runs/{id}/answer`` (API).
+    """
+
+    ask_user: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class InstructionsConfig:
     """Instruction files added to every new top-level run (later = more specific).
 
@@ -483,6 +494,7 @@ class HarnessConfig:
     agents: tuple[AgentConfig, ...] = ()
     subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
     tasks: TasksConfig = field(default_factory=TasksConfig)
+    interaction: InteractionConfig = field(default_factory=InteractionConfig)
     instructions: InstructionsConfig = field(default_factory=InstructionsConfig)
     summarization: SummarizationConfig = field(default_factory=SummarizationConfig)
     tool_sources: tuple[ToolSourceConfig, ...] = ()
@@ -632,6 +644,7 @@ def load_config(
         agents=_parse_agents(raw.get("agents"), profiles, raw_routes),
         subagents=_parse_section(raw, "subagents", SubagentsConfig),
         tasks=_parse_section(raw, "tasks", TasksConfig),
+        interaction=_parse_section(raw, "interaction", InteractionConfig),
         instructions=_parse_section(raw, "instructions", InstructionsConfig),
         summarization=_parse_section(raw, "summarization", SummarizationConfig),
         tool_sources=_parse_tool_sources(raw.get("tools")),

@@ -121,6 +121,11 @@ temperature = 0.2
 
 # Enable repository coding tools by setting enabled = true. The default Docker
 # backend has no network and pauses before writes, commands, commits, or PRs.
+# Let runs ask the user clarifying questions (pauses the run; answer with
+# `agent-harness answer RUN_ID "..."` or POST /runs/{id}/answer). Off by default.
+# [interaction]
+# ask_user = true
+
 [coding]
 enabled = false
 workspace = "."

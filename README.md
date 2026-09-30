@@ -309,6 +309,36 @@ with read-only tools and then calls `exit_plan`, which pauses the run for approv
 Every decision is recorded as a `hook_decided` event. A resumed run replays the
 recorded decisions; it does not re-run the hooks.
 
+## Asking the User (`ask_user`)
+
+With `[interaction] ask_user = true`, runs are offered an `ask_user(question, options?)`
+tool for clarifying questions. It is off by default, because a headless worker has nobody
+to answer.
+
+```bash
+agent-harness run --config models.toml "Deploy the new build"
+# run_id=... status=awaiting_input
+# question: Which environment should I deploy to?
+#   - staging
+#   - production
+agent-harness answer --config models.toml RUN_ID "staging"   # continues the run
+agent-harness answer --config models.toml RUN_ID --decline   # the model proceeds on its own
+```
+
+- The run pauses in `awaiting_input` through the approval path. The pending request has
+  `kind = "question"`, and its `arguments` hold the question and options. It shows up
+  in `GET /runs/{id}` (`pending_approval`) and `GET /runs/{id}/approval`.
+- Answer over HTTP with `POST /runs/{id}/answer {"call_id", "answer"}` (operator role). The
+  run is re-enqueued. `POST /runs/{id}/approval` with `"decision": "deny"` declines. In
+  code: `orchestrator.answer(run_id, call_id=..., answer=...)`, then `run`/`resume`.
+- The answer reaches the model as the tool result (`The user answered: ...`). Events
+  record only `answer_chars` and the acting principal.
+- Time spent waiting does not count against `max_wall_seconds`. A question from a
+  subagent pauses its parent and is answered through the parent's run ID.
+- `ask_user` is read-only, so it is also available in plan mode and while planning.
+- Find runs waiting for an answer or approval with
+  `agent-harness runs --status awaiting_input`.
+
 ## Subagents and Task Lists
 
 ```toml

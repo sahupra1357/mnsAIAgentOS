@@ -210,6 +210,19 @@ is deleted.
 - `status RUN_ID` / `GET /runs/{id}/usage`: steps, tokens (input/output/cached), cost
   (marked estimated), wall time versus budget, and child-run rollup.
 
+## `ask_user` (Phase 11d)
+- `interaction.py` defines `ASK_USER_SPEC`. It is offered only with `[interaction] ask_user = true`
+  (`AgentOrchestrator(ask_user=True)`), after `todo_write`, and is read-only, so plan mode
+  and the planning phase keep it.
+- The call is validated against its schema, then `_request_approval(kind="question")` pauses
+  the run. There is no separate pause mechanism, so worker leases, subagent forwarding
+  (`_resolve_child_approval`), and wall-clock compensation all come from the approval path.
+- `resolve_approval(..., answer=...)` / `answer(...)` appends the tool result (`SUCCESS`, "The
+  user answered: ...") and `TOOL_RESPONDED` in the same checkpoint as `APPROVAL_RESOLVED`.
+  So the call is never pending again, and resume cannot ask twice. Approving a question
+  without an answer, or answering a non-question, raises `ValueError`. Denial declines.
+- Events carry `answer_chars` only; the text lives in the conversation.
+
 ## Testing
 
 Use network-free tests with scripted models:
