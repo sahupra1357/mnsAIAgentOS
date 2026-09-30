@@ -621,6 +621,66 @@ class TenantUsage:
     reserved_cost_usd: float = 0.0
 
 
+MAX_RUN_PAGE = 200
+
+
+@dataclass(frozen=True, slots=True)
+class RunQuery:
+    """Filter for listing runs, newest first.
+
+    With ``parent_run_id`` only that run's direct subagent runs are listed;
+    otherwise only top-level runs, unless ``include_children`` is set. An empty
+    ``statuses`` matches every status. ``cursor`` is the ``next_cursor`` of the
+    previous page.
+    """
+
+    tenant: str | None = None
+    statuses: tuple[RunStatus, ...] = ()
+    parent_run_id: str | None = None
+    include_children: bool = False
+    created_after: datetime | None = None
+    created_before: datetime | None = None
+    limit: int = 50
+    cursor: str | None = None
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.limit <= MAX_RUN_PAGE:
+            raise ValueError(f"limit must be between 1 and {MAX_RUN_PAGE}")
+
+
+@dataclass(frozen=True, slots=True)
+class RunSummary:
+    """One row of a run listing (no messages or events)."""
+
+    id: str
+    status: RunStatus
+    model_profile: str
+    tenant: str
+    created_at: datetime
+    updated_at: datetime
+    step_count: int = 0
+    consumed_tokens: int = 0
+    consumed_cost_usd: float = 0.0
+    created_by: str | None = None
+    parent_run_id: str | None = None
+    depth: int = 0
+    error: str | None = None
+    # First line of the first user message, shortened, to tell runs apart.
+    title: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RunPage:
+    runs: tuple[RunSummary, ...]
+    next_cursor: str | None = None
+
+
+class RunLister(Protocol):
+    """Optional store capability: list runs without loading their events."""
+
+    async def list_runs(self, query: RunQuery) -> RunPage: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCatalogEntry:
     """One tool known to the persistent catalog.

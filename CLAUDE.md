@@ -319,6 +319,26 @@ Order matters: 6.1 is the foundation for most of the rest.
 4. Memory backends: `[memory] backend = "sqlite" | "postgres"` (Postgres full-text search);
    `agent-harness memory migrate --from sqlite:PATH` copies every note.
 
+**Phase 11 – Operator and model-interface gaps** [harness-operations, llm-providers, model-gateway, interactive-extensibility] — four PRs, each against `main`:
+11a (item 1) on `phase-11a-run-listing` — implemented; 11b (item 2) on `phase-11b-reasoning`;
+11c (item 3) on `phase-11c-structured-output`; 11d (item 4) on `phase-11d-ask-user`.
+No classifier-based model routing: the user decided against it (extra call, loses the
+prefix cache, overkill).
+1. Run listing: an optional `RunLister` store protocol (`list_runs(RunQuery) -> RunPage`)
+   in all three stores, with keyset cursors, top-level runs by default, CLI `runs`, and
+   tenant-scoped `GET /runs`.
+2. Reasoning content: `Message.reasoning` / `ModelResponse.reasoning` (default `None`),
+   parsed from `reasoning_content` / `reasoning` / Ollama `thinking`, optional
+   `<think>` splitting (`reasoning_tags`), `reasoning_history = "drop" | "keep"` (default
+   `drop`, so the prefix cache is unaffected); CLI `--show-reasoning`.
+3. Structured output: `ModelRequest.response_format` and `tool_choice` (default `None`,
+   so payloads are unchanged). A run's `output_schema` uses `response_format` when the run
+   has no tools, otherwise a `submit_result` tool (forced with `tool_choice` once if the
+   model answers in plain text). The validated result goes to `run.output`.
+4. `ask_user(question, options?)` tool, off by default (`[interaction] ask_user = true`):
+   pauses via the approval path with `kind = "question"`; `answer(run_id, call_id, text)`,
+   CLI `answer`, API `POST /runs/{id}/answer`.
+
 ## Validation
 
 `docs/VALIDATION.md` describes six stages: static, unit, scenarios, smoke, benchmarks,

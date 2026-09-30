@@ -20,6 +20,8 @@ from uuid import uuid4
 from agent_harness.domain import (
     ConcurrencyError,
     RunEvent,
+    RunPage,
+    RunQuery,
     RunRecord,
     SteerMessage,
     TenantUsage,
@@ -30,6 +32,7 @@ from agent_harness.domain import (
     utc_now,
 )
 
+from .listing import decode_cursor, encode_cursor, summarize_run
 from .memory import _validate_identifier, _validate_run_event
 from .migrations import SchemaVersionError
 from .sqlite import _decode_event, _decode_run, _decode_tool_result, _encode_run, _json_dumps, _with_event_id
@@ -444,6 +447,40 @@ class PostgresRunStore:
     async def release_reservation(self, run_id: str) -> None:
         await self._run(lambda: self._connection.execute(
             "DELETE FROM quota_reservations WHERE run_id = %s", (run_id,)))
+
+    async def list_runs(self, query: RunQuery) -> RunPage:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if query.tenant is not None:
+            clauses.append("tenant = %s")
+            params.append(query.tenant)
+        if query.statuses:
+            clauses.append("status = ANY(%s)")
+            params.append([status.value for status in query.statuses])
+        if query.parent_run_id is not None:
+            clauses.append("parent_run_id = %s")
+            params.append(query.parent_run_id)
+        elif not query.include_children:
+            clauses.append("parent_run_id IS NULL")
+        if query.created_after is not None:
+            clauses.append("created_at >= %s")
+            params.append(query.created_after)
+        if query.created_before is not None:
+            clauses.append("created_at < %s")
+            params.append(query.created_before)
+        if query.cursor:
+            created_at, run_id = decode_cursor(query.cursor)
+            clauses.append("(created_at, id) < (%s, %s)")
+            params.extend((created_at, run_id))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await self._run(lambda: self._connection.execute(
+            f"SELECT snapshot_json FROM runs {where} ORDER BY created_at DESC, id DESC LIMIT %s",
+            (*params, query.limit + 1)).fetchall())
+        page = [summarize_run(_decode_run(row["snapshot_json"])) for row in rows]
+        more = len(page) > query.limit
+        page = page[: query.limit]
+        cursor = encode_cursor(page[-1].created_at, page[-1].id) if more else None
+        return RunPage(runs=tuple(page), next_cursor=cursor)
 
     async def purge_runs(self, before: datetime, *, dry_run: bool = True) -> list[str]:
         def work() -> list[str]:

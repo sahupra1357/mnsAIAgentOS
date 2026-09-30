@@ -97,6 +97,19 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
 - Framework behind the `[api]` extra (Starlette + uvicorn recommended). Tests use its
   in-process test client with no sockets.
 
+### Run listing (Phase 11a)
+- `RunLister.list_runs(RunQuery) -> RunPage` is a separate, optional store protocol, so
+  `RunStore` is unchanged. The memory, SQLite, and Postgres stores implement it, and the
+  conformance suite's `test_list_runs` checks each one.
+- Newest first by `(created_at, id)`, with keyset pagination. The cursor is the position
+  of the page's last run, so creating runs does not shift later pages. `limit` is 1–200.
+- Top-level runs only, unless `include_children` is set or `parent_run_id` asks for one
+  run's subagents. Filters use the indexed `tenant`, `status`, `created_at`, and
+  `parent_run_id` columns; only the returned page's snapshots are decoded.
+- `RunSummary.title` is the first line of the first user message, at most 80 characters.
+- `GET /runs` is scoped to the principal's tenant; only a `"*"` principal may pass
+  `tenant=`. CLI: `agent-harness runs`.
+
 ## 6. Workers and queue
 - Add store methods `claim_next_run(worker_id, lease_seconds)`, `renew_lease`, and
   `release`. In SQLite, the claim is a single `UPDATE ... WHERE lease_expires_at < now`

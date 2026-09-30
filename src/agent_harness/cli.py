@@ -22,7 +22,7 @@ from .coding import CODING_AGENT_SYSTEM_PROMPT
 from .config import ConfigError, load_config
 from .application import open_memory_store
 from .memory import SQLiteMemoryStore
-from .domain import HarnessError, Message, Role, RunBudget, RunRecord, utc_now
+from .domain import HarnessError, Message, Role, RunBudget, RunQuery, RunRecord, RunStatus, utc_now
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
 from .api import create_api
@@ -125,6 +125,17 @@ def _parser() -> argparse.ArgumentParser:
     status = subcommands.add_parser("status", help="show a run's status and usage against budget")
     _common_runtime_arguments(status)
     status.add_argument("run_id")
+
+    runs = subcommands.add_parser("runs", help="list runs, newest first (top-level runs by default)")
+    _common_runtime_arguments(runs)
+    runs.add_argument("--status", action="append", default=[],
+                      help="only these statuses (repeat or comma-separate)")
+    runs.add_argument("--tenant", help="only this tenant's runs")
+    runs.add_argument("--parent", help="list the subagent runs of this run")
+    runs.add_argument("--children", action="store_true", help="include subagent runs")
+    runs.add_argument("--limit", type=int, default=20)
+    runs.add_argument("--cursor", help="continue from the cursor a previous listing printed")
+    runs.add_argument("--json", action="store_true", help="print JSON instead of a table")
 
     serve = subcommands.add_parser(
         "serve", help="serve the HTTP API with in-process queue workers (needs the [api] extra)"
@@ -483,6 +494,54 @@ async def _status_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _runs_command(args: argparse.Namespace) -> int:
+    query = RunQuery(
+        tenant=args.tenant,
+        statuses=tuple(
+            RunStatus(item.strip()) for value in args.status for item in value.split(",") if item.strip()
+        ),
+        parent_run_id=args.parent,
+        include_children=args.children,
+        limit=args.limit,
+        cursor=args.cursor,
+    )
+    app = _build(args)
+    async with app:
+        lister = getattr(app.store, "list_runs", None)
+        if lister is None:
+            raise ValueError("this run store cannot list runs")
+        page = await lister(query)
+    if args.json:
+        print(json.dumps({
+            "runs": [
+                {
+                    "id": r.id, "title": r.title, "status": r.status.value,
+                    "model_profile": r.model_profile, "tenant": r.tenant,
+                    "parent_run_id": r.parent_run_id, "depth": r.depth, "step_count": r.step_count,
+                    "consumed_tokens": r.consumed_tokens, "consumed_cost_usd": r.consumed_cost_usd,
+                    "error": r.error, "created_at": r.created_at.isoformat(),
+                    "updated_at": r.updated_at.isoformat(),
+                }
+                for r in page.runs
+            ],
+            "next_cursor": page.next_cursor,
+        }, indent=2))
+        return 0
+    if not page.runs:
+        print("no runs", file=sys.stderr)
+        return 0
+    for r in page.runs:
+        indent = "  " * r.depth if args.children or args.parent else ""
+        print(
+            f"{indent}{r.id}  {r.status.value:<16} {r.model_profile:<12} steps={r.step_count:<3} "
+            f"tokens={r.consumed_tokens:<7} ${r.consumed_cost_usd:.4f}  "
+            f"{r.created_at:%Y-%m-%d %H:%M}  {r.title}"
+        )
+    if page.next_cursor is not None:
+        print(f"more: --cursor {page.next_cursor}", file=sys.stderr)
+    return 0
+
+
 def _named_args(pairs: Sequence[str]) -> dict[str, str]:
     values: dict[str, str] = {}
     for pair in pairs:
@@ -782,6 +841,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_cancel_command(args))
         if args.command == "status":
             return asyncio.run(_status_command(args))
+        if args.command == "runs":
+            return asyncio.run(_runs_command(args))
     except (ConfigError, HarnessError, KeyError, ValueError, SettingsError, OSError) as exc:
         print(f"agent-harness: {exc}", file=sys.stderr)
         return 2

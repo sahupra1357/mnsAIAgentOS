@@ -15,6 +15,8 @@ a principal with a tenant and a role (viewer < operator < admin; see
     GET  /readyz                    store reachable, schema version
     GET  /profiles
     GET  /templates
+    GET  /runs?status=&parent=&children=&created_after=&created_before=&limit=&cursor=&tenant=
+                                    (newest first; ``tenant`` only for all-tenant principals)
     POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?, "mode"?,
                                      "planning"?}
     GET  /runs/{id}
@@ -39,6 +41,7 @@ import dataclasses
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -53,10 +56,12 @@ from agent_harness.domain import (
     PermissionMode,
     Role,
     RunBudget,
+    RunQuery,
     RunQueue,
     RunRecord,
     RunStatus,
     RunStore,
+    RunSummary,
 )
 from agent_harness.orchestrator import AgentOrchestrator
 from agent_harness.planning import plan_payload
@@ -195,6 +200,10 @@ class HarnessAPI:
                 name: {"description": t.description, "sha256": t.sha256}
                 for name, t in sorted(self._templates.items())
             })
+            return
+        if path == "/runs" and method == "GET":
+            _require(principal, AccessRole.VIEWER)
+            await self._list_runs(send, query, principal)
             return
         if path == "/runs" and method == "POST":
             _require(principal, AccessRole.OPERATOR)
@@ -337,6 +346,43 @@ class HarnessAPI:
         )
         await self._queue.enqueue(run.id)
         return {"id": run.id, "status": run.status.value, "model_profile": profile}
+
+    async def _list_runs(self, send: Send, query: Mapping[str, list[str]], principal: Principal) -> None:
+        lister = getattr(self._store, "list_runs", None)
+        if lister is None:
+            raise ApiError(501, "this run store cannot list runs")
+        requested = _single(query, "tenant")
+        if principal.tenant != "*":
+            if requested is not None and requested != principal.tenant:
+                raise ApiError(403, "principal cannot list other tenants' runs")
+            tenant: str | None = principal.tenant
+        else:
+            tenant = requested
+        try:
+            statuses = tuple(
+                RunStatus(item.strip())
+                for value in query.get("status", ())
+                for item in value.split(",")
+                if item.strip()
+            )
+            limit = int(_single(query, "limit") or 50)
+            run_query = RunQuery(
+                tenant=tenant,
+                statuses=statuses,
+                parent_run_id=_single(query, "parent"),
+                include_children=(_single(query, "children") or "").lower() in {"1", "true", "yes"},
+                created_after=_timestamp(_single(query, "created_after")),
+                created_before=_timestamp(_single(query, "created_before")),
+                limit=limit,
+                cursor=_single(query, "cursor"),
+            )
+            page = await lister(run_query)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        await _json(send, 200, {
+            "runs": [_summary_payload(summary) for summary in page.runs],
+            "next_cursor": page.next_cursor,
+        })
 
     async def _load(self, run_id: str) -> RunRecord:
         run = await self._store.get_run(run_id)
@@ -672,6 +718,41 @@ def _event_payload(index: int, event: Any) -> dict[str, Any]:
         "step": event.step,
         "created_at": event.created_at.isoformat(),
         "payload": dict(event.payload),
+    }
+
+
+def _single(query: Mapping[str, list[str]], name: str) -> str | None:
+    values = query.get(name)
+    if not values:
+        return None
+    if len(values) > 1:
+        raise ApiError(400, f"{name} may be given only once")
+    return values[0]
+
+
+def _timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _summary_payload(summary: RunSummary) -> dict[str, Any]:
+    return {
+        "id": summary.id,
+        "title": summary.title,
+        "status": summary.status.value,
+        "model_profile": summary.model_profile,
+        "tenant": summary.tenant,
+        "created_by": summary.created_by,
+        "parent_run_id": summary.parent_run_id,
+        "depth": summary.depth,
+        "step_count": summary.step_count,
+        "consumed_tokens": summary.consumed_tokens,
+        "consumed_cost_usd": summary.consumed_cost_usd,
+        "error": summary.error,
+        "created_at": summary.created_at.isoformat(),
+        "updated_at": summary.updated_at.isoformat(),
     }
 
 
