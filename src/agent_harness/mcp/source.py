@@ -9,6 +9,7 @@ from typing import Any
 
 from agent_harness.domain import JsonObject, ToolRisk, ToolSpec, ToolTrust
 from agent_harness.model_gateway.transport import HttpTransport
+from agent_harness.secrets import describe, resolve_secret
 from agent_harness.tools.runtime import RetryableToolError, ToolRejectedError, ToolRuntime
 
 from .client import McpClient, McpTool, content_text
@@ -138,9 +139,9 @@ class McpToolSource:
                                    start_timeout=config.request_timeout_seconds)
         headers: dict[str, str] = {}
         for header, variable in config.headers_env.items():
-            value = self._environ.get(variable)
+            value = resolve_secret(variable, self._environ)
             if not value:
-                raise McpError(f"MCP server {config.name!r} needs the {variable} environment variable")
+                raise McpError(f"MCP server {config.name!r} needs the {describe(variable)}")
             headers[header] = value
         assert config.url is not None
         return HttpConnection(config.url, headers=headers, transport=self._http_transport,

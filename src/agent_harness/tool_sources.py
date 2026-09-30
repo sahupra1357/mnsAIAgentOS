@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from agent_harness.domain import JsonObject, ToolRisk, ToolSpec, ToolTrust
+from agent_harness.secrets import describe, resolve_secret
 from agent_harness.model_gateway.transport import (
     HttpResponse,
     HttpTransport,
@@ -126,9 +127,9 @@ class HttpToolSource:
         async def handler(arguments: JsonObject) -> JsonObject:
             headers = {"Accept": "application/json"}
             for header, variable in self.headers_env.items():
-                value = env.get(variable)
+                value = resolve_secret(variable, env)
                 if not value:
-                    raise ToolRejectedError(f"The {variable} environment variable is not set.")
+                    raise ToolRejectedError(f"The credential {describe(variable)} is not set.")
                 headers[header] = value
             url = self.url
             _enforce_host(url, host_policy)
@@ -188,10 +189,10 @@ class WebSearchSource:
         env = environ if environ is not None else os.environ
 
         async def web_search(arguments: JsonObject) -> JsonObject:
-            key = env.get(self.api_key_env)
+            key = resolve_secret(self.api_key_env, env)
             if not key:
                 raise ToolRejectedError(
-                    f"Web search is not configured: set the {self.api_key_env} environment variable."
+                    f"Web search is not configured: set the {describe(self.api_key_env)}."
                 )
             _enforce_host(self.endpoint, host_policy)
             payload = {

@@ -6,6 +6,7 @@ import asyncio
 import itertools
 import time
 from collections.abc import Callable
+from datetime import datetime
 from copy import deepcopy
 from dataclasses import replace
 from typing import Sequence
@@ -15,7 +16,9 @@ from agent_harness.domain import (
     ConcurrencyError,
     RunEvent,
     RunRecord,
+    RunStatus,
     SteerMessage,
+    TenantUsage,
     ToolCatalogEntry,
     ToolResult,
     utc_now,
@@ -102,6 +105,32 @@ class InMemoryRunStore:
     ) -> tuple[str, ToolResult] | None:
         async with self._lock:
             return self._tool_results.get((tool_name, idempotency_key))
+
+    def schema_version(self) -> int:
+        return 0  # nothing persisted, nothing to migrate
+
+    async def tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
+        async with self._lock:
+            runs = [r for r in self._runs.values() if r.tenant == tenant]
+            recent = [r for r in runs if r.created_at >= since]
+            active = sum(r.status in {RunStatus.QUEUED, RunStatus.RUNNING} for r in runs)
+            return TenantUsage(runs=len(recent), tokens=sum(r.consumed_tokens for r in recent),
+                               cost_usd=sum(r.consumed_cost_usd for r in recent), active_runs=active)
+
+    async def purge_runs(self, before: datetime, *, dry_run: bool = True) -> list[str]:
+        async with self._lock:
+            ids = [r.id for r in sorted(self._runs.values(), key=lambda r: r.updated_at)
+                   if r.status.is_terminal and r.updated_at < before]
+            if not dry_run:
+                for run_id in ids:
+                    self._runs.pop(run_id, None)
+                    for event in self._events.pop(run_id, []):
+                        self._event_ids.discard(event.id or "")
+                    self._queue.pop(run_id, None)
+                    self._steers.pop(run_id, None)
+                    for key in [k for k in self._tool_results if k[1].startswith(f"{run_id}:")]:
+                        del self._tool_results[key]
+            return ids
 
     def catalog_entries(self) -> Sequence[ToolCatalogEntry]:
         return [self._catalog[name] for name in sorted(self._catalog)]

@@ -17,6 +17,7 @@ from uuid import uuid4
 from agent_harness.domain import (
     ConcurrencyError,
     ContextSummary,
+    TenantUsage,
     Plan,
     PlanStep,
     PlanStepStatus,
@@ -41,6 +42,7 @@ from agent_harness.domain import (
 )
 
 from .memory import _validate_identifier, _validate_run_event
+from .migrations import apply_sqlite_migrations, schema_version
 
 
 class SQLiteRunStore:
@@ -64,82 +66,12 @@ class SQLiteRunStore:
         self._create_schema()
 
     def _create_schema(self) -> None:
-        self._connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS runs (
-                id TEXT PRIMARY KEY,
-                version INTEGER NOT NULL CHECK (version >= 0),
-                snapshot_json TEXT NOT NULL
-            );
+        """Apply versioned migrations (see ``persistence/migrations.py``)."""
 
-            CREATE TABLE IF NOT EXISTS run_events (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL UNIQUE,
-                run_id TEXT NOT NULL REFERENCES runs(id),
-                type TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                step INTEGER NOT NULL CHECK (step >= 0),
-                created_at TEXT NOT NULL
-            );
+        apply_sqlite_migrations(self._connection)
 
-            CREATE INDEX IF NOT EXISTS run_events_run_sequence
-                ON run_events(run_id, sequence);
-
-            CREATE TRIGGER IF NOT EXISTS run_events_no_update
-            BEFORE UPDATE ON run_events
-            BEGIN
-                SELECT RAISE(ABORT, 'run events are append-only');
-            END;
-
-            CREATE TABLE IF NOT EXISTS run_queue (
-                run_id TEXT PRIMARY KEY REFERENCES runs(id),
-                enqueued_sequence INTEGER NOT NULL,
-                worker_id TEXT,
-                lease_expires_at REAL NOT NULL DEFAULT 0
-            );
-
-            CREATE INDEX IF NOT EXISTS run_queue_order
-                ON run_queue(enqueued_sequence);
-
-            CREATE TABLE IF NOT EXISTS steer_messages (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                id TEXT NOT NULL UNIQUE,
-                run_id TEXT NOT NULL REFERENCES runs(id),
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS tool_results (
-                tool_name TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL,
-                fingerprint TEXT NOT NULL,
-                result_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (tool_name, idempotency_key)
-            );
-
-            CREATE TABLE IF NOT EXISTS tool_catalog (
-                name TEXT PRIMARY KEY,
-                source TEXT NOT NULL,
-                source_kind TEXT NOT NULL,
-                spec_json TEXT NOT NULL,
-                spec_sha256 TEXT NOT NULL,
-                description TEXT NOT NULL,
-                risk TEXT NOT NULL,
-                trust TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                available INTEGER NOT NULL DEFAULT 1,
-                first_seen TEXT NOT NULL,
-                last_seen TEXT NOT NULL
-            );
-
-            CREATE TRIGGER IF NOT EXISTS run_events_no_delete
-            BEFORE DELETE ON run_events
-            BEGIN
-                SELECT RAISE(ABORT, 'run events are append-only');
-            END;
-            """
-        )
+    def schema_version(self) -> int:
+        return schema_version(self._connection)
 
     async def close(self) -> None:
         async with self._lock:
@@ -166,8 +98,14 @@ class SQLiteRunStore:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 self._connection.execute(
-                    "INSERT INTO runs(id, version, snapshot_json) VALUES (?, ?, ?)",
-                    (run.id, run.version, snapshot_json),
+                    """
+                    INSERT INTO runs(id, version, snapshot_json, tenant, status, created_at,
+                                     updated_at, consumed_tokens, consumed_cost_usd)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (run.id, run.version, snapshot_json, run.tenant, run.status.value,
+                     run.created_at.isoformat(), run.updated_at.isoformat(),
+                     run.consumed_tokens, run.consumed_cost_usd),
                 )
                 self._insert_event(stored_event)
                 self._connection.execute("COMMIT")
@@ -211,10 +149,12 @@ class SQLiteRunStore:
                 cursor = self._connection.execute(
                     """
                     UPDATE runs
-                    SET version = ?, snapshot_json = ?
+                    SET version = ?, snapshot_json = ?, status = ?, updated_at = ?,
+                        consumed_tokens = ?, consumed_cost_usd = ?
                     WHERE id = ? AND version = ?
                     """,
-                    (new_version, snapshot_json, run.id, expected_version),
+                    (new_version, snapshot_json, snapshot.status.value, updated_at.isoformat(),
+                     snapshot.consumed_tokens, snapshot.consumed_cost_usd, run.id, expected_version),
                 )
                 if cursor.rowcount != 1:
                     row = self._connection.execute(
@@ -357,6 +297,63 @@ class SQLiteRunStore:
                     "DELETE FROM run_queue WHERE run_id = ? AND worker_id = ?",
                     (run_id, worker_id),
                 )
+
+    # -- quotas and retention -------------------------------------------------
+
+    async def tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
+        async with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT COUNT(*) AS runs, COALESCE(SUM(consumed_tokens), 0) AS tokens,
+                       COALESCE(SUM(consumed_cost_usd), 0) AS cost
+                FROM runs WHERE tenant = ? AND created_at >= ?
+                """,
+                (tenant, since.isoformat()),
+            ).fetchone()
+            active = self._connection.execute(
+                "SELECT COUNT(*) FROM runs WHERE tenant = ? AND status IN ('queued', 'running')",
+                (tenant,),
+            ).fetchone()[0]
+        return TenantUsage(runs=int(row["runs"]), tokens=int(row["tokens"]),
+                           cost_usd=float(row["cost"]), active_runs=int(active))
+
+    async def purge_runs(self, before: datetime, *, dry_run: bool = True) -> list[str]:
+        """Delete finished runs last updated before ``before`` (with their events and rows).
+
+        Returns the affected run ids. Artifacts are content-addressed and may be
+        shared between runs, so they are left to a separate cleanup.
+        """
+
+        terminal = ("completed", "failed", "cancelled", "budget_exhausted")
+        async with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT id FROM runs
+                WHERE status IN ({",".join("?" * len(terminal))}) AND updated_at < ?
+                ORDER BY updated_at
+                """,
+                (*terminal, before.isoformat()),
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if dry_run or not ids:
+                return ids
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.execute("INSERT INTO purge_guard(holder) VALUES ('gc')")
+                for run_id in ids:
+                    for table in ("run_events", "run_queue", "steer_messages"):
+                        self._connection.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
+                    self._connection.execute(
+                        "DELETE FROM tool_results WHERE idempotency_key LIKE ? ESCAPE '\\'",
+                        (_like_prefix(run_id) + ":%",),
+                    )
+                    self._connection.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+                self._connection.execute("DELETE FROM purge_guard")
+                self._connection.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+        return ids
 
     # -- tool catalog (synchronous: startup and admin operations) ------------
 
@@ -520,6 +517,8 @@ def _decode_run(value: str) -> RunRecord:
         archived_messages=_decode_messages(data.get("archived_messages", ())),
         loaded_tools=tuple(data.get("loaded_tools", ())),
         planning=bool(data.get("planning", False)),
+        tenant=str(data.get("tenant", "default")),
+        created_by=data.get("created_by"),
         plan=_decode_plan(data.get("plan")),
         context_summary=(
             ContextSummary(
@@ -530,6 +529,10 @@ def _decode_run(value: str) -> RunRecord:
             else None
         ),
     )
+
+
+def _like_prefix(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _decode_plan(data: Any) -> Plan | None:

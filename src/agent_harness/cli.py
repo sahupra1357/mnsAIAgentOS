@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import timedelta
 import asyncio
 import contextlib
 import json
@@ -15,10 +16,12 @@ from dataclasses import replace
 from collections.abc import Sequence
 from pathlib import Path
 
+from .access import QuotaExceeded, check_quota
+from .application import quotas_from_config
 from .application import HarnessApplication, build_application
 from .coding import CODING_AGENT_SYSTEM_PROMPT
 from .config import ConfigError, load_config
-from .domain import HarnessError, Message, Role, RunBudget, RunRecord
+from .domain import HarnessError, Message, Role, RunBudget, RunRecord, utc_now
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
 from .api import create_api
@@ -176,6 +179,11 @@ def _parser() -> argparse.ArgumentParser:
         toggle.add_argument("name")
         _common_runtime_arguments(toggle)
 
+    gc = subcommands.add_parser("gc", help="retention: delete finished runs older than N days (dry run by default)")
+    gc.add_argument("--older-than-days", type=int, required=True)
+    gc.add_argument("--yes", action="store_true", help="actually delete (otherwise only report)")
+    _common_runtime_arguments(gc)
+
     plugin = subcommands.add_parser("plugin", help="install, list, or remove plugins")
     plugin_sub = plugin.add_subparsers(dest="plugin_command", required=True)
     install = plugin_sub.add_parser("install", help="validate and copy a plugin (not enabled)")
@@ -212,9 +220,9 @@ def _common_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
         "--database",
-        type=Path,
-        default=Path("agent-harness.sqlite3"),
-        help="durable SQLite run database",
+        default="agent-harness.sqlite3",
+        help="SQLite file, or a postgresql:// URL (needs the [postgres] extra); "
+        "[storage] url_env can supply the URL instead",
     )
     parser.add_argument(
         "--telemetry-file",
@@ -264,6 +272,7 @@ async def _run_command(args: argparse.Namespace) -> int:
             messages.append(Message(role=Role.SYSTEM, content=system))
         prompt, template = expand_prompt(args.prompt, app.templates, _named_args(args.arg))
         messages.append(Message(role=Role.USER, content=prompt))
+        await _check_quota(app, "default")
         run = await app.orchestrator.create_run(
             model_profile=profile,
             route=route,
@@ -397,6 +406,8 @@ async def _continue_command(args: argparse.Namespace) -> int:
                 current.budget, **{k: v for k, v in raised.items() if v is not None}
             )
         message, _ = expand_prompt(args.message, app.templates)
+        current_run = await app.store.get_run(args.run_id)
+        await _check_quota(app, current_run.tenant if current_run else "default", new_run=False)
         await app.orchestrator.continue_run(args.run_id, message, budget=budget)
         finished = await app.orchestrator.run(args.run_id)
         return await _print_result(
@@ -540,6 +551,27 @@ def _plugin_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _check_quota(app: HarnessApplication, tenant: str, *, new_run: bool = True) -> None:
+    try:
+        await check_quota(app.store, quotas_from_config(app.config), tenant, new_run=new_run)
+    except QuotaExceeded as exc:
+        raise ValueError(str(exc)) from exc
+
+
+async def _gc_command(args: argparse.Namespace) -> int:
+    if args.older_than_days < 1:
+        raise ValueError("--older-than-days must be at least 1")
+    app = _build(args)
+    async with app:
+        cutoff = utc_now() - timedelta(days=args.older_than_days)
+        ids = await app.store.purge_runs(cutoff, dry_run=not args.yes)
+    verb = "deleted" if args.yes else "would delete"
+    print(f"{verb} {len(ids)} finished runs last updated before {cutoff.date()}")
+    if ids and not args.yes:
+        print("re-run with --yes to delete them (events, queue, steering, idempotency rows)", file=sys.stderr)
+    return 0
+
+
 async def _start_tools(app: HarnessApplication) -> None:
     """Sync MCP servers before executing runs; a failing server is reported, not fatal."""
 
@@ -578,17 +610,20 @@ async def _tools_command(args: argparse.Namespace) -> int:
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
-def _api_token(args: argparse.Namespace) -> str | None:
+def _api_token(args: argparse.Namespace, *, has_keys: bool = False) -> str | None:
     if args.insecure_no_auth:
+        if has_keys:
+            raise ValueError("--insecure-no-auth cannot be combined with [[api.keys]]")
         if args.host not in _LOOPBACK_HOSTS:
             raise ValueError("--insecure-no-auth is only allowed with a loopback --host")
         return None
     token = os.environ.get(args.token_env)
-    if not token:
+    if not token and not has_keys:
         raise ValueError(
-            f"set {args.token_env} to an API bearer token (or use --insecure-no-auth on loopback)"
+            f"set {args.token_env} to an API bearer token, configure [[api.keys]], "
+            "or use --insecure-no-auth on loopback"
         )
-    return token
+    return token or None
 
 
 async def _serve_command(args: argparse.Namespace) -> int:
@@ -596,8 +631,8 @@ async def _serve_command(args: argparse.Namespace) -> int:
         import uvicorn
     except ImportError as exc:
         raise ValueError("serve requires uvicorn: pip install 'agent-harness[api]'") from exc
-    token = _api_token(args)
     app = _build(args)
+    token = _api_token(args, has_keys=bool(app.config.api_keys))
     async with app:
         await _start_tools(app)
         api = create_api(app, auth_token=token, worker_count=args.workers)
@@ -703,6 +738,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _plugin_command(args)
         if args.command == "tools":
             return asyncio.run(_tools_command(args))
+        if args.command == "gc":
+            return asyncio.run(_gc_command(args))
         if args.command == "cancel":
             return asyncio.run(_cancel_command(args))
         if args.command == "status":

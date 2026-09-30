@@ -16,6 +16,7 @@ otel = ["opentelemetry-api>=1.20"]
 api = ["uvicorn>=0.30"]
 # Pin to an exact version you have tested before production use.
 litellm = ["litellm>=1.50,<2"]
+postgres = ["psycopg[binary]>=3.1,<4"]
 
 [project.scripts]
 agent-harness = "agent_harness.cli:main"

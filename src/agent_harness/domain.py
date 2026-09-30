@@ -258,6 +258,9 @@ class RunRecord:
     # Plan-and-execute: whether the orchestrator drives this run from a plan, and the plan.
     planning: bool = False
     plan: Plan | None = None
+    # Ownership (Phase 9): the tenant whose quotas and API keys govern the run.
+    tenant: str = "default"
+    created_by: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -603,6 +606,16 @@ class RunStore(Protocol):
     ) -> None: ...
 
     async def list_events(self, run_id: str) -> Sequence[RunEvent]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TenantUsage:
+    """Aggregate use by one tenant since a point in time (for quotas)."""
+
+    runs: int = 0
+    tokens: int = 0
+    cost_usd: float = 0.0
+    active_runs: int = 0
 
 
 @dataclass(frozen=True, slots=True)

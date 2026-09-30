@@ -127,3 +127,16 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
 ## Handoff
 Each item ships with network-free tests, docs in README, and no change in behavior when
 the feature is not configured.
+
+## Production hardening (Phase 9)
+
+- **Where it lives:**
+  - storage migrations and the Postgres store: `persistence/`;
+  - principals, roles, and quotas: `access.py`;
+  - secret references: `secrets.py`;
+  - redaction: `redaction.py`;
+  - the egress host policy: `tool_sources.host_policy_from`.
+- **Docs:** see `skills/production-hardening/SKILL.md` and `docs/DEPLOYMENT.md`.
+- **Adding a store method:** add it to `tests/test_store_conformance.py` and implement it in
+  all three stores (memory, SQLite, Postgres).
+

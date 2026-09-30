@@ -1,0 +1,44 @@
+# Configuration used by deploy/docker-compose.yml. Replace the model profile with yours.
+default_model_profile = "local"
+
+[models.local]
+adapter = "openai_compatible"
+model = "your-model-name"
+endpoint = "http://host.docker.internal:8080/v1"   # e.g. llama-server on the host
+timeout_seconds = 120
+max_retries = 2
+
+# Runs, events, the queue, and the tool catalog live in Postgres; the URL (with its
+# password) comes from the environment, not from this file.
+[storage]
+url_env = "AGENT_HARNESS_DATABASE_URL"
+
+# Long-term memory is SQLite-only; keep it on a volume if you enable it.
+[memory]
+enabled = false
+database = "/data/memory.sqlite3"
+
+# API keys: principals with a tenant and a role. The key itself comes from the env.
+[[api.keys]]
+name = "admin"
+tenant = "*"
+role = "admin"
+key_env = "AGENT_HARNESS_ADMIN_KEY"
+
+[[api.keys]]
+name = "team-a"
+tenant = "team-a"
+role = "operator"
+key_env = "AGENT_HARNESS_TEAM_A_KEY"
+
+[[quotas]]
+tenant = "*"
+max_runs_per_day = 500
+max_concurrent_runs = 20
+
+[network]
+restrict_egress = true
+allowed_hosts = ["api.tavily.com"]
+
+[redaction]
+enabled = true
