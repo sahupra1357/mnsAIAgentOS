@@ -44,6 +44,12 @@ def tools_sha256(tools: Sequence[ToolSpec]) -> str:
     )
 
 
+def spec_sha256(spec: ToolSpec) -> str:
+    """Identity of one tool definition, as recorded in the tool catalog."""
+
+    return sha256_of(spec)
+
+
 def profile_sha256(profile: Any) -> str:
     return sha256_of(profile)
 

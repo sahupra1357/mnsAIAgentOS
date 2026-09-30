@@ -58,6 +58,11 @@ class SQLiteMemoryStore:
         except sqlite3.OperationalError:
             self.full_text = False
 
+    def close_now(self) -> None:
+        """Close immediately (no event loop needed); used when composition fails."""
+
+        self._connection.close()
+
     async def close(self) -> None:
         async with self._lock:
             self._connection.close()

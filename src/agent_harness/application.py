@@ -39,6 +39,11 @@ from .orchestrator import AgentOrchestrator, OrchestratorSettings
 from .persistence import SQLiteRunStore
 from .tools import ToolRuntime, create_default_runtime
 from .versioning import profile_sha256
+from .domain import ToolRisk, ToolTrust
+from .mcp.source import McpToolSource
+from .tool_catalog import ToolCatalog
+from .tool_loading import ToolLoadingPolicy
+from .tool_sources import HttpToolSource, PythonToolSource, ToolSourceError, WebSearchSource
 
 
 @dataclass(slots=True)
@@ -56,6 +61,43 @@ class HarnessApplication:
     templates: dict[str, Template] = field(default_factory=dict)
     skills: dict[str, Skill] = field(default_factory=dict)
     plugins: list[Plugin] = field(default_factory=list)
+    catalog: ToolCatalog | None = None
+    mcp_sources: list[McpToolSource] = field(default_factory=list)
+
+    async def sync_tools(self) -> dict[str, str]:
+        """Discover tools from live MCP servers and record them in the catalog.
+
+        Returns one line per server: how many tools it offers, or why it failed.
+        A server that is down keeps the tools cached from its last sync.
+        """
+
+        report: dict[str, str] = {}
+        for source in self.mcp_sources:
+            try:
+                specs = await source.discover()
+            except Exception as exc:  # a broken server must not stop the others
+                report[source.config.name] = f"error: {exc}"
+                continue
+            known = self.tools.registry.registered()
+            fresh = [spec for spec in specs if spec.name not in known or known[spec.name].spec != spec]
+            source.register(self.tools, fresh, replace=True)
+            if self.catalog is not None:
+                self.catalog.sync(sources=[source.config.source])
+                # Tools the server no longer lists are marked unavailable (and hidden).
+                offered = {spec.name for spec in specs}
+                for name, tool in self.tools.registry.registered().items():
+                    if tool.source == source.config.source and name not in offered:
+                        self.tools.registry.set_hidden(name, True)
+            skipped = f"; skipped {len(source.skipped)} with unsupported schemas" if source.skipped else ""
+            report[source.config.name] = f"{len(specs)} tools{skipped}"
+        return report
+
+    async def start_tools(self) -> dict[str, str]:
+        """Sync the MCP servers configured with ``sync_on_start`` (used before executing runs)."""
+
+        if not any(source.config.sync_on_start for source in self.mcp_sources):
+            return {}
+        return await self.sync_tools()
 
     def run_versions(self, model_profile: str) -> dict[str, str]:
         """Versions recorded on a new run, alongside prompt and tool hashes."""
@@ -68,6 +110,8 @@ class HarnessApplication:
         }
 
     async def close(self) -> None:
+        for source in self.mcp_sources:
+            await source.close()
         await self.store.close()
         if self.memory is not None:
             await self.memory.close()
@@ -111,109 +155,185 @@ def build_application(
     )
     models = ModelGateway(config)
     store = SQLiteRunStore(Path(database_path))
-    artifacts = (
-        LocalArtifactStore(base_path / config.artifacts.directory)
-        if config.artifacts.enabled
-        else None
-    )
-    memory = (
-        SQLiteMemoryStore(
-            base_path / config.memory.database if config.memory.database else Path(database_path),
-            namespace=config.memory.namespace,
-        )
-        if config.memory.enabled
-        else None
-    )
-    tool_runtime = tools
-    if tool_runtime is None:
-        if config.coding.enabled:
-            tool_runtime = create_coding_tool_runtime(
-                config.coding,
-                base_path=Path(config_path).parent,
-            )
-        else:
-            tool_runtime = create_default_runtime()
-        # Successful tool results survive restarts, so a replayed call after a
-        # crash returns the recorded result instead of repeating the side effect.
-        tool_runtime.attach_idempotency_store(store)
-        if artifacts is not None:
-            tool_runtime.register(READ_ARTIFACT_SPEC, read_artifact_handler(artifacts))
-        if memory is not None:
-            search, write = memory_tool_handlers(memory)
-            tool_runtime.register(MEMORY_SEARCH_SPEC, search)
-            tool_runtime.register(MEMORY_WRITE_SPEC, write)
-        if skills:
-            tool_runtime.register(load_skill_spec(skills), load_skill_handler(skills))
-    system_context = None
-    if config.instructions.enabled or skills:
-        subdirectory_filenames: tuple[str, ...] = ()
-        if config.instructions.enabled and config.instructions.subdirectories:
-            try:
-                subdirectory_filenames = validate_instruction_filenames(config.instructions.filenames)
-            except ValueError as exc:
-                raise ConfigError(f"instructions.filenames: {exc}") from exc
-        system_context = SystemContextBuilder(
-            instruction_files=config.instructions.files if config.instructions.enabled else (),
-            base=base_path,
-            max_bytes=config.instructions.max_bytes,
-            skills=skills,
-            subdirectory_filenames=subdirectory_filenames,
-        )
-    hook_sources = [(hook, base_path) for hook in config.hooks] + [
-        (hook, plugin.root) for plugin in plugins for hook in plugin.hooks
-    ]
-    agent_sources = [(agent, base_path) for agent in config.agents] + [
-        (agent, plugin.root) for plugin in plugins for agent in plugin.agents
-    ]
-    orchestrator = AgentOrchestrator(
-        models=models,
-        tools=tool_runtime,
-        store=store,
-        settings=settings,
-        context=BudgetedContextBuilder(context_limits, policy=context_policy),
-        fallbacks=models.fallback_profiles,
-        telemetry=telemetry,
-        stream_listener=stream_listener,
-        artifacts=artifacts,
-        artifact_threshold_bytes=config.artifacts.threshold_bytes,
-        steering=store,
-        hooks=hooks if hooks is not None else _configured_hooks(hook_sources),
-        permissions=PermissionPolicy.from_lists(
-            allow=config.permissions.allow,
-            ask=config.permissions.ask,
-            deny=config.permissions.deny,
-            edit_tools=config.permissions.edit_tools,
-        ),
-        default_mode=PermissionMode(config.permissions.mode),
-        subagents=_subagents(config, agent_sources, tool_runtime),
-        subagent_limits=SubagentLimits(
-            max_depth=config.subagents.max_depth, max_per_run=config.subagents.max_per_run
-        ),
-        task_tracking=config.tasks.enabled,
-        system_context=system_context,
-        snapshots=(
-            WorkspaceSnapshotter(
-                config.coding.workspace_path(base=base_path),
-                artifacts or LocalArtifactStore(base_path / ".agent-harness" / "snapshots"),
-            )
-            if config.coding.enabled
+    memory: SQLiteMemoryStore | None = None
+    try:
+        artifacts = (
+            LocalArtifactStore(base_path / config.artifacts.directory)
+            if config.artifacts.enabled
             else None
-        ),
-        summarizer=summarizer,
-    )
-    return HarnessApplication(
-        config=config,
-        models=models,
-        tools=tool_runtime,
-        store=store,
-        orchestrator=orchestrator,
-        telemetry=telemetry,
-        artifacts=artifacts,
-        memory=memory,
-        templates=templates,
-        skills=skills,
-        plugins=plugins,
-    )
+        )
+        memory = (
+            SQLiteMemoryStore(
+                base_path / config.memory.database if config.memory.database else Path(database_path),
+                namespace=config.memory.namespace,
+            )
+            if config.memory.enabled
+            else None
+        )
+        tool_runtime = tools
+        if tool_runtime is None:
+            if config.coding.enabled:
+                tool_runtime = create_coding_tool_runtime(
+                    config.coding,
+                    base_path=Path(config_path).parent,
+                )
+            else:
+                tool_runtime = create_default_runtime()
+            # Successful tool results survive restarts, so a replayed call after a
+            # crash returns the recorded result instead of repeating the side effect.
+            tool_runtime.attach_idempotency_store(store)
+            if artifacts is not None:
+                tool_runtime.register(READ_ARTIFACT_SPEC, read_artifact_handler(artifacts))
+            if memory is not None:
+                search, write = memory_tool_handlers(memory)
+                tool_runtime.register(MEMORY_SEARCH_SPEC, search)
+                tool_runtime.register(MEMORY_WRITE_SPEC, write)
+            if skills:
+                tool_runtime.register(load_skill_spec(skills), load_skill_handler(skills))
+        catalog, mcp_sources = _load_tool_sources(config, tool_runtime, store, base_path)
+        system_context = None
+        if config.instructions.enabled or skills:
+            subdirectory_filenames: tuple[str, ...] = ()
+            if config.instructions.enabled and config.instructions.subdirectories:
+                try:
+                    subdirectory_filenames = validate_instruction_filenames(config.instructions.filenames)
+                except ValueError as exc:
+                    raise ConfigError(f"instructions.filenames: {exc}") from exc
+            system_context = SystemContextBuilder(
+                instruction_files=config.instructions.files if config.instructions.enabled else (),
+                base=base_path,
+                max_bytes=config.instructions.max_bytes,
+                skills=skills,
+                subdirectory_filenames=subdirectory_filenames,
+            )
+        hook_sources = [(hook, base_path) for hook in config.hooks] + [
+            (hook, plugin.root) for plugin in plugins for hook in plugin.hooks
+        ]
+        agent_sources = [(agent, base_path) for agent in config.agents] + [
+            (agent, plugin.root) for plugin in plugins for agent in plugin.agents
+        ]
+        orchestrator = AgentOrchestrator(
+            models=models,
+            tools=tool_runtime,
+            store=store,
+            settings=settings,
+            context=BudgetedContextBuilder(context_limits, policy=context_policy),
+            fallbacks=models.fallback_profiles,
+            telemetry=telemetry,
+            stream_listener=stream_listener,
+            artifacts=artifacts,
+            artifact_threshold_bytes=config.artifacts.threshold_bytes,
+            steering=store,
+            hooks=hooks if hooks is not None else _configured_hooks(hook_sources),
+            permissions=PermissionPolicy.from_lists(
+                allow=config.permissions.allow,
+                ask=config.permissions.ask,
+                deny=config.permissions.deny,
+                edit_tools=config.permissions.edit_tools,
+            ),
+            default_mode=PermissionMode(config.permissions.mode),
+            subagents=_subagents(config, agent_sources, tool_runtime),
+            subagent_limits=SubagentLimits(
+                max_depth=config.subagents.max_depth, max_per_run=config.subagents.max_per_run
+            ),
+            task_tracking=config.tasks.enabled,
+            system_context=system_context,
+            snapshots=(
+                WorkspaceSnapshotter(
+                    config.coding.workspace_path(base=base_path),
+                    artifacts or LocalArtifactStore(base_path / ".agent-harness" / "snapshots"),
+                )
+                if config.coding.enabled
+                else None
+            ),
+            summarizer=summarizer,
+            tool_loading=_tool_loading(config, tool_runtime),
+        )
+        return HarnessApplication(
+            catalog=catalog,
+            mcp_sources=mcp_sources,
+            config=config,
+            models=models,
+            tools=tool_runtime,
+            store=store,
+            orchestrator=orchestrator,
+            telemetry=telemetry,
+            artifacts=artifacts,
+            memory=memory,
+            templates=templates,
+            skills=skills,
+            plugins=plugins,
+        )
+    except BaseException:
+        # Composition failed (e.g. a ConfigError): do not leak open database handles.
+        store.close_now()
+        if memory is not None:
+            memory.close_now()
+        raise
+
+
+def _load_tool_sources(
+    config: HarnessConfig, runtime: ToolRuntime, store: SQLiteRunStore, base_path: Path
+) -> tuple[ToolCatalog, list[McpToolSource]]:
+    """Attach config-declared tool sources, then sync the persistent catalog."""
+
+    try:
+        for source in config.tool_sources:
+            if source.kind == "python":
+                assert source.module is not None
+                PythonToolSource(source.name, source.module, source.path).load(runtime, base=base_path)
+            else:
+                assert source.url is not None and source.input_schema is not None
+                HttpToolSource(
+                    name=source.name,
+                    description=source.description,
+                    url=source.url,
+                    input_schema=dict(source.input_schema),
+                    method=source.method,
+                    headers_env=dict(source.headers_env),
+                    risk=ToolRisk(source.risk) if source.risk else None,
+                    trust=ToolTrust(source.trust),
+                    timeout_seconds=source.timeout_seconds,
+                ).load(runtime)
+        if config.web_search.enabled:
+            if config.web_search.provider != "tavily":
+                raise ConfigError("web_search.provider must be 'tavily'")
+            WebSearchSource(
+                api_key_env=config.web_search.api_key_env,
+                endpoint=config.web_search.endpoint,
+                max_results=config.web_search.max_results,
+                search_depth=config.web_search.search_depth,
+                timeout_seconds=config.web_search.timeout_seconds,
+            ).load(runtime)
+    except (ToolSourceError, ValueError, TypeError) as exc:
+        raise ConfigError(str(exc)) from exc
+
+    catalog = ToolCatalog(store, runtime.registry)
+    mcp_sources: list[McpToolSource] = []
+    for server in config.mcp_servers:
+        if not server.enabled:
+            continue
+        mcp_source = McpToolSource(server)
+        # Until the server is synced, its tools come from the catalog (last sync).
+        mcp_source.register(runtime, catalog.cached_specs(server.source))
+        mcp_sources.append(mcp_source)
+    catalog.sync()
+    return catalog, mcp_sources
+
+
+def _tool_loading(config: HarnessConfig, runtime: ToolRuntime) -> ToolLoadingPolicy:
+    section = config.tool_loading
+    try:
+        policy = ToolLoadingPolicy(
+            mode=section.mode, core=section.core,
+            max_loaded=section.max_loaded, search_limit=section.search_limit,
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    unknown = sorted(set(policy.core) - set(runtime.registry.registered()))
+    if unknown:
+        raise ConfigError(f"tool_loading.core lists unknown tools: {', '.join(unknown)}")
+    return policy
 
 
 def _summarizer(

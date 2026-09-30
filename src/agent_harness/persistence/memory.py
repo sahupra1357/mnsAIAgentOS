@@ -16,6 +16,7 @@ from agent_harness.domain import (
     RunEvent,
     RunRecord,
     SteerMessage,
+    ToolCatalogEntry,
     ToolResult,
     utc_now,
 )
@@ -38,6 +39,7 @@ class InMemoryRunStore:
         self._event_ids: set[str] = set()
         self._tool_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._steers: dict[str, list[SteerMessage]] = {}
+        self._catalog: dict[str, ToolCatalogEntry] = {}
         self._lock = asyncio.Lock()
 
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
@@ -100,6 +102,32 @@ class InMemoryRunStore:
     ) -> tuple[str, ToolResult] | None:
         async with self._lock:
             return self._tool_results.get((tool_name, idempotency_key))
+
+    def catalog_entries(self) -> Sequence[ToolCatalogEntry]:
+        return [self._catalog[name] for name in sorted(self._catalog)]
+
+    def sync_catalog(self, entries: Sequence[ToolCatalogEntry], *, sources: Sequence[str]) -> None:
+        now = utc_now()
+        seen = {entry.name for entry in entries}
+        for entry in entries:
+            previous = self._catalog.get(entry.name)
+            self._catalog[entry.name] = replace(
+                entry,
+                enabled=previous.enabled if previous else True,
+                available=True,
+                first_seen=previous.first_seen if previous else now,
+                last_seen=now,
+            )
+        for name, entry in list(self._catalog.items()):
+            if entry.source in sources and name not in seen and entry.available:
+                self._catalog[name] = replace(entry, available=False)
+
+    def set_tool_enabled(self, name: str, enabled: bool) -> bool:
+        entry = self._catalog.get(name)
+        if entry is None:
+            return False
+        self._catalog[name] = replace(entry, enabled=enabled)
+        return True
 
     async def put_tool_result(
         self, tool_name: str, idempotency_key: str, fingerprint: str, result: ToolResult

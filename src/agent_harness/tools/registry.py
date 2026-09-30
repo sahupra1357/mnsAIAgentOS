@@ -19,32 +19,69 @@ ToolHandler: TypeAlias = Callable[[JsonObject], Awaitable[Any]]
 class RegisteredTool:
     spec: ToolSpec
     handler: ToolHandler
+    source: str = "builtin"
+    source_kind: str = "builtin"
 
 
 class ToolRegistry:
-    """An opt-in collection of tools available to one runtime."""
+    """An opt-in collection of tools available to one runtime.
+
+    A tool can be *hidden* (disabled by an operator, or no longer provided by
+    its source): it stays registered for diagnostics but is neither offered to
+    models nor executable.
+    """
 
     def __init__(self) -> None:
         self._tools: dict[str, RegisteredTool] = {}
+        self._hidden: set[str] = set()
 
-    def register(self, spec: ToolSpec, handler: ToolHandler) -> None:
-        """Register a tool, rejecting invalid or duplicate definitions."""
+    def register(
+        self,
+        spec: ToolSpec,
+        handler: ToolHandler,
+        *,
+        source: str = "builtin",
+        source_kind: str = "builtin",
+        replace: bool = False,
+    ) -> None:
+        """Register a tool, rejecting invalid or duplicate definitions.
+
+        ``replace`` allows a source to update a tool it already registered
+        (for example after an MCP server changed a schema).
+        """
 
         _validate_spec(spec)
         if not callable(handler):
             raise TypeError("tool handler must be callable")
-        if spec.name in self._tools:
-            raise ValueError(f"tool {spec.name!r} is already registered")
-        self._tools[spec.name] = RegisteredTool(spec=spec, handler=handler)
+        existing = self._tools.get(spec.name)
+        if existing is not None and not (replace and existing.source == source):
+            raise ValueError(
+                f"tool {spec.name!r} is already registered"
+                + (f" by source {existing.source!r}" if existing.source != "builtin" else "")
+            )
+        self._tools[spec.name] = RegisteredTool(
+            spec=spec, handler=handler, source=source, source_kind=source_kind
+        )
 
     def resolve(self, name: str) -> RegisteredTool | None:
+        if name in self._hidden:
+            return None
         return self._tools.get(name)
 
     def specs(self) -> tuple[ToolSpec, ...]:
-        return tuple(tool.spec for tool in self._tools.values())
+        return tuple(tool.spec for name, tool in self._tools.items() if name not in self._hidden)
+
+    def set_hidden(self, name: str, hidden: bool) -> None:
+        if hidden:
+            self._hidden.add(name)
+        else:
+            self._hidden.discard(name)
+
+    def is_hidden(self, name: str) -> bool:
+        return name in self._hidden
 
     def registered(self) -> Mapping[str, RegisteredTool]:
-        """Return an immutable view useful for diagnostics."""
+        """Return an immutable view (including hidden tools) useful for diagnostics."""
 
         return MappingProxyType(self._tools)
 
