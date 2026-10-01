@@ -276,12 +276,16 @@ class AgentOrchestrator:
         created_by: str | None = None,
         output_schema: Mapping[str, Any] | None = None,
         end_user: str | None = None,
+        enqueue: bool = False,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted.
 
         The lineage arguments are set when the orchestrator spawns a subagent.
         ``output_schema`` requires the run to end with a result matching that JSON
-        Schema; the validated result is stored in ``run.output``.
+        Schema; the validated result is stored in ``run.output``. ``enqueue`` marks the
+        run for queue workers (``dispatch = "queue"``) and, when the store supports it,
+        creates and enqueues it in one transaction; callers still call ``enqueue``
+        (idempotent) for stores that do not.
         """
 
         identifier = run_id or uuid4().hex
@@ -342,6 +346,7 @@ class AgentOrchestrator:
             created_by=created_by,
             output_schema=schema,
             end_user=end_user,
+            dispatch="queue" if enqueue else "inline",
         )
         recorded_versions = {
             "system_prompt_sha256": system_prompt_sha256(initial_messages),
@@ -387,7 +392,11 @@ class AgentOrchestrator:
             created_at=now,
         )
         try:
-            await self._store.create_run(run, event)
+            create_and_enqueue = getattr(self._store, "create_run_and_enqueue", None) if enqueue else None
+            if create_and_enqueue is not None:
+                await create_and_enqueue(run, event)
+            else:
+                await self._store.create_run(run, event)
         except BaseException:
             release = getattr(self._store, "release_reservation", None)
             if reserved and release is not None:
@@ -1090,6 +1099,35 @@ class AgentOrchestrator:
             step=run.step_count,
             created_at=now,
         ))
+        return run
+
+    async def is_cancelled(self, run_id: str) -> bool:
+        """Whether the stored run was cancelled (polled by workers to stop in-flight calls)."""
+
+        run = await self._store.get_run(run_id)
+        return run is not None and run.status is RunStatus.CANCELLED
+
+    async def dead_letter(self, run_id: str, *, attempts: int, reason: str) -> RunRecord | None:
+        """Fail a run that keeps crashing its workers, recording why (Phase 12c)."""
+
+        run = await self._store.get_run(run_id)
+        if run is None or run.status.is_terminal:
+            return run
+        events = list(await self._store.list_events(run_id))
+        now = self._clock()
+        run.status = RunStatus.FAILED
+        run.error = f"dead-lettered after {attempts} attempts: {reason}"[:1000]
+        run.completed_at = now
+        # One checkpoint: the run is never left marked dead-lettered but still running.
+        await self._checkpoint(
+            run,
+            events,
+            RunEvent(run_id=run.id, type=EventType.RUN_DEAD_LETTERED,
+                     payload={"attempts": attempts, "reason": reason[:500]},
+                     step=run.step_count, created_at=now),
+            RunEvent(run_id=run.id, type=EventType.RUN_FAILED, payload={"error": run.error},
+                     step=run.step_count, created_at=now),
+        )
         return run
 
     async def cancel(self, run_id: str) -> RunRecord:
@@ -3236,6 +3274,7 @@ _ANNOTATION_EVENTS = frozenset(
         EventType.PLAN_STEP_UPDATED,
         EventType.PLAN_REVISED,
         EventType.GUARDRAIL_DECIDED,
+        EventType.RUN_DEAD_LETTERED,
     }
 )
 

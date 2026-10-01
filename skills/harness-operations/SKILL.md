@@ -132,6 +132,24 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
   make safe.
 - Graceful shutdown: stop claiming, finish or checkpoint, release.
 
+### Reliability (Phase 12c)
+- **Attempts.** `run_queue.attempts` (SQLite migration 6, Postgres migration 3) is
+  incremented by `claim` and survives a requeue. A new queue entry starts at 0. A
+  worker dead-letters a run whose attempts exceed `max_attempts` (default 5) through
+  `orchestrator.dead_letter`: one checkpoint with `RUN_DEAD_LETTERED` (an annotation)
+  and `RUN_FAILED`.
+- **Atomic enqueue.** `create_run(enqueue=True)` sets `RunRecord.dispatch = "queue"`
+  and uses `store.create_run_and_enqueue` when present (one transaction).
+  `RedactingRunStore` overrides it explicitly so the event stays masked; `__getattr__`
+  delegation would skip redaction.
+- **Reconciler.** `store.orphaned_runs(stale_before)` returns top-level runs that are
+  `dispatch = "queue"`, queued or running, and not in `run_queue`.
+  `Worker.reconcile` (at start and every `reconcile_seconds`) re-enqueues them.
+  Inline (CLI) runs are never touched.
+- **Cancel.** The heartbeat ticks every `cancel_poll_seconds`. It checks
+  `orchestrator.is_cancelled` and cancels the execution task, and renews the lease
+  every `lease_seconds / 3`. A cancelled run is released without requeue.
+
 ## 7. Artifacts
 - Add an `ArtifactStore` protocol (`put(bytes, media_type) -> ref`, `get(ref)`), with a
   default local-directory implementation.

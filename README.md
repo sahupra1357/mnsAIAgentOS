@@ -850,9 +850,22 @@ export AGENT_HARNESS_API_TOKEN="$(python3 -c 'import secrets; print(secrets.toke
 
 All routes except `/healthz` require `Authorization: Bearer $AGENT_HARNESS_API_TOKEN`.
 `--insecure-no-auth` is accepted only with a loopback `--host`. Inputs are validated at
-the boundary: unknown fields, oversized text, and out-of-range budgets are rejected. A
-run that keeps raising unexpected errors is removed from the queue after 3 attempts;
-it can be resumed explicitly after investigation.
+the boundary: unknown fields, oversized text, and out-of-range budgets are rejected.
+
+**Worker reliability.**
+- **Dead-lettering.** The queue counts every claim of a run. A run claimed more than
+  5 times without finishing is **dead-lettered**: it fails with a `run_dead_lettered`
+  event instead of crash-looping forever. That covers a worker killed each time (OOM)
+  and a lease lost each time. A run that keeps raising errors (3 times) is
+  dead-lettered too. Resume it explicitly after investigating.
+- **Atomic enqueue.** `POST /runs` creates the run and puts it on the queue in one
+  transaction.
+- **Reconciler.** Each worker requeues *queue-dispatched* runs that are unfinished,
+  idle for 5 minutes, and missing from the queue. That happens when a process stopped
+  between saving a run and enqueueing it, for example after an answer or approval.
+  Runs started from the CLI (`agent-harness run`) are never picked up by workers.
+- **Cancel.** A cancelled run's in-flight model or tool call is stopped within about
+  2 seconds, instead of at the next step.
 
 ### Building a chat front end on the API
 

@@ -343,7 +343,7 @@ prefix cache, overkill).
 
 **Phase 12 – Guardrails, chat API, reliability, operations** [guardrails, harness-operations, durable-agent-orchestration, model-gateway] — PRs against `main`, in this order:
 12a on `phase-12a-guardrails` — implemented; 12b (chat API) on `phase-12b-chat-api` — implemented; 12c (worker reliability) on
-`phase-12c-worker-reliability`; 12d (gateway/operations) on `phase-12d-gateway-ops`. The `/ui` chat page is deferred.
+`phase-12c-worker-reliability` — implemented; 12d (gateway/operations) on `phase-12d-gateway-ops`. The `/ui` chat page is deferred.
 1. Guardrails (`guardrails/`, `[guardrails]`, off by default; docs/GUARDRAILS.md): input guard on user text
    (injection, prompt extraction, hidden characters, encoded payloads, flooding, PII, denylist) before each model
    turn, tracked by `RunRecord.guarded_through`; output guard (canary marker in the system prompt, secrets, PII,
@@ -354,8 +354,10 @@ prefix cache, overkill).
 2. Chat API: `GET /runs/{id}/stream` (persisted events plus `StreamHub` token previews from in-process
    workers), `GET /runs/{id}/messages` (chat transcript), `[api] cors_origins`, `user` / `RunRecord.end_user`
    (audit and listing filter; per-user quotas not included), `[notifications]` webhooks from workers.
-3. Worker reliability: persisted attempt counts and dead-lettering, create-and-enqueue in one transaction,
-   reconciler for orphaned runs, prompt cancellation of in-flight calls.
+3. Worker reliability: `run_queue.attempts` (claims) with dead-lettering past `max_attempts` (`run_dead_lettered`
+   + `run_failed`); `create_run(enqueue=True)` → `create_run_and_enqueue` in one transaction and
+   `RunRecord.dispatch = "queue"`; `Worker.reconcile` requeues stale orphaned queue runs (never inline/CLI runs);
+   the heartbeat polls `is_cancelled` and stops in-flight calls.
 4. Gateway/operations: per-profile concurrency and Retry-After, strict/prompt structured output, image inputs,
    doctor improvements, bench resume retries errors, tenant-scoped artifacts, gc for artifacts/snapshots.
 

@@ -85,6 +85,8 @@ class EventType(StrEnum):
     # Guardrails (Phase 12a): a check found something (annotation), or refused a turn.
     GUARDRAIL_DECIDED = "guardrail_decided"
     GUARDRAIL_REFUSED = "guardrail_refused"
+    # A run claimed too many times without finishing was failed by a worker (Phase 12c).
+    RUN_DEAD_LETTERED = "run_dead_lettered"
 
 
 class PermissionMode(StrEnum):
@@ -281,6 +283,9 @@ class RunRecord:
     guarded_through: int = 0
     # Chat API (Phase 12b): the end user a service created this run for (audit, listing).
     end_user: str | None = None
+    # Worker reliability (Phase 12c): "queue" runs are executed by queue workers and are
+    # requeued by the reconciler if they fall out of the queue; "inline" runs (CLI) never are.
+    dispatch: str = "inline"
 
 
 @dataclass(frozen=True, slots=True)

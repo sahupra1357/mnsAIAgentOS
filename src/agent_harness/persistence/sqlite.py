@@ -91,7 +91,12 @@ class SQLiteRunStore:
     async def __aexit__(self, *_args: object) -> None:
         await self.close()
 
-    async def create_run(self, run: RunRecord, event: RunEvent) -> None:
+    async def create_run_and_enqueue(self, run: RunRecord, event: RunEvent) -> None:
+        """Create the run and put it on the queue in one transaction."""
+
+        await self.create_run(run, event, _enqueue=True)
+
+    async def create_run(self, run: RunRecord, event: RunEvent, *, _enqueue: bool = False) -> None:
         _validate_run_event(run, event)
         if run.version != 0:
             raise ValueError("a new run must have version 0")
@@ -111,6 +116,14 @@ class SQLiteRunStore:
                      run.consumed_tokens, run.consumed_cost_usd, run.parent_run_id),
                 )
                 self._insert_event(stored_event)
+                if _enqueue:
+                    self._connection.execute(
+                        """
+                        INSERT OR IGNORE INTO run_queue(run_id, enqueued_sequence)
+                        VALUES (?, (SELECT COALESCE(MAX(enqueued_sequence), 0) + 1 FROM run_queue))
+                        """,
+                        (run.id,),
+                    )
                 self._connection.execute("COMMIT")
             except sqlite3.IntegrityError as exc:
                 self._rollback()
@@ -264,7 +277,8 @@ class SQLiteRunStore:
                 ).fetchone()
                 if row is not None:
                     self._connection.execute(
-                        "UPDATE run_queue SET worker_id = ?, lease_expires_at = ? WHERE run_id = ?",
+                        "UPDATE run_queue SET worker_id = ?, lease_expires_at = ?, attempts = attempts + 1 "
+                        "WHERE run_id = ?",
                         (worker_id, now + lease_seconds, row["run_id"]),
                     )
                 self._connection.execute("COMMIT")
@@ -300,6 +314,31 @@ class SQLiteRunStore:
                     "DELETE FROM run_queue WHERE run_id = ? AND worker_id = ?",
                     (run_id, worker_id),
                 )
+
+    async def attempts(self, run_id: str) -> int:
+        """How often the queued run was claimed (0 when it is not queued)."""
+
+        async with self._lock:
+            row = self._connection.execute(
+                "SELECT attempts FROM run_queue WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return int(row["attempts"]) if row is not None else 0
+
+    async def orphaned_runs(self, stale_before: datetime, *, limit: int = 100) -> list[str]:
+        """Unfinished queue-dispatched top-level runs missing from the queue and idle since ``stale_before``."""
+
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT id FROM runs
+                WHERE parent_run_id IS NULL AND status IN ('queued', 'running')
+                  AND updated_at < ? AND json_extract(snapshot_json, '$.dispatch') = 'queue'
+                  AND id NOT IN (SELECT run_id FROM run_queue)
+                ORDER BY updated_at LIMIT ?
+                """,
+                (_utc_text(stale_before), limit),
+            ).fetchall()
+        return [row["id"] for row in rows]
 
     # -- quotas and retention -------------------------------------------------
 
@@ -627,6 +666,7 @@ def _decode_run(value: str) -> RunRecord:
         output=data.get("output"),
         guarded_through=int(data.get("guarded_through", 0)),
         end_user=data.get("end_user"),
+        dispatch=str(data.get("dispatch", "inline")),
         plan=_decode_plan(data.get("plan")),
         context_summary=(
             ContextSummary(
