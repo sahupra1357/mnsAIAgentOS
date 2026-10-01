@@ -11,6 +11,13 @@ output_dir = "../validation-results"
 [scenarios]
 path = "evals"                    # offline scripted scenarios
 
+# Ollama and llama.cpp on one machine share GPU memory. With this on, large models on
+# the other local server are unloaded before each local profile runs, and restored
+# before remote profiles and at the end (see docs/VALIDATION.md).
+# [residency]
+# enabled = true
+# min_params_b = 20
+
 [[smoke]]                         # live: `agent-harness doctor` per profile
 profile = "ollama"
 skip_cache = true

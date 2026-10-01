@@ -38,6 +38,7 @@ from agent_harness.model_gateway import ModelGateway
 from .compare import Thresholds, compare_reports
 from .core import BenchConfigError, BenchContext, ExecutionFactory, ItemResult
 from .data import DatasetError, file_sha256
+from .residency import ResidencyHttp, ResidencyManager, ResidencyPolicy
 from .runner import build_report, run_benchmark
 from .suites import SUITES
 
@@ -189,6 +190,7 @@ async def run_pipeline(
     stages: Sequence[str] = ALL_STAGES,
     update_baselines: bool = False,
     models: ModelResolver | None = None,
+    residency_http: ResidencyHttp | None = None,
 ) -> list[StageResult]:
     base = plan_path.parent
     try:
@@ -196,7 +198,7 @@ async def run_pipeline(
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise BenchConfigError(f"could not read pipeline plan {plan_path}: {exc}") from exc
     settings = plan.get("pipeline", {})
-    unknown = set(plan) - {"pipeline", "scenarios", "smoke", "benchmark"}
+    unknown = set(plan) - {"pipeline", "scenarios", "smoke", "benchmark", "residency"}
     if unknown:
         raise BenchConfigError(f"unknown sections in pipeline plan: {sorted(unknown)}")
     config = base / settings.get("config", "models.toml")
@@ -217,6 +219,27 @@ async def run_pipeline(
     python = sys.executable
     results: list[StageResult] = []
     reports: list[tuple[BenchmarkSpec, dict[str, Any]]] = []
+    policy = ResidencyPolicy.from_mapping(plan.get("residency", {}))
+    residency: ResidencyManager | None = None
+    harness_config = None
+
+    def make_room(profile: str | None) -> None:
+        """Unload large models on other local servers (or restore before a remote profile)."""
+
+        nonlocal residency, harness_config
+        if not policy.enabled:
+            return
+        try:
+            if harness_config is None:
+                harness_config = load_config(config, layered=True)
+                residency = ResidencyManager(harness_config.models, policy, http=residency_http)
+            name = harness_config.resolve_model_name(profile)  # routes and the default too
+        except ConfigError as exc:
+            results.append(StageResult("residency", "fail", f"cannot resolve {profile!r} in {config}: {exc}"))
+            return
+        assert residency is not None
+        for change in residency.prepare(name):
+            results.append(StageResult(f"residency:{name}", change.status, change.detail))
 
     for stage in stages:
         if stage not in ALL_STAGES:
@@ -257,6 +280,7 @@ async def run_pipeline(
                     argv.append("--skip-tools")
                 if entry.get("skip_cache", True):
                     argv.append("--skip-cache")
+                make_room(str(entry["profile"]))
                 ok, detail = _run_command(argv, cwd=repo, env=env)
                 results.append(StageResult(f"smoke:{entry['profile']}", "pass" if ok else "fail", detail))
         elif stage == "benchmarks":
@@ -265,6 +289,7 @@ async def run_pipeline(
                 results.append(StageResult("benchmarks", "skip", "no [[benchmark]] entries"))
             for entry in entries:
                 spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
+                make_room(spec.profile)
                 try:
                     report, _ = await execute_benchmark(spec, models=models, quiet=True)
                 except (BenchConfigError, DatasetError, ConfigError) as exc:
@@ -298,6 +323,9 @@ async def run_pipeline(
                 if update_baselines and spec.baseline is not None and (gate.passed or baseline is None):
                     spec.baseline.parent.mkdir(parents=True, exist_ok=True)
                     spec.baseline.write_text(json.dumps(report, indent=2, sort_keys=True))
+    if residency is not None and policy.restore:
+        for restored in residency.restore("end of pipeline"):
+            results.append(StageResult("residency:end", restored.status, restored.detail))
     summary = [{"stage": r.stage, "status": r.status, "detail": r.detail} for r in results]
     (output_dir / "pipeline-summary.json").write_text(json.dumps(summary, indent=2))
     return results

@@ -120,6 +120,49 @@ throwaway experiments.
 baseline exists yet. The command exits with 1 on any failed stage or gate, so it can
 be used in scripts and scheduled jobs.
 
+## Sharing one GPU between local servers (`[residency]`)
+
+Ollama and a llama.cpp server on the same machine share its GPU memory. On a Mac,
+the GPU can use only about 70–75% of RAM. Two large models loaded at once (for
+example gpt-oss:20b in Ollama and a 27B GGUF in llama.cpp) can then fail with
+`Insufficient Memory (kIOGPUCommandBufferCallbackErrorOutOfMemory)`, which llama.cpp
+reports as `500 Compute error`. A llama.cpp instance in that state keeps failing
+until it is reloaded.
+
+Turn on residency in the plan to let the pipeline manage this:
+
+```toml
+[residency]
+enabled = true          # default false
+min_params_b = 20       # "large" means more than this many billion parameters
+min_size_gb = 10        # used when the parameter count is unknown (model file size)
+restore = true          # reload unloaded models before remote profiles and at the end
+unload_timeout_seconds = 60
+```
+
+**Before each smoke check or benchmark of a local profile** (adapter `ollama` or
+`llama_cpp`), the pipeline unloads the large models loaded on the *other* local
+servers. It waits until they are gone, and never touches the server under test.
+- **Ollama:** `GET /api/ps`, then `POST /api/generate {"model", "keep_alive": 0}`.
+- **llama.cpp router** (`llama serve`): `GET /models`, then `POST /models/unload`.
+- **A plain single-model `llama-server`** cannot be inspected, so it is skipped with a note.
+
+**Before a remote profile** (Modal, hosted, LiteLLM) **and at the end**, it restores
+what it unloaded:
+- Ollama models are loaded again.
+- Router models load on their next request.
+- Only models that were already loaded when the pipeline started are restored. A
+  model the pipeline itself loaded is not brought back, so the machine ends as it
+  began.
+
+Every action appears as a `residency:<profile>` line in the output and in
+`pipeline-summary.json`.
+
+Benchmarks resume from `results.jsonl`, and **items that ended in an error are not
+retried**. After fixing an environment problem (such as running out of memory),
+delete that benchmark's output directory, and any baseline recorded from the failed
+run, before running it again.
+
 ## Recommended validation matrix
 
 Run each suite against each model source. Each suite catches different problems:
