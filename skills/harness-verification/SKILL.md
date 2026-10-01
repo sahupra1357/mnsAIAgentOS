@@ -44,3 +44,13 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
   in `examples/bench/`. Never commit public dataset files or run live models in tests.
 - Model-generated code runs only through an `ExecutionRuntime`: Docker by default,
   local only with an explicit unsafe flag.
+- Local model residency (`bench/residency.py`, plan `[residency]`, off by default):
+  - Before each smoke or benchmark entry of an `ollama`/`llama_cpp` profile,
+    `ResidencyManager.prepare` unloads models above `min_params_b` (or `min_size_gb`)
+    on the *other* local servers and polls until they are gone.
+  - Remote profiles and the end of the pipeline call `restore`. It restores only
+    models present in the snapshot taken at the first `prepare`.
+  - HTTP goes through the injectable `ResidencyHttp` (tests: `tests/test_residency.py`
+    fakes Ollama and a llama.cpp router).
+  - The unit and scenario stages run hermetically (no `AGENT_HARNESS_*` overrides,
+    no settings layers); smoke and benchmarks keep the caller's environment.
