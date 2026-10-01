@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,12 +32,14 @@ from agent_harness.coding.execution import (
 )
 from agent_harness.config import ConfigError, load_config
 from agent_harness.context import BudgetedContextBuilder, limits_from_profiles
-from agent_harness.domain import ModelResolver, RunBudget
+from agent_harness.domain import ModelResolver, RunBudget, TelemetrySink
+from agent_harness.telemetry import JsonLinesTelemetry
 from agent_harness.model_gateway import ModelGateway
 
 from .compare import Thresholds, compare_reports
 from .core import BenchConfigError, BenchContext, ExecutionFactory, ItemResult
 from .data import DatasetError, file_sha256
+from .html_report import BenchmarkEntry, write_html_report
 from .residency import ResidencyHttp, ResidencyManager, ResidencyPolicy
 from .runner import build_report, run_benchmark
 from .suites import SUITES
@@ -62,6 +64,7 @@ class BenchmarkSpec:
     docker_image: str = "python:3.12-slim"
     unsafe_local_execution: bool = False
     retry_errors: bool = True
+    transcripts: str = "failed"  # "failed" | "all" | "none": full runs saved for debugging
     baseline: Path | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
 
@@ -71,6 +74,7 @@ async def execute_benchmark(
     *,
     models: ModelResolver | None = None,
     quiet: bool = False,
+    telemetry: TelemetrySink | None = None,
 ) -> tuple[dict[str, Any], list[ItemResult]]:
     """Load, select, run, and report one benchmark; writes results and report."""
 
@@ -103,9 +107,12 @@ async def execute_benchmark(
         budget=RunBudget(max_steps=spec.max_steps, max_wall_seconds=spec.max_wall_seconds),
         execution=execution,
         options=spec.options,
+        telemetry=telemetry,
     )
     out = spec.out or Path("bench-results") / f"{spec.name or spec.suite}-{profile}"
     out.mkdir(parents=True, exist_ok=True)
+    if spec.transcripts != "none":
+        context.transcripts = out / "transcripts"
     results_path = out / "results.jsonl"
     if results_path.exists() and not quiet:
         print(f"resuming: {results_path} already has results", file=sys.stderr)
@@ -120,6 +127,7 @@ async def execute_benchmark(
     results = await run_benchmark(
         suite, selected, context, concurrency=spec.concurrency, results_path=results_path,
         progress=progress, retry_errors=spec.retry_errors,
+        keep_passing_transcripts=spec.transcripts == "all",
     )
     selected_profile = config.models[profile]
     report = build_report(
@@ -192,6 +200,9 @@ async def run_pipeline(
     update_baselines: bool = False,
     models: ModelResolver | None = None,
     residency_http: ResidencyHttp | None = None,
+    on_result: Callable[[StageResult], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    telemetry_path: Path | None = None,
 ) -> list[StageResult]:
     base = plan_path.parent
     try:
@@ -220,6 +231,18 @@ async def run_pipeline(
     python = sys.executable
     results: list[StageResult] = []
     reports: list[tuple[BenchmarkSpec, dict[str, Any]]] = []
+
+    def add(result: StageResult) -> None:
+        results.append(result)
+        if on_result is not None:
+            on_result(result)  # shown as it happens, not only at the end
+
+    def announce(message: str) -> None:
+        if on_progress is not None:
+            on_progress(message)
+
+    telemetry_sink = (JsonLinesTelemetry(telemetry_path.open("a", encoding="utf-8"))
+                      if telemetry_path is not None else None)
     policy = ResidencyPolicy.from_mapping(plan.get("residency", {}))
     residency: ResidencyManager | None = None
     harness_config = None
@@ -236,15 +259,16 @@ async def run_pipeline(
                 residency = ResidencyManager(harness_config.models, policy, http=residency_http)
             name = harness_config.resolve_model_name(profile)  # routes and the default too
         except ConfigError as exc:
-            results.append(StageResult("residency", "fail", f"cannot resolve {profile!r} in {config}: {exc}"))
+            add(StageResult("residency", "fail", f"cannot resolve {profile!r} in {config}: {exc}"))
             return
         assert residency is not None
         for change in residency.prepare(name):
-            results.append(StageResult(f"residency:{name}", change.status, change.detail))
+            add(StageResult(f"residency:{name}", change.status, change.detail))
 
     for stage in stages:
         if stage not in ALL_STAGES:
             raise BenchConfigError(f"unknown stage {stage!r}; choose from {ALL_STAGES}")
+        announce(f"== {stage}")
         if stage == "static":
             checks = [("compileall", [python, "-m", "compileall", "-q", "src", "tests"])]
             for tool in ("ruff", "mypy"):
@@ -253,15 +277,15 @@ async def run_pipeline(
                         tool, "src/agent_harness", "--ignore-missing-imports"]
                     checks.append((tool, argv))
                 else:
-                    results.append(StageResult(f"static:{tool}", "skip", f"{tool} not installed"))
+                    add(StageResult(f"static:{tool}", "skip", f"{tool} not installed"))
             for name, argv in checks:
                 ok, detail = _run_command(argv, cwd=repo, env={**env, "MYPYPATH": str(src)})
-                results.append(StageResult(f"static:{name}", "pass" if ok else "fail", detail))
+                add(StageResult(f"static:{name}", "pass" if ok else "fail", detail))
         elif stage == "unit":
             ok, detail = _run_command(
                 [python, "-m", "unittest", "discover", "-s", "tests"], cwd=repo, env=hermetic
             )
-            results.append(StageResult("unit", "pass" if ok else "fail", detail))
+            add(StageResult("unit", "pass" if ok else "fail", detail))
         elif stage == "scenarios":
             path = base / plan.get("scenarios", {}).get("path", "examples/evals")
             ok, detail = _run_command(
@@ -269,11 +293,11 @@ async def run_pipeline(
                  "--report", str(output_dir / "scenarios.json")],
                 cwd=repo, env=hermetic,
             )
-            results.append(StageResult("scenarios", "pass" if ok else "fail", detail))
+            add(StageResult("scenarios", "pass" if ok else "fail", detail))
         elif stage == "smoke":
             entries = plan.get("smoke", [])
             if not entries:
-                results.append(StageResult("smoke", "skip", "no [[smoke]] entries"))
+                add(StageResult("smoke", "skip", "no [[smoke]] entries"))
             for entry in entries:
                 argv = [python, "-m", "agent_harness", "doctor", "--config", str(config),
                         "--model-profile", str(entry["profile"])]
@@ -286,23 +310,26 @@ async def run_pipeline(
                 if entry.get("max_tokens"):
                     argv += ["--max-tokens", str(int(entry["max_tokens"]))]
                 make_room(str(entry["profile"]))
+                announce(f"   doctor {entry['profile']} ...")
                 ok, detail = _run_command(argv, cwd=repo, env=env)
-                results.append(StageResult(f"smoke:{entry['profile']}", "pass" if ok else "fail", detail))
+                add(StageResult(f"smoke:{entry['profile']}", "pass" if ok else "fail", detail))
         elif stage == "benchmarks":
             entries = plan.get("benchmark", [])
             if not entries:
-                results.append(StageResult("benchmarks", "skip", "no [[benchmark]] entries"))
+                add(StageResult("benchmarks", "skip", "no [[benchmark]] entries"))
             for entry in entries:
                 spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
                 make_room(spec.profile)
+                announce(f"   benchmark {spec.name} ({spec.suite} on {spec.profile or 'default'}) ...")
                 try:
-                    report, _ = await execute_benchmark(spec, models=models, quiet=True)
+                    report, _ = await execute_benchmark(spec, models=models, quiet=on_progress is None,
+                                                        telemetry=telemetry_sink)
                 except (BenchConfigError, DatasetError, ConfigError) as exc:
-                    results.append(StageResult(f"benchmark:{spec.name}", "fail", str(exc)))
+                    add(StageResult(f"benchmark:{spec.name}", "fail", str(exc)))
                     continue
                 reports.append((spec, report))
                 metrics = report["metrics"]
-                results.append(StageResult(
+                add(StageResult(
                     f"benchmark:{spec.name}", "pass",
                     f"accuracy {metrics['accuracy']:.3f} n={metrics['n']} errors {metrics['error_rate']:.1%}",
                 ))
@@ -314,14 +341,14 @@ async def run_pipeline(
                     if report_path.exists():
                         reports.append((spec, json.loads(report_path.read_text())))
             if not reports:
-                results.append(StageResult("gates", "skip", "no benchmark reports"))
+                add(StageResult("gates", "skip", "no benchmark reports"))
             for spec, report in reports:
                 baseline = None
                 if spec.baseline is not None and spec.baseline.exists():
                     baseline = json.loads(spec.baseline.read_text())
                 gate = compare_reports(report, baseline, spec.thresholds)
                 note = "" if baseline is not None else " (no baseline yet)"
-                results.append(StageResult(
+                add(StageResult(
                     f"gate:{spec.name}", "pass" if gate.passed else "fail",
                     "; ".join(gate.lines()) + note,
                 ))
@@ -330,17 +357,46 @@ async def run_pipeline(
                     spec.baseline.write_text(json.dumps(report, indent=2, sort_keys=True))
     if residency is not None and policy.restore:
         for restored in residency.restore("end of pipeline"):
-            results.append(StageResult("residency:end", restored.status, restored.detail))
+            add(StageResult("residency:end", restored.status, restored.detail))
+    if telemetry_sink is not None:
+        telemetry_sink.close()
     summary = [{"stage": r.stage, "status": r.status, "detail": r.detail} for r in results]
     (output_dir / "pipeline-summary.json").write_text(json.dumps(summary, indent=2))
+    write_html_report(output_dir / "index.html", results, _report_entries(plan, reports, base, config,
+                                                                            output_dir), telemetry_path)
     return results
+
+
+def _report_entries(
+    plan: Mapping[str, Any], reports: Sequence[tuple[BenchmarkSpec, dict[str, Any]]], base: Path,
+    config: Path, output_dir: Path,
+) -> list[BenchmarkEntry]:
+    """Each benchmark's report, baseline, and output directory, for the HTML report."""
+
+    by_name = {spec.name: (spec, report) for spec, report in reports}
+    entries = []
+    for raw in plan.get("benchmark", []):
+        try:
+            spec = _spec_from_plan(raw, base=base, config=config, output_dir=output_dir)
+        except BenchConfigError:
+            continue
+        spec, report = by_name.get(spec.name, (spec, None))
+        out = spec.out or output_dir
+        if report is None and (out / "report.json").exists():
+            report = json.loads((out / "report.json").read_text())
+        baseline = None
+        if spec.baseline is not None and spec.baseline.exists():
+            baseline = json.loads(spec.baseline.read_text())
+        entries.append(BenchmarkEntry(name=str(spec.name), suite=spec.suite, profile=spec.profile,
+                                      directory=out, report=report, baseline=baseline))
+    return entries
 
 
 def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, output_dir: Path) -> BenchmarkSpec:
     allowed = {
         "name", "suite", "data", "answers", "profile", "limit", "offset", "concurrency",
         "max_steps", "max_wall_seconds", "options", "baseline", "thresholds", "docker_image",
-        "unsafe_local_execution",
+        "unsafe_local_execution", "transcripts",
     }
     unknown = set(entry) - allowed
     if unknown:
@@ -367,9 +423,24 @@ def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, outpu
         out=output_dir / name,
         docker_image=str(entry.get("docker_image", "python:3.12-slim")),
         unsafe_local_execution=bool(entry.get("unsafe_local_execution", False)),
+        transcripts=_transcripts_mode(entry.get("transcripts", "failed")),
         baseline=base / entry["baseline"] if entry.get("baseline") else None,
         thresholds=Thresholds.from_mapping(entry.get("thresholds", {})),
     )
+
+
+def _pipeline_output_dir(plan_path: Path) -> Path:
+    try:
+        settings = tomllib.loads(plan_path.read_text(encoding="utf-8")).get("pipeline", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        settings = {}
+    return plan_path.parent / settings.get("output_dir", "validation-results")
+
+
+def _transcripts_mode(value: Any) -> str:
+    if value not in {"failed", "all", "none"}:
+        raise BenchConfigError('benchmark transcripts must be "failed", "all", or "none"')
+    return str(value)
 
 
 # --- argument parsing ------------------------------------------------------------
@@ -395,6 +466,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--option", action="append", default=[], metavar="KEY=VALUE",
                      help="suite option, e.g. question_field=query, match=exact, tools=default")
     run.add_argument("--out", type=Path, help="output directory (results.jsonl + report.json); resumable")
+    run.add_argument("--telemetry-file", type=Path,
+                     help="append JSON lines for every model and tool call (latency, tokens, errors)")
+    run.add_argument("--transcripts", choices=("failed", "all", "none"), default="failed",
+                     help="save full runs under OUT/transcripts for debugging (default: failed items)")
     run.add_argument("--no-retry-errors", action="store_true",
                      help="on resume, keep items that ended in error/failed instead of running them again")
     run.add_argument("--docker-image", default="python:3.12-slim", help="humaneval sandbox image")
@@ -412,6 +487,10 @@ def _parser() -> argparse.ArgumentParser:
 
     pipeline = commands.add_parser("pipeline", help="run the validation stages in a plan file")
     pipeline.add_argument("plan", type=Path)
+    pipeline.add_argument("--quiet", action="store_true",
+                          help="print only stage results (no progress or per-item lines)")
+    pipeline.add_argument("--telemetry-file", type=Path,
+                          help="append JSON lines for every benchmark model and tool call; summarized in index.html")
     pipeline.add_argument("--stages", help=f"comma-separated subset of {','.join(ALL_STAGES)}")
     pipeline.add_argument("--update-baselines", action="store_true",
                           help="save reports as baselines when gates pass (or no baseline exists)")
@@ -441,8 +520,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 out=args.out, docker_image=args.docker_image,
                 unsafe_local_execution=args.unsafe_local_execution,
                 retry_errors=not args.no_retry_errors,
+                transcripts=args.transcripts,
             )
-            report, _ = asyncio.run(execute_benchmark(spec))
+            sink = (JsonLinesTelemetry(args.telemetry_file.open("a", encoding="utf-8"))
+                    if args.telemetry_file else None)
+            try:
+                report, _ = asyncio.run(execute_benchmark(spec, telemetry=sink))
+            finally:
+                if sink is not None:
+                    sink.close()
             _print_report(report)
             return 0
         if args.command == "compare":
@@ -459,11 +545,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if gate.passed else 1
         if args.command == "pipeline":
             stages = tuple(s.strip() for s in args.stages.split(",")) if args.stages else ALL_STAGES
-            results = asyncio.run(run_pipeline(args.plan, stages=stages, update_baselines=args.update_baselines))
-            for result in results:
-                print(f"[{result.status.upper():>4}] {result.stage}: {result.detail}")
+            def show(result: StageResult) -> None:
+                print(f"[{result.status.upper():>4}] {result.stage}: {result.detail}", flush=True)
+
+            def progress(message: str) -> None:
+                print(message, file=sys.stderr, flush=True)
+
+            results = asyncio.run(run_pipeline(
+                args.plan, stages=stages, update_baselines=args.update_baselines, on_result=show,
+                on_progress=None if args.quiet else progress, telemetry_path=args.telemetry_file,
+            ))
             failed = [r for r in results if r.status == "fail"]
             print(f"stages: {len(results) - len(failed)} ok, {len(failed)} failed", file=sys.stderr)
+            print(f"report: {_pipeline_output_dir(args.plan) / 'index.html'}", file=sys.stderr)
             return 1 if failed else 0
     except (BenchConfigError, DatasetError, ConfigError, OSError) as exc:
         print(f"agent-harness-bench: {exc}", file=sys.stderr)

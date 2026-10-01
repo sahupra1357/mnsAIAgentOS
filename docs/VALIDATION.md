@@ -120,6 +120,27 @@ throwaway experiments.
 baseline exists yet. The command exits with 1 on any failed stage or gate, so it can
 be used in scripts and scheduled jobs.
 
+## Watching and debugging a run
+
+```bash
+agent-harness-bench pipeline examples/validation.local.toml --telemetry-file validation-results/telemetry.jsonl
+```
+
+- **Live output.** Results print as soon as they are known. Progress lines (each stage,
+  each smoke check and benchmark, `[2/3] ok item (4.2s)`) go to stderr; `--quiet` turns
+  them off.
+- **Telemetry.** `--telemetry-file` appends one JSON line per benchmark model and tool
+  call: latency, tokens, cache hits, errors. It never contains message text.
+- **Transcripts.** For every failed benchmark item, the full run is saved to
+  `validation-results/<name>/transcripts/<item>.json`: messages, tool calls, reasoning,
+  events. Set `transcripts = "all" | "none"` on a `[[benchmark]]` entry, or pass
+  `--transcripts` to `agent-harness-bench run`.
+- **HTML report.** At the end, `validation-results/index.html` summarizes stage results,
+  scores against baselines, failed items (linked to their transcripts), and the
+  telemetry. It is a static file: open it in a browser.
+
+How to go from a failure to its cause: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 ## Sharing one GPU between local servers (`[residency]`)
 
 Ollama and a llama.cpp server on the same machine share its GPU memory. On a Mac,
