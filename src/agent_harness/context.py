@@ -33,6 +33,10 @@ from agent_harness.domain import (
 )
 
 
+# Images are counted as a fixed number of tokens (vision encoders vary: ~250-1500).
+IMAGE_TOKENS = 1000
+
+
 @dataclass(frozen=True, slots=True)
 class ContextLimits:
     """Token limits for one model profile."""
@@ -209,6 +213,7 @@ class BudgetedContextBuilder:
 
     def _message_tokens(self, message: Message, reasoning: bool = False) -> int:
         tokens = self._policy.message_overhead_tokens + self._text_tokens(message.content)
+        tokens += IMAGE_TOKENS * len(message.parts)  # a rough, fixed allowance per image
         if reasoning and message.reasoning:
             tokens += self._text_tokens(message.reasoning)
         for call in message.tool_calls:
@@ -366,6 +371,8 @@ class ContextSummarizer:
         if message.role is Role.TOOL and message.name:
             label += f" ({message.name})"
         lines = [f"{label}: {_shorten(message.content, self._max_message_chars)}"]
+        if message.parts:
+            lines.append(f"  [{len(message.parts)} image(s) attached]")
         for call in message.tool_calls:
             arguments = json.dumps(call.arguments, separators=(",", ":"), sort_keys=True)
             lines.append(f"  -> {call.name}({_shorten(arguments, 500)})")

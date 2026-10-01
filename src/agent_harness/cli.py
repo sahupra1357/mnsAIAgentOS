@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import timedelta
 import asyncio
 import contextlib
@@ -23,7 +24,7 @@ from .config import ConfigError, load_config
 from .application import open_memory_store
 from .memory import SQLiteMemoryStore
 from .domain import (
-    HarnessError, Message, Role, RunBudget, RunQuery, RunRecord, RunStatus, StreamListener, utc_now,
+    ContentPart, HarnessError, Message, Role, RunBudget, RunQuery, RunRecord, RunStatus, StreamListener, utc_now,
 )
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
@@ -37,6 +38,7 @@ from .telemetry import JsonLinesTelemetry
 from .notifications import notifier_from_config
 from .streaming import StreamHub
 from .worker import Worker
+from .artifacts import LocalArtifactStore, referenced_artifacts
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,6 +51,8 @@ def _parser() -> argparse.ArgumentParser:
     run = subcommands.add_parser("run", help="create and execute a new agent run")
     _common_runtime_arguments(run)
     run.add_argument("prompt", help="user request to send to the agent")
+    run.add_argument("--image", action="append", default=[], metavar="FILE_OR_URL",
+                     help="attach an image (png/jpeg/gif/webp file, or https:// URL) for vision models")
     run.add_argument("--system", help="optional system instruction")
     run.add_argument(
         "--model-profile", help="profile or route name; defaults to the config value"
@@ -127,6 +131,8 @@ def _parser() -> argparse.ArgumentParser:
     _common_runtime_arguments(continue_)
     continue_.add_argument("run_id")
     continue_.add_argument("message")
+    continue_.add_argument("--image", action="append", default=[], metavar="FILE_OR_URL",
+                           help="attach an image to the follow-up")
     continue_.add_argument("--stream", action="store_true")
     continue_.add_argument("--show-reasoning", action="store_true",
                            help="also print the model's reasoning (to stderr)")
@@ -226,7 +232,7 @@ def _parser() -> argparse.ArgumentParser:
                          help="default: the backend configured in [memory] (same syntax as --from)")
     _common_runtime_arguments(migrate)
 
-    gc = subcommands.add_parser("gc", help="retention: delete finished runs older than N days (dry run by default)")
+    gc = subcommands.add_parser("gc", help="retention: delete finished runs older than N days, and artifacts no run references (dry run by default)")
     gc.add_argument("--older-than-days", type=int, required=True)
     gc.add_argument("--yes", action="store_true", help="actually delete (otherwise only report)")
     _common_runtime_arguments(gc)
@@ -260,6 +266,9 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--model-profile", help="named profile; defaults to the config value")
     doctor.add_argument("--skip-tools", action="store_true", help="skip the tool-call check")
     doctor.add_argument("--skip-cache", action="store_true", help="skip the prefix-cache check")
+    doctor.add_argument("--max-tokens", type=int,
+                        help="output limit for the probes (default 16/128; thinking models need ~512)")
+    doctor.add_argument("--strict", action="store_true", help="exit 1 on warnings too (for CI and smoke gates)")
     return parser
 
 
@@ -325,7 +334,8 @@ async def _run_command(args: argparse.Namespace) -> int:
         if system:
             messages.append(Message(role=Role.SYSTEM, content=system))
         prompt, template = expand_prompt(args.prompt, app.templates, _named_args(args.arg))
-        messages.append(Message(role=Role.USER, content=prompt))
+        images = tuple(ContentPart(image_url=_image_url(item)) for item in args.image)
+        messages.append(Message(role=Role.USER, content=prompt, parts=images))
         run = await app.orchestrator.create_run(
             model_profile=profile,
             route=route,
@@ -469,10 +479,12 @@ async def _doctor_command(args: argparse.Namespace) -> int:
         transport=transport,
         check_tools=not args.skip_tools,
         check_cache=not args.skip_cache,
+        max_tokens=args.max_tokens,
     )
     for check in checks:
         print(f"[{check.status.value.upper():>4}] {check.name}: {check.detail}")
-    return 1 if any(check.status is CheckStatus.FAIL for check in checks) else 0
+    failing = {CheckStatus.FAIL, CheckStatus.WARN} if args.strict else {CheckStatus.FAIL}
+    return 1 if any(check.status in failing for check in checks) else 0
 
 
 async def _continue_command(args: argparse.Namespace) -> int:
@@ -495,7 +507,9 @@ async def _continue_command(args: argparse.Namespace) -> int:
                 current.budget, **{k: v for k, v in raised.items() if v is not None}
             )
         message, _ = expand_prompt(args.message, app.templates)
-        await app.orchestrator.continue_run(args.run_id, message, budget=budget)
+        await app.orchestrator.continue_run(
+            args.run_id, message, budget=budget, images=[_image_url(item) for item in args.image]
+        )
         finished = await app.orchestrator.run(args.run_id)
         return await _print_result(
             app, finished, streamed=stream is not None and stream.printed,
@@ -610,6 +624,25 @@ async def _runs_command(args: argparse.Namespace) -> int:
     if page.next_cursor is not None:
         print(f"more: --cursor {page.next_cursor}", file=sys.stderr)
     return 0
+
+
+_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def _image_url(item: str) -> str:
+    """An https:// URL as is, or a local image file as a base64 data: URL."""
+
+    if item.startswith("https://"):
+        return item
+    path = Path(item)
+    media_type = _IMAGE_TYPES.get(path.suffix.lower())
+    if media_type is None:
+        raise ValueError(f"{item}: images must be .png, .jpg, .jpeg, .gif, or .webp files (or https:// URLs)")
+    data = path.read_bytes()
+    if len(data) > 15 * 1024 * 1024:
+        raise ValueError(f"{item}: images must be under 15 MB")
+    return f"data:{media_type};base64," + base64.b64encode(data).decode("ascii")
 
 
 def _load_schema(path: Path | None) -> dict[str, Any] | None:
@@ -742,11 +775,51 @@ async def _gc_command(args: argparse.Namespace) -> int:
     async with app:
         cutoff = utc_now() - timedelta(days=args.older_than_days)
         ids = await app.store.purge_runs(cutoff, dry_run=not args.yes)
+        unreferenced = await _unreferenced_artifacts(app, args.config, cutoff, exclude=set(ids))
+        if args.yes:
+            for store, artifact_id in unreferenced:
+                await store.delete(artifact_id)
     verb = "deleted" if args.yes else "would delete"
     print(f"{verb} {len(ids)} finished runs last updated before {cutoff.date()}")
-    if ids and not args.yes:
-        print("re-run with --yes to delete them (events, queue, steering, idempotency rows)", file=sys.stderr)
+    if unreferenced:
+        print(f"{verb} {len(unreferenced)} artifacts and file snapshots that no remaining run references")
+    if (ids or unreferenced) and not args.yes:
+        print("re-run with --yes to delete them (events, queue, steering, idempotency rows, "
+              "artifacts)", file=sys.stderr)
     return 0
+
+
+async def _unreferenced_artifacts(
+    app: HarnessApplication, config_path: Path, cutoff: Any, *, exclude: set[str]
+) -> list[tuple[LocalArtifactStore, str]]:
+    """Artifacts older than ``cutoff`` that no run (other than ``exclude``) references.
+
+    The age limit protects artifacts a running step has stored but not yet recorded.
+    """
+
+    stores: list[LocalArtifactStore] = []
+    if isinstance(app.artifacts, LocalArtifactStore):
+        stores.append(app.artifacts)
+    snapshots = config_path.resolve().parent / ".agent-harness" / "snapshots"
+    if snapshots.is_dir() and not any(s.root.resolve() == snapshots.resolve() for s in stores):
+        stores.append(LocalArtifactStore(snapshots))
+    lister = getattr(app.store, "list_runs", None)
+    if not stores or lister is None:
+        return []
+    referenced: set[str] = set()
+    cursor = None
+    while True:
+        page = await lister(RunQuery(include_children=True, limit=200, cursor=cursor))
+        for summary in page.runs:
+            if summary.id not in exclude:
+                events = await app.store.list_events(summary.id)
+                referenced |= referenced_artifacts(event.payload for event in events)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    limit = cutoff.timestamp()
+    return [(store, artifact_id) for store in stores for artifact_id, modified in store.entries()
+            if artifact_id not in referenced and modified < limit]
 
 
 async def _start_tools(app: HarnessApplication) -> None:

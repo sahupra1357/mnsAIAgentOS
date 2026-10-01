@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from enum import StrEnum
 
-from agent_harness.domain import HarnessError, Message, ModelClient, ModelRequest, Role, ToolSpec
+from agent_harness.domain import FinishReason, HarnessError, Message, ModelClient, ModelRequest, Role, ToolSpec
 
 from .llama_cpp import LlamaCppClient
 from .modal import ModalClient
@@ -60,8 +60,14 @@ async def diagnose(
     transport: HttpGetTransport | None = None,
     check_tools: bool = True,
     check_cache: bool = True,
+    max_tokens: int | None = None,
 ) -> list[DiagnosticCheck]:
-    """Run checks in order, stopping early when later checks cannot succeed."""
+    """Run checks in order, stopping early when later checks cannot succeed.
+
+    ``max_tokens`` raises the probes' output limits (default 16 for the completion,
+    128 for the tool call). Thinking models may need several hundred, because their
+    reasoning can count against the limit before they answer.
+    """
 
     checks: list[DiagnosticCheck] = []
     http_client = client if isinstance(client, OpenAICompatibleClient) else None
@@ -86,12 +92,12 @@ async def diagnose(
                 return checks
             checks.append(await _check_model_listed(http_client, transport))
 
-    completion = await _check_completion(client)
+    completion = await _check_completion(client, max_tokens or 16)
     checks.append(completion)
     if completion.status is CheckStatus.FAIL:
         return checks
     if check_tools:
-        checks.append(await _check_tool_call(client))
+        checks.append(await _check_tool_call(client, max_tokens or 128))
     if check_cache:
         checks.append(await _check_prefix_cache(client))
     return checks
@@ -127,10 +133,6 @@ async def _check_health(
 async def _check_model_listed(
     client: OpenAICompatibleClient, transport: HttpGetTransport
 ) -> DiagnosticCheck:
-    if isinstance(client, LlamaCppClient):
-        return DiagnosticCheck(
-            "model", CheckStatus.SKIP, "llama-server serves the single model it was started with"
-        )
     url = client.models_url()
     try:
         response = await transport.get(
@@ -147,23 +149,30 @@ async def _check_model_listed(
     wanted = client.profile.model
     if wanted in available:
         return DiagnosticCheck("model", CheckStatus.OK, f"{wanted!r} is served")
+    if isinstance(client, LlamaCppClient) and len(available) <= 1:
+        # A single-model llama-server answers whatever name is requested.
+        return DiagnosticCheck(
+            "model", CheckStatus.SKIP, "llama-server serves the single model it was started with"
+        )
     listed = ", ".join(available[:10]) or "none"
     return DiagnosticCheck(
         "model", CheckStatus.FAIL, f"{wanted!r} is not served; available: {listed}"
     )
 
 
-async def _check_completion(client: ModelClient) -> DiagnosticCheck:
+async def _check_completion(client: ModelClient, max_tokens: int) -> DiagnosticCheck:
     started = time.monotonic()
     try:
         response = await client.complete(
             ModelRequest(
                 messages=(Message(role=Role.USER, content="Reply with the single word OK."),),
-                max_output_tokens=16,
+                max_output_tokens=max_tokens,
             )
         )
     except HarnessError as exc:
         return DiagnosticCheck("completion", CheckStatus.FAIL, _brief(exc))
+    if not response.content.strip() and response.finish_reason is FinishReason.LENGTH:
+        return DiagnosticCheck("completion", CheckStatus.WARN, _out_of_tokens(max_tokens))
     elapsed = time.monotonic() - started
     tokens = response.usage.total_tokens
     usage = f"{tokens} tokens" if tokens is not None else "usage not reported"
@@ -172,7 +181,7 @@ async def _check_completion(client: ModelClient) -> DiagnosticCheck:
     )
 
 
-async def _check_tool_call(client: ModelClient) -> DiagnosticCheck:
+async def _check_tool_call(client: ModelClient, max_tokens: int) -> DiagnosticCheck:
     try:
         response = await client.complete(
             ModelRequest(
@@ -186,13 +195,15 @@ async def _check_tool_call(client: ModelClient) -> DiagnosticCheck:
                     ),
                 ),
                 tools=(_PROBE_TOOL,),
-                max_output_tokens=128,
+                max_output_tokens=max_tokens,
             )
         )
     except HarnessError as exc:
         return DiagnosticCheck("tool_call", CheckStatus.FAIL, _brief(exc))
     if any(call.name == _PROBE_TOOL.name for call in response.tool_calls):
         return DiagnosticCheck("tool_call", CheckStatus.OK, "structured tool call parsed")
+    if response.finish_reason is FinishReason.LENGTH:
+        return DiagnosticCheck("tool_call", CheckStatus.WARN, _out_of_tokens(max_tokens))
     if _PROBE_TOOL.name in response.content:
         return DiagnosticCheck(
             "tool_call",
@@ -241,6 +252,11 @@ async def _check_prefix_cache(client: ModelClient) -> DiagnosticCheck:
         "repeat request had no cache hit; check that prefix caching is enabled and "
         "that requests reach the same replica",
     )
+
+
+def _out_of_tokens(max_tokens: int) -> str:
+    return (f"ran out of tokens ({max_tokens}) before answering; thinking models spend tokens "
+            "reasoning first: retry with --max-tokens 512 (or more)")
 
 
 def _probe_timeout(client: OpenAICompatibleClient) -> float:

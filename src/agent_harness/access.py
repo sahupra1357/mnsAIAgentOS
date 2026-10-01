@@ -75,6 +75,12 @@ class PrincipalDirectory:
     def enabled(self) -> bool:
         return bool(self._keys) or self._legacy is not None
 
+    @property
+    def multi_tenant(self) -> bool:
+        """True when [[api.keys]] are configured (tenants), not just a single legacy token."""
+
+        return bool(self._keys)
+
     def resolve(self, token: str) -> Principal | None:
         digest = sha256_hex(token)
         found: Principal | None = None

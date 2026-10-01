@@ -13,7 +13,8 @@ from uuid import uuid4
 
 from agent_harness.domain import Message, ModelRequest, Role
 
-from .openai_compatible import OpenAICompatibleClient
+from .errors import ModelConfigurationError
+from .openai_compatible import OpenAICompatibleClient, schema_instruction
 
 
 # Native /api/chat keys that belong at the top level rather than in ``options``.
@@ -82,8 +83,13 @@ class OllamaClient(OpenAICompatibleClient):
         if request.tools:
             payload["tools"] = [self._tool_payload(tool) for tool in request.tools]
         if request.response_schema is not None:
-            # Native structured outputs; /api/chat has no tool_choice, so it is not sent.
-            payload["format"] = request.response_schema
+            if self._profile.structured_output == "prompt":
+                messages = payload["messages"]
+                assert isinstance(messages, list)
+                messages.append(schema_instruction(request.response_schema))
+            else:
+                # Native structured outputs; /api/chat has no tool_choice, so it is not sent.
+                payload["format"] = request.response_schema
         return payload
 
     def _preprocess_response(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +101,9 @@ class OllamaClient(OpenAICompatibleClient):
 
 def _native_message(message: Message, *, keep_reasoning: bool = False) -> dict[str, object]:
     result: dict[str, object] = {"role": message.role.value, "content": message.content}
+    images = [part.image_url for part in message.parts if part.type == "image"]
+    if images:
+        result["images"] = [_native_image(url) for url in images]
     if keep_reasoning and message.role is Role.ASSISTANT and message.reasoning:
         result["thinking"] = message.reasoning
     if message.role is Role.TOOL and message.name is not None:
@@ -105,6 +114,17 @@ def _native_message(message: Message, *, keep_reasoning: bool = False) -> dict[s
             for call in message.tool_calls
         ]
     return result
+
+
+def _native_image(url: str) -> str:
+    """Native /api/chat takes raw base64 images; it cannot fetch URLs."""
+
+    if url.startswith("data:") and ";base64," in url:
+        return url.split(";base64,", 1)[1]
+    raise ModelConfigurationError(
+        "Ollama's native API needs images as data: URLs (base64); use api_mode = \"openai\" "
+        "or attach the image file instead of a link"
+    )
 
 
 def _native_to_openai_shape(raw: dict[str, Any]) -> dict[str, Any]:

@@ -26,10 +26,14 @@ async def run_benchmark(
     concurrency: int = 1,
     results_path: Path | None = None,
     progress: Progress | None = None,
+    retry_errors: bool = True,
 ) -> list[ItemResult]:
     """Run every item once. With ``results_path``, results are appended as they
     finish and items already recorded there are skipped, so an interrupted run
-    resumes where it stopped."""
+    resumes where it stopped. Items whose recorded result is an ``error`` or a
+    ``failed`` run are run again (``retry_errors``): those usually come from the
+    environment (a server down, out of memory), not from the model's answer. The
+    newest result for an item wins."""
 
     if concurrency < 1:
         raise ValueError("concurrency must be at least 1")
@@ -39,7 +43,10 @@ async def run_benchmark(
             if line.strip():
                 result = ItemResult.from_dict(json.loads(line))
                 done[result.id] = result
-    pending = [item for item in items if item.id not in done]
+    pending = [
+        item for item in items
+        if item.id not in done or (retry_errors and done[item.id].status in RETRY_STATUSES)
+    ]
     semaphore = asyncio.Semaphore(concurrency)
     lock = asyncio.Lock()
     completed = len(done)
@@ -74,6 +81,9 @@ async def run_benchmark(
             handle.close()
     order = {item.id: index for index, item in enumerate(items)}
     return sorted((done[i] for i in done if i in order), key=lambda r: order[r.id])
+
+
+RETRY_STATUSES = frozenset({"error", "failed"})
 
 
 def summarize(results: Sequence[ItemResult]) -> dict[str, Any]:

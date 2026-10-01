@@ -187,6 +187,44 @@ Check a profile against a live server:
 6. A repeated prompt is served from the prefix cache.
 
 It exits 1 if any check fails.
+- **`--strict`:** exit 1 on warnings too (use it in CI).
+- **`--max-tokens N`:** raises the probes' output limits. Thinking models need about
+  512, and doctor reports "ran out of tokens" when they hit the default limit.
+- **llama.cpp routers** (`llama serve`, several models) get a real model check; a
+  single-model `llama-server` is skipped.
+
+### Gateway options per profile
+
+```toml
+max_concurrency = 2            # concurrent requests to this server from one process (default unlimited)
+retry_jitter = 0.2             # spread retry delays by +/-20% (default 0)
+max_retry_after_seconds = 60   # longest server Retry-After to honour on 429/503
+structured_output = "strict"   # "strict" | "non_strict" | "prompt" (for servers that reject response_format)
+```
+
+- **Retry delays:** exponential backoff, but at least the server's `Retry-After`
+  (seconds or an HTTP date, capped).
+- **Hash-stable fields:** these fields are left out of the profile hash at their
+  defaults, so older runs do not report config drift.
+
+### Images (vision models)
+
+```bash
+agent-harness run --config models.toml --model-profile llamacpp --image photo.png "What is in this picture?"
+```
+
+- **API:** `POST /runs` and `POST /runs/{id}/messages` take
+  `"images": ["https://...", "data:image/png;base64,..."]`, up to 16.
+- **Formats:**
+  - Files can be PNG, JPEG, GIF, or WebP, and are sent as base64 `data:` URLs (under
+    15 MB each).
+  - `https://` links are passed to the server.
+  - Native Ollama (`api_mode = "native"`) accepts data URLs only.
+- **Storage and context:** images are stored with the message, and each counts as
+  about 1,000 tokens toward `context_window`.
+- **Transcript:** `GET /runs/{id}/messages` lists them on user turns.
+- **Requirement:** the model must be a vision model. Example: a llama.cpp model
+  started with `--mmproj`.
 
 ## Retries, Cost, Fallback, and Routes
 
@@ -659,7 +697,8 @@ compose setup with Postgres, the API, and two workers.
 | **Secrets** | Credential fields accept `NAME`, `env:NAME`, or `file:/run/secrets/name`. |
 | **Egress** | With `[network] restrict_egress = true`, HTTP tools, web search, and MCP over HTTP may only reach `allowed_hosts`. |
 | **Redaction** | On by default. Tokens and keys are masked in persisted events, run errors, and telemetry. |
-| **Retention** | `agent-harness gc --older-than-days N [--yes]` deletes finished runs. |
+| **Retention** | `agent-harness gc --older-than-days N [--yes]` deletes finished runs, then artifacts and file snapshots that no remaining run references (only those older than the cutoff, so a running step's new artifact is never removed). |
+| **Artifacts** | `GET /runs/{id}/artifacts/{artifact_id}` serves an artifact that run references, to principals that own the run. With tenant keys, `GET /artifacts/{id}` is limited to all-tenant (`"*"`) keys, because a content hash says nothing about ownership. |
 | **Health** | `/healthz` (liveness) and `/readyz` (store reachable, schema version). |
 | **Container** | `Dockerfile`: non-root, with the `api` and `postgres` extras. No secrets are baked in. |
 

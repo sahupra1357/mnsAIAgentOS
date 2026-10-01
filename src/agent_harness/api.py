@@ -24,6 +24,8 @@ a principal with a tenant and a role (viewer < operator < admin; see
     GET  /runs/{id}/events/stream?after=N   (server-sent events)
     GET  /runs/{id}/stream?after=N  (server-sent events plus live token previews: chat UIs)
     GET  /runs/{id}/messages        (chat transcript: user and assistant turns only)
+    GET  /runs/{id}/artifacts/{artifact_id}  (an artifact this run references)
+    GET  /artifacts/{artifact_id}   (all-tenant principals only)
     POST /runs/{id}/cancel
     POST /runs/{id}/messages       {"content", "budget"?}  (continue a completed run)
     POST /runs/{id}/steer          {"content"}  (message for a run in progress)
@@ -49,12 +51,14 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs
 
+from agent_harness.artifacts import referenced_artifacts
 from agent_harness.access import Principal, PrincipalDirectory, Quota, QuotaExceeded, check_quota
 from agent_harness.notifications import notifier_from_config
 from agent_harness.streaming import StreamHub
 from agent_harness.access import Role as AccessRole
 from agent_harness.config import ConfigError, HarnessConfig
 from agent_harness.domain import (
+    ContentPart,
     ArtifactStore,
     EventType,
     HarnessError,
@@ -69,7 +73,7 @@ from agent_harness.domain import (
     RunStore,
     RunSummary,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestrator import AgentOrchestrator, validate_image_url
 from agent_harness.planning import plan_payload
 from agent_harness.templates import Template, TemplateError, expand_prompt
 from agent_harness.worker import Worker, run_is_settled
@@ -83,6 +87,7 @@ MAX_TEXT_CHARS = 100_000
 _ID = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"
 _RUN_ROUTE = re.compile(rf"^/runs/(?P<run_id>{_ID})(?P<rest>/.*)?$")
 _ARTIFACT_ROUTE = re.compile(r"^/artifacts/(?P<artifact_id>[0-9a-f]{64})$")
+_RUN_ARTIFACT_ROUTE = _ARTIFACT_ROUTE  # matched against the part after /runs/{id}
 _BUDGET_FIELDS = {"max_steps", "max_wall_seconds", "max_tokens", "max_cost_usd"}
 
 
@@ -233,6 +238,12 @@ class HarnessAPI:
             return
         artifact = _ARTIFACT_ROUTE.match(path)
         if artifact is not None and method == "GET":
+            # Artifacts are content-addressed and shared across runs, so this route cannot
+            # tell whose they are. With tenant keys, only all-tenant principals may use it;
+            # everyone else uses /runs/{id}/artifacts/{artifact_id}, which checks ownership.
+            # A single-token deployment has one tenant, so its token keeps access.
+            if principal.tenant != "*" and self._principals.multi_tenant:
+                raise ApiError(404, "unknown artifact")
             await self._send_artifact(send, artifact["artifact_id"])
             return
         match = _RUN_ROUTE.match(path)
@@ -244,6 +255,10 @@ class HarnessAPI:
         owned = await self._store.get_run(run_id)
         if owned is None or not principal.can_access(owned.tenant):
             raise ApiError(404, f"unknown run: {run_id}")  # other tenants' runs do not exist
+        run_artifact = _RUN_ARTIFACT_ROUTE.match(rest)
+        if run_artifact is not None and method == "GET":
+            await self._send_run_artifact(send, run_id, run_artifact["artifact_id"])
+            return
         routes: dict[tuple[str, str], Callable[[], Awaitable[None]]] = {
             ("GET", ""): lambda: self._send_run(send, run_id),
             ("GET", "/events"): lambda: self._send_events(send, run_id, query),
@@ -330,7 +345,7 @@ class HarnessAPI:
 
     async def _create_run(self, body: dict[str, Any], principal: Principal) -> dict[str, Any]:
         unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode", "template_args",
-                               "planning", "output_schema", "user"}
+                               "planning", "output_schema", "user", "images"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         prompt = _required_text(body.get("prompt"), "prompt")
@@ -357,7 +372,7 @@ class HarnessAPI:
         output_schema = body.get("output_schema")
         if output_schema is not None and not isinstance(output_schema, dict):
             raise ApiError(400, "output_schema must be a JSON Schema object")
-        messages = [Message(role=Role.USER, content=prompt)]
+        messages = [Message(role=Role.USER, content=prompt, parts=_images(body.get("images")))]
         if system:
             messages.insert(0, Message(role=Role.SYSTEM, content=system))
         run = await self._orchestrator.create_run(
@@ -549,6 +564,12 @@ class HarnessAPI:
             if run.status is RunStatus.AWAITING_INPUT else None,
         })
 
+    async def _send_run_artifact(self, send: Send, run_id: str, artifact_id: str) -> None:
+        events = await self._store.list_events(run_id)
+        if artifact_id not in referenced_artifacts(e.payload for e in events):
+            raise ApiError(404, "unknown artifact")  # never reveal another run's content
+        await self._send_artifact(send, artifact_id)
+
     async def _send_artifact(self, send: Send, artifact_id: str) -> None:
         data = await self._artifacts.get(artifact_id) if self._artifacts else None
         if data is None:
@@ -572,10 +593,11 @@ class HarnessAPI:
         except QuotaExceeded as exc:
             raise ApiError(429, str(exc)) from exc
         body = await self._body(receive)
-        unknown = set(body) - {"content", "budget"}
+        unknown = set(body) - {"content", "budget", "images"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         content = _required_text(body.get("content"), "content")
+        images = [part.image_url for part in _images(body.get("images"))]
         current = await self._load(run_id)
         raised = _budget(body.get("budget"))
         budget = None
@@ -586,7 +608,7 @@ class HarnessAPI:
                 current.budget, **{name: getattr(raised, name) for name in supplied}
             )
         try:
-            run = await self._orchestrator.continue_run(run_id, content, budget=budget)
+            run = await self._orchestrator.continue_run(run_id, content, budget=budget, images=images)
         except ValueError as exc:
             raise ApiError(409, str(exc)) from exc
         await self._queue.enqueue(run_id)
@@ -832,6 +854,19 @@ def _event_payload(index: int, event: Any) -> dict[str, Any]:
     }
 
 
+def _images(value: Any) -> tuple[ContentPart, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > 16:
+        raise ApiError(400, "images must be a list of at most 16 image URLs")
+    try:
+        for url in value:
+            validate_image_url(url)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return tuple(ContentPart(image_url=url) for url in value)
+
+
 def _header(scope: Scope, name: bytes) -> str | None:
     for key, value in scope.get("headers", []):
         if key.lower() == name:
@@ -856,7 +891,10 @@ def _transcript(run: RunRecord, *, with_reasoning: bool = False) -> list[dict[st
     turns: list[dict[str, Any]] = []
     for index, message in enumerate(run.messages):
         if message.role is Role.USER and not message.content.startswith("[Context from hooks]"):
-            turns.append({"index": index, "role": "user", "content": message.content})
+            user_turn: dict[str, Any] = {"index": index, "role": "user", "content": message.content}
+            if message.parts:
+                user_turn["images"] = [part.image_url for part in message.parts]
+            turns.append(user_turn)
         elif message.role is Role.ASSISTANT:
             for call in message.tool_calls:
                 if call.name == "ask_user":

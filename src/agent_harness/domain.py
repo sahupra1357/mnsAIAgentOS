@@ -140,6 +140,17 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ContentPart:
+    """An attachment to a message's text (Phase 12d): an image for vision models.
+
+    ``image_url`` is an ``https://`` URL or a ``data:image/<type>;base64,...`` URL.
+    """
+
+    type: str = "image"
+    image_url: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     role: Role
     content: str = ""
@@ -149,6 +160,8 @@ class Message:
     # The model's reasoning ("thinking") for an assistant turn, when the server
     # returns it separately. Sent back only for profiles with reasoning_history = "keep".
     reasoning: str | None = None
+    # Attachments after ``content`` (images). Empty for text-only messages.
+    parts: tuple[ContentPart, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -757,9 +770,11 @@ class RetryableModelError(HarnessError):
     ``provider_attempts`` is how many provider requests were made before this
     error surfaced (adapters that retry internally set it), so the orchestrator
     can bound total attempts instead of multiplying retry layers.
+    ``retry_after`` is the delay the server asked for (a Retry-After header), if any.
     """
 
     provider_attempts: int = 1
+    retry_after: float | None = None
 
 
 class PermanentModelError(HarnessError):

@@ -7,7 +7,9 @@ import hashlib
 import os
 import re
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from agent_harness.domain import ArtifactRef, ArtifactStore, JsonObject, ToolRisk, ToolSpec
 
@@ -60,6 +62,25 @@ class LocalArtifactStore:
             Path(temporary).unlink(missing_ok=True)
             raise
 
+    def entries(self) -> list[tuple[str, float]]:
+        """Every stored artifact as (id, modification time); used by ``gc``."""
+
+        found = []
+        if self.root.is_dir():
+            for path in self.root.glob("??/*"):
+                if path.is_file() and _ARTIFACT_ID.fullmatch(path.name):
+                    found.append((path.name, path.stat().st_mtime))
+        return found
+
+    async def delete(self, artifact_id: str) -> bool:
+        if not _ARTIFACT_ID.fullmatch(artifact_id):
+            raise ValueError("invalid artifact id")
+        try:
+            self._path(artifact_id).unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
     async def get(self, artifact_id: str) -> bytes | None:
         if not _ARTIFACT_ID.fullmatch(artifact_id):
             return None
@@ -108,3 +129,24 @@ def read_artifact_handler(store: ArtifactStore):
         }
 
     return read_artifact
+
+
+def referenced_artifacts(payloads: Iterable[Any]) -> set[str]:
+    """Artifact IDs mentioned anywhere in event payloads (tool results, file snapshots)."""
+
+    found: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "artifact_id" and isinstance(item, str):
+                    found.add(item)
+                else:
+                    walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    for payload in payloads:
+        walk(payload)
+    return found

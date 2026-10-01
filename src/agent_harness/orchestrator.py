@@ -76,6 +76,7 @@ from agent_harness.tools.validation import ArgumentValidationError, validate_arg
 from agent_harness.interaction import ASK_USER_SPEC, ASK_USER_TOOL
 from agent_harness.guardrails import GuardDecision, Guardrails
 from agent_harness.domain import (
+    ContentPart,
     ApprovalRequest,
     ArtifactRef,
     ArtifactStore,
@@ -907,7 +908,8 @@ class AgentOrchestrator:
         return run
 
     async def continue_run(
-        self, run_id: str, content: str, *, budget: RunBudget | None = None
+        self, run_id: str, content: str, *, budget: RunBudget | None = None,
+        images: Sequence[str] = (),
     ) -> RunRecord:
         """Reopen a finished conversation with a new user message.
 
@@ -943,7 +945,9 @@ class AgentOrchestrator:
                 run.tenant, run.id, run.budget, consumed_tokens=run.consumed_tokens,
                 consumed_cost=run.consumed_cost_usd, new_run=False,
             )
-        added = [Message(role=Role.USER, content=content)]
+        parts = tuple(ContentPart(image_url=url) for url in images)
+        added = [Message(role=Role.USER, content=content, parts=parts)]
+        _validate_message(added[0])
         prompt_hook = await self._user_prompt_hook(run.id, added, run.model_profile)
         run.status = RunStatus.RUNNING
         run.completed_at = None
@@ -3638,9 +3642,26 @@ def _validate_message(message: Message) -> None:
         raise TypeError("messages must contain Message values")
     if message.tool_call_id is not None:
         _validate_identifier(message.tool_call_id, "message.tool_call_id")
+    for part in message.parts:
+        validate_image_url(part.image_url)
     for call in message.tool_calls:
         _validate_identifier(call.id, "message.tool_call.id")
         _validate_identifier(call.name, "message.tool_call.name")
+
+
+_IMAGE_DATA_URL = re.compile(r"data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\s]+")
+MAX_IMAGE_URL_CHARS = 20_000_000  # about 15 MB of base64
+
+
+def validate_image_url(url: str) -> None:
+    """Accept https:// URLs and base64 data: URLs of common image types."""
+
+    if not isinstance(url, str) or len(url) > MAX_IMAGE_URL_CHARS:
+        raise ValueError("image must be a string under 15 MB")
+    if url.startswith("https://") and " " not in url and len(url) <= 4096:
+        return
+    if not _IMAGE_DATA_URL.fullmatch(url):
+        raise ValueError("image must be an https:// URL or a data:image/(png|jpeg|gif|webp);base64 URL")
 
 
 def _validate_budget(budget: RunBudget) -> None:

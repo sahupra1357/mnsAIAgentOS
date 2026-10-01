@@ -87,6 +87,19 @@ description: Production concerns — versioned schema migrations, the RunStore c
 - **Docs:** `docs/DEPLOYMENT.md` covers configuration, secrets, scaling workers,
   backups, and upgrades.
 
+## Artifact access and retention (Phase 12d)
+- `artifacts.referenced_artifacts(payloads)` finds `artifact_id` values anywhere in event
+  payloads: tool results and `file_snapshot` entries.
+- **API access.**
+  - `GET /runs/{id}/artifacts/{aid}` checks run ownership and that the run references the
+    artifact.
+  - `GET /artifacts/{aid}` is allowed only for `"*"` principals when tenant keys exist.
+    (`PrincipalDirectory.multi_tenant`; a single legacy token keeps access.)
+- **`gc`.** After purging runs, `gc` deletes `LocalArtifactStore` entries (and
+  `.agent-harness/snapshots`) that no remaining run references *and* that are older than
+  the cutoff. A running step may have stored an artifact it has not recorded yet. Dry run
+  by default.
+
 ## Testing
 
 Everything above stays network-free:

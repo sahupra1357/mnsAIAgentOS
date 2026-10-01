@@ -642,7 +642,9 @@ class DoctorCommandTests(unittest.TestCase):
     def test_doctor_reports_checks_and_exit_code(self) -> None:
         transport = FakeTransport(
             posts=[text_completion()],
-            gets={"http://127.0.0.1:8080/health": json_response({"status": "ok"})},
+            gets={"http://127.0.0.1:8080/health": json_response({"status": "ok"}),
+                  # A single-model llama-server lists only the model it was started with.
+                  "http://127.0.0.1:8080/v1/models": json_response({"data": [{"id": "model.gguf"}]})},
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "models.toml")

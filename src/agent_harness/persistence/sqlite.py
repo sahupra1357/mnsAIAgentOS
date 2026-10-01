@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from agent_harness.domain import (
     ConcurrencyError,
+    ContentPart,
     ContextSummary,
     TenantUsage,
     Plan,
@@ -747,6 +748,10 @@ def _decode_messages(items: Any) -> list[Message]:
                 for call in message.get("tool_calls", ())
             ),
             reasoning=message.get("reasoning"),
+            parts=tuple(
+                ContentPart(type=str(part.get("type", "image")), image_url=str(part.get("image_url", "")))
+                for part in message.get("parts") or ()
+            ),
         )
         for message in items
     ]

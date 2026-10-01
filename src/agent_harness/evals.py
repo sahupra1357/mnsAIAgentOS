@@ -7,6 +7,12 @@ A scenario is a TOML file::
     system = "optional system prompt"
     model_profile = "ollama"          # live mode only; default profile otherwise
     approve = "allow"                 # optional: auto-decide approval pauses
+    answers = ["Paris"]               # optional: replies to ask_user questions, in order
+                                      # (also offers the ask_user tool)
+    [output_schema]                   # optional: the run must end with a matching result
+    type = "object"
+    [guardrails]                      # optional: a [guardrails] table (docs/GUARDRAILS.md)
+    enabled = true
     [budget]                          # optional RunBudget fields
     max_steps = 5
 
@@ -23,6 +29,7 @@ A scenario is a TOML file::
     max_steps = 3
     events_include = ["tool_responded"]
     error_contains = "..."            # for scenarios expected to fail
+    result = { city = "Paris" }       # the validated structured result (with output_schema)
 
 Scenarios with ``[[model]]`` entries run scripted (network-free) unless live
 mode is requested; scenarios without them run only in live mode.
@@ -53,15 +60,18 @@ from agent_harness.domain import (
     ToolCall,
     ToolExecutor,
 )
+from agent_harness.guardrails import Guardrails, GuardrailsConfig, GuardrailsConfigError
 from agent_harness.model_gateway import ScriptedModelClient
 from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
 
-_TOP_LEVEL = {"name", "prompt", "system", "model_profile", "approve", "budget", "model", "expect"}
+_TOP_LEVEL = {"name", "prompt", "system", "model_profile", "approve", "budget", "model", "expect",
+              "output_schema", "answers", "guardrails"}
 _EXPECT = {
     "status", "tool_calls", "output_contains", "output_not_contains",
-    "max_steps", "events_include", "error_contains",
+    "max_steps", "events_include", "error_contains", "result",
 }
+_UNSET: Any = object()
 _MAX_APPROVAL_ROUNDS = 10
 
 
@@ -78,6 +88,7 @@ class Expectations:
     max_steps: int | None = None
     events_include: tuple[str, ...] = ()
     error_contains: str | None = None
+    result: Any = _UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +102,9 @@ class Scenario:
     budget: RunBudget = field(default_factory=RunBudget)
     scripted: tuple[ModelResponse | Exception, ...] | None = None
     expect: Expectations = field(default_factory=Expectations)
+    output_schema: dict[str, Any] | None = None
+    answers: tuple[str, ...] = ()
+    guardrails: GuardrailsConfig | None = None
 
 
 @dataclass(slots=True)
@@ -154,6 +168,16 @@ def _load_scenario(file: Path) -> Scenario:
     scripted = None
     if "model" in raw:
         scripted = tuple(_scripted_response(file, i, entry) for i, entry in enumerate(raw["model"]))
+    schema = raw.get("output_schema")
+    if schema is not None and not isinstance(schema, dict):
+        raise ScenarioError(f"{file}: output_schema must be a table")
+    answers = raw.get("answers", [])
+    if not isinstance(answers, list) or not all(isinstance(a, str) and a for a in answers):
+        raise ScenarioError(f"{file}: answers must be a list of non-empty strings")
+    try:
+        guardrails = GuardrailsConfig.from_mapping(raw["guardrails"]) if "guardrails" in raw else None
+    except GuardrailsConfigError as exc:
+        raise ScenarioError(f"{file}: {exc}") from exc
     return Scenario(
         name=str(raw.get("name") or file.stem),
         prompt=prompt,
@@ -164,6 +188,9 @@ def _load_scenario(file: Path) -> Scenario:
         budget=budget,
         scripted=scripted,
         expect=_expectations(file, raw.get("expect", {})),
+        output_schema=schema,
+        answers=tuple(answers),
+        guardrails=guardrails,
     )
 
 
@@ -214,6 +241,7 @@ def _expectations(file: Path, raw: Any) -> Expectations:
         max_steps=raw.get("max_steps"),
         events_include=tuple(raw.get("events_include", ())),
         error_contains=raw.get("error_contains"),
+        result=raw.get("result", _UNSET),
     )
 
 
@@ -247,8 +275,11 @@ async def run_scenario(
         models = _FixedResolver(ScriptedModelClient(scenario.scripted or ()))
         profile = "scripted"
     store = InMemoryRunStore()
+    guardrails = (Guardrails(scenario.guardrails, models=models)
+                  if scenario.guardrails is not None and scenario.guardrails.enabled else None)
     orchestrator = AgentOrchestrator(
-        models=models, tools=tools, store=store, context=context, settings=settings
+        models=models, tools=tools, store=store, context=context, settings=settings,
+        ask_user=bool(scenario.answers), guardrails=guardrails,
     )
     messages = [Message(role=Role.USER, content=scenario.prompt)]
     if scenario.system:
@@ -257,17 +288,26 @@ async def run_scenario(
     result = ScenarioResult(scenario.name, "fail", mode="live" if live else "scripted")
     try:
         run = await orchestrator.create_run(
-            model_profile=profile, messages=messages, budget=scenario.budget
+            model_profile=profile, messages=messages, budget=scenario.budget,
+            output_schema=scenario.output_schema,
         )
         run = await orchestrator.run(run.id)
         rounds = 0
-        while run.status is RunStatus.AWAITING_INPUT and scenario.approve and rounds < _MAX_APPROVAL_ROUNDS:
+        answers = list(scenario.answers)
+        while run.status is RunStatus.AWAITING_INPUT and rounds < _MAX_APPROVAL_ROUNDS:
             pending = await orchestrator.pending_approval(run.id)
             if pending is None:
                 break
-            await orchestrator.resolve_approval(
-                run.id, call_id=pending.call_id, approved=scenario.approve == "allow"
-            )
+            if pending.kind == "question":
+                if not answers:
+                    break  # stays awaiting_input: more questions than scripted answers
+                await orchestrator.answer(run.id, call_id=pending.call_id, answer=answers.pop(0))
+            elif scenario.approve:
+                await orchestrator.resolve_approval(
+                    run.id, call_id=pending.call_id, approved=scenario.approve == "allow"
+                )
+            else:
+                break
             run = await orchestrator.run(run.id)
             rounds += 1
         events = await store.list_events(run.id)
@@ -311,6 +351,8 @@ def _check(expect: Expectations, run: RunRecord, event_types: Sequence[str]) -> 
             failures.append(f"missing event {event!r}")
     if expect.error_contains is not None and expect.error_contains not in (run.error or ""):
         failures.append(f"error {run.error!r} does not contain {expect.error_contains!r}")
+    if expect.result is not _UNSET and run.output != expect.result:
+        failures.append(f"result {run.output!r} != expected {expect.result!r}")
     return failures
 
 

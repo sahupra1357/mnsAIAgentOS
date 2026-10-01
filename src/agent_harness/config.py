@@ -52,10 +52,15 @@ _PROFILE_FIELDS = {
     "FALLBACK": "fallback",
     "REASONING_TAGS": "reasoning_tags",
     "REASONING_HISTORY": "reasoning_history",
+    "MAX_CONCURRENCY": "max_concurrency",
+    "RETRY_JITTER": "retry_jitter",
+    "MAX_RETRY_AFTER_SECONDS": "max_retry_after_seconds",
+    "STRUCTURED_OUTPUT": "structured_output",
 }
 # Marks dataclass fields that versioning.profile_sha256 skips while they hold their default.
 HASH_OMIT_DEFAULT = MappingProxyType({"hash": "omit_default"})
 REASONING_HISTORY_MODES = ("drop", "keep")
+STRUCTURED_OUTPUT_MODES = ("strict", "non_strict", "prompt")
 _PRICING_FIELDS = (
     "input_usd_per_million_tokens",
     "output_usd_per_million_tokens",
@@ -117,6 +122,13 @@ class ModelProfile:
     # not report config drift.
     reasoning_tags: bool = field(default=False, metadata=HASH_OMIT_DEFAULT)
     reasoning_history: str = field(default="drop", metadata=HASH_OMIT_DEFAULT)
+    # Gateway behaviour (Phase 12d): concurrent requests per process (None: unlimited),
+    # random spread of retry delays (0.2 = +/-20%), the longest Retry-After honoured,
+    # and how a response schema is sent (strict json_schema, non-strict, or in the prompt).
+    max_concurrency: int | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
+    retry_jitter: float = field(default=0.0, metadata=HASH_OMIT_DEFAULT)
+    max_retry_after_seconds: float = field(default=60.0, metadata=HASH_OMIT_DEFAULT)
+    structured_output: str = field(default="strict", metadata=HASH_OMIT_DEFAULT)
 
     def __post_init__(self) -> None:
         if not self.adapter.strip():
@@ -160,6 +172,19 @@ class ModelProfile:
         object.__setattr__(self, "fallback", fallback)
         if not isinstance(self.reasoning_tags, bool):
             raise ConfigError("model profile reasoning_tags must be true or false")
+        if self.max_concurrency is not None and (
+            isinstance(self.max_concurrency, bool) or not isinstance(self.max_concurrency, int)
+            or self.max_concurrency < 1
+        ):
+            raise ConfigError("model profile max_concurrency must be a positive integer")
+        if not 0 <= self.retry_jitter <= 1:
+            raise ConfigError("model profile retry_jitter must be between 0 and 1")
+        if self.max_retry_after_seconds < 0:
+            raise ConfigError("model profile max_retry_after_seconds must not be negative")
+        if self.structured_output not in STRUCTURED_OUTPUT_MODES:
+            raise ConfigError(
+                f"model profile structured_output must be one of: {', '.join(STRUCTURED_OUTPUT_MODES)}"
+            )
         if self.reasoning_history not in REASONING_HISTORY_MODES:
             raise ConfigError(
                 f"model profile reasoning_history must be one of: {', '.join(REASONING_HISTORY_MODES)}"
@@ -968,9 +993,10 @@ def _apply_environment_overrides(
 
 def _parse_environment_value(key: str, field_name: str, value: str) -> Any:
     try:
-        if field_name in {"timeout_seconds", "retry_backoff_seconds", "cold_start_timeout_seconds"}:
+        if field_name in {"timeout_seconds", "retry_backoff_seconds", "cold_start_timeout_seconds",
+                          "retry_jitter", "max_retry_after_seconds"}:
             return float(value)
-        if field_name in {"max_retries", "context_window"}:
+        if field_name in {"max_retries", "context_window", "max_concurrency"}:
             return int(value)
         if field_name == "reasoning_tags":
             if value.strip().lower() not in {"true", "false", "1", "0"}:
@@ -1010,6 +1036,10 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
         "fallback",
         "reasoning_tags",
         "reasoning_history",
+        "max_concurrency",
+        "retry_jitter",
+        "max_retry_after_seconds",
+        "structured_output",
     }
     unknown = set(raw) - allowed
     if unknown:
@@ -1059,6 +1089,12 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
             reasoning_tags=raw.get("reasoning_tags", False),
             reasoning_history=_required_string(
                 raw.get("reasoning_history", "drop"), f"models.{name}.reasoning_history"
+            ),
+            max_concurrency=raw.get("max_concurrency"),
+            retry_jitter=float(raw.get("retry_jitter", 0.0)),
+            max_retry_after_seconds=float(raw.get("max_retry_after_seconds", 60.0)),
+            structured_output=_required_string(
+                raw.get("structured_output", "strict"), f"models.{name}.structured_output"
             ),
         )
     except (TypeError, ValueError) as exc:
