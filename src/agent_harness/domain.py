@@ -279,6 +279,8 @@ class RunRecord:
     output: Any = None
     # Guardrails: messages[:guarded_through] have passed the input guard.
     guarded_through: int = 0
+    # Chat API (Phase 12b): the end user a service created this run for (audit, listing).
+    end_user: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -658,6 +660,7 @@ class RunQuery:
 
     tenant: str | None = None
     statuses: tuple[RunStatus, ...] = ()
+    end_user: str | None = None
     parent_run_id: str | None = None
     include_children: bool = False
     created_after: datetime | None = None
@@ -689,6 +692,7 @@ class RunSummary:
     error: str | None = None
     # First line of the first user message, shortened, to tell runs apart.
     title: str = ""
+    end_user: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

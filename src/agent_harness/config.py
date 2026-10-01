@@ -320,6 +320,20 @@ class TasksConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationsConfig:
+    """Webhook POSTed by workers when a run pauses for input or finishes.
+
+    ``secret_env`` names an environment variable holding the HMAC key for the
+    ``X-Agent-Harness-Signature`` header. ``statuses`` limits which states notify.
+    """
+
+    webhook_url: str = ""
+    secret_env: str = ""
+    statuses: tuple[str, ...] = ("awaiting_input", "completed", "failed", "cancelled", "budget_exhausted")
+    timeout_seconds: float = 10.0
+
+
+@dataclass(frozen=True, slots=True)
 class InteractionConfig:
     """``ask_user``: offer runs a tool that pauses to ask the user a question.
 
@@ -506,6 +520,9 @@ class HarnessConfig:
     planning: PlanningConfig = field(default_factory=PlanningConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     api_keys: tuple[Mapping[str, str], ...] = ()
+    # Browser origins allowed to call the HTTP API (CORS); "*" allows any origin.
+    api_cors_origins: tuple[str, ...] = ()
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     quotas: tuple[QuotaConfig, ...] = ()
     network: NetworkConfig = field(default_factory=NetworkConfig)
     redaction: RedactionConfig = field(default_factory=RedactionConfig)
@@ -660,6 +677,8 @@ def load_config(
         planning=_parse_section(raw, "planning", PlanningConfig),
         storage=_parse_section(raw, "storage", StorageConfig),
         api_keys=_parse_api_keys(raw.get("api")),
+        api_cors_origins=_parse_cors_origins(raw.get("api")),
+        notifications=_parse_notifications(raw.get("notifications")),
         quotas=_parse_quotas(raw.get("quotas")),
         network=_parse_section(raw, "network", NetworkConfig),
         redaction=_parse_redaction(raw.get("redaction")),
@@ -799,8 +818,8 @@ def _parse_mcp_servers(raw: Any) -> tuple[McpServerConfig, ...]:
 def _parse_api_keys(raw: Any) -> tuple[Mapping[str, str], ...]:
     if raw is None:
         return ()
-    if not isinstance(raw, dict) or set(raw) - {"keys"}:
-        raise ConfigError("[api] may only contain keys = [...] ([[api.keys]] tables)")
+    if not isinstance(raw, dict) or set(raw) - {"keys", "cors_origins"}:
+        raise ConfigError("[api] may only contain [[api.keys]] tables and cors_origins")
     keys = raw.get("keys", [])
     if not isinstance(keys, list) or not all(isinstance(item, dict) for item in keys):
         raise ConfigError("api.keys must be an array of tables ([[api.keys]])")
@@ -818,6 +837,29 @@ def _parse_api_keys(raw: Any) -> tuple[Mapping[str, str], ...]:
             raise ConfigError("api.keys.role must be viewer, operator, or admin")
         parsed.append(MappingProxyType(dict(item)))
     return tuple(parsed)
+
+
+def _parse_cors_origins(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, dict) or "cors_origins" not in raw:
+        return ()
+    origins = raw["cors_origins"]
+    if not isinstance(origins, list) or not all(isinstance(o, str) for o in origins):
+        raise ConfigError("api.cors_origins must be a list of strings")
+    for origin in origins:
+        if origin != "*" and not re.fullmatch(r"https?://[A-Za-z0-9.-]+(:\d+)?", origin):
+            raise ConfigError(f"api.cors_origins: {origin!r} must look like https://host[:port] or be \"*\"")
+    return tuple(origins)
+
+
+def _parse_notifications(raw: Any) -> NotificationsConfig:
+    config = _parse_section({"notifications": raw} if raw is not None else {}, "notifications",
+                            NotificationsConfig)
+    if config.webhook_url and not config.webhook_url.startswith(("https://", "http://")):
+        raise ConfigError("notifications.webhook_url must be an http(s) URL")
+    unknown = set(config.statuses) - {"awaiting_input", "completed", "failed", "cancelled", "budget_exhausted"}
+    if unknown:
+        raise ConfigError(f"notifications.statuses has unknown statuses: {', '.join(sorted(unknown))}")
+    return config
 
 
 def _parse_quotas(raw: Any) -> tuple[QuotaConfig, ...]:

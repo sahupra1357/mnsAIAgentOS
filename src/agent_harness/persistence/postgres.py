@@ -457,6 +457,9 @@ class PostgresRunStore:
         if query.statuses:
             clauses.append("status = ANY(%s)")
             params.append([status.value for status in query.statuses])
+        if query.end_user is not None:
+            clauses.append("(snapshot_json::jsonb ->> 'end_user') = %s")
+            params.append(query.end_user)
         if query.parent_run_id is not None:
             clauses.append("parent_run_id = %s")
             params.append(query.parent_run_id)

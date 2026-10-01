@@ -299,6 +299,8 @@ def _matches(run: RunRecord, query: RunQuery) -> bool:
         return False
     if query.statuses and run.status not in query.statuses:
         return False
+    if query.end_user is not None and run.end_user != query.end_user:
+        return False
     if query.parent_run_id is not None:
         if run.parent_run_id != query.parent_run_id:
             return False

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 from dataclasses import field, replace
 from collections.abc import Callable, Mapping, Sequence
@@ -274,6 +275,7 @@ class AgentOrchestrator:
         tenant: str = "default",
         created_by: str | None = None,
         output_schema: Mapping[str, Any] | None = None,
+        end_user: str | None = None,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted.
 
@@ -288,6 +290,8 @@ class AgentOrchestrator:
         selected_budget = budget or RunBudget()
         _validate_budget(selected_budget)
         _validate_identifier(tenant, "tenant")
+        if end_user is not None and not _END_USER.fullmatch(end_user):
+            raise ValueError("end_user must be 1-128 characters: letters, digits, and . _ @ + -")
         reserved = False
         if parent_run_id is None:
             # Atomic admission: reserve budget against the tenant's quota and cap
@@ -337,6 +341,7 @@ class AgentOrchestrator:
             tenant=tenant,
             created_by=created_by,
             output_schema=schema,
+            end_user=end_user,
         )
         recorded_versions = {
             "system_prompt_sha256": system_prompt_sha256(initial_messages),
@@ -363,6 +368,8 @@ class AgentOrchestrator:
             payload["tenant"] = tenant
         if created_by is not None:
             payload["created_by"] = created_by
+        if end_user is not None:
+            payload["end_user"] = end_user
         if reserved:
             payload["quota_reservation"] = {
                 "max_tokens": selected_budget.max_tokens, "max_cost_usd": selected_budget.max_cost_usd}
@@ -3376,6 +3383,7 @@ def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
 
 
 _QUOTA_WINDOW = timedelta(days=1)
+_END_USER = re.compile(r"[A-Za-z0-9._@+-]{1,128}")
 _ORCHESTRATOR_TOOLS = frozenset(
     {AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, SUBMIT_RESULT_TOOL, ASK_USER_TOOL, *META_TOOLS, *PLAN_TOOLS}
 )
