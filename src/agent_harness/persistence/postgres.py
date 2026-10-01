@@ -132,6 +132,11 @@ MIGRATIONS += (
     CREATE INDEX IF NOT EXISTS quota_reservations_tenant ON quota_reservations(tenant);
     """),
 )
+MIGRATIONS += (
+    (3, """
+    ALTER TABLE run_queue ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+    """),
+)
 LATEST = MIGRATIONS[-1][0]
 
 
@@ -216,7 +221,12 @@ class PostgresRunStore:
 
     # -- runs and events --------------------------------------------------------------
 
-    async def create_run(self, run: RunRecord, event: RunEvent) -> None:
+    async def create_run_and_enqueue(self, run: RunRecord, event: RunEvent) -> None:
+        """Create the run and put it on the queue in one transaction."""
+
+        await self.create_run(run, event, _enqueue=True)
+
+    async def create_run(self, run: RunRecord, event: RunEvent, *, _enqueue: bool = False) -> None:
         _validate_run_event(run, event)
         if run.version != 0:
             raise ValueError("a new run must have version 0")
@@ -234,6 +244,9 @@ class PostgresRunStore:
                  run.updated_at, run.consumed_tokens, run.consumed_cost_usd, run.parent_run_id),
             )
             self._insert_event(stored)
+            if _enqueue:
+                self._connection.execute(
+                    "INSERT INTO run_queue(run_id) VALUES (%s) ON CONFLICT (run_id) DO NOTHING", (run.id,))
 
         try:
             await self._run(work)
@@ -345,7 +358,8 @@ class PostgresRunStore:
             if row is None:
                 return None
             self._connection.execute(
-                "UPDATE run_queue SET worker_id = %s, lease_expires_at = %s WHERE run_id = %s",
+                "UPDATE run_queue SET worker_id = %s, lease_expires_at = %s, attempts = attempts + 1 "
+                "WHERE run_id = %s",
                 (worker_id, now + lease_seconds, row["run_id"]))
             return str(row["run_id"])
 
@@ -366,6 +380,22 @@ class PostgresRunStore:
         else:
             sql = "DELETE FROM run_queue WHERE run_id = %s AND worker_id = %s"
         await self._run(lambda: self._connection.execute(sql, (run_id, worker_id)))
+
+    async def attempts(self, run_id: str) -> int:
+        row = await self._run(lambda: self._connection.execute(
+            "SELECT attempts FROM run_queue WHERE run_id = %s", (run_id,)).fetchone())
+        return int(row["attempts"]) if row is not None else 0
+
+    async def orphaned_runs(self, stale_before: datetime, *, limit: int = 100) -> list[str]:
+        rows = await self._run(lambda: self._connection.execute(
+            """
+            SELECT id FROM runs
+            WHERE parent_run_id IS NULL AND status IN ('queued', 'running') AND updated_at < %s
+              AND (snapshot_json::jsonb ->> 'dispatch') = 'queue'
+              AND NOT EXISTS (SELECT 1 FROM run_queue q WHERE q.run_id = runs.id)
+            ORDER BY updated_at LIMIT %s
+            """, (stale_before, limit)).fetchall())
+        return [str(row["id"]) for row in rows]
 
     # -- idempotency ----------------------------------------------------------------------
 

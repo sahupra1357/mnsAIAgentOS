@@ -373,6 +373,7 @@ class HarnessAPI:
             created_by=principal.name,
             output_schema=output_schema,
             end_user=_text(body.get("user"), "user", required=False),
+            enqueue=True,  # created and queued in one transaction where the store supports it
         )
         await self._queue.enqueue(run.id)
         return {"id": run.id, "status": run.status.value, "model_profile": profile}

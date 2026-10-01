@@ -5,6 +5,16 @@ serve the same queue. A worker renews its lease on a heartbeat; if a renewal
 fails (the lease expired and another worker may now own the run), it cancels
 its local execution. Checkpoints are atomic and version-checked, so an
 interrupted execution leaves a consistent run that the new holder resumes.
+
+Reliability (Phase 12c), when the queue supports it:
+- every claim is counted in the queue; a run claimed more than ``max_attempts``
+  times without finishing (crash loops, OOM kills) is dead-lettered: failed with
+  a ``run_dead_lettered`` event instead of being retried forever;
+- a run that keeps raising is dead-lettered too, rather than left ``running``;
+- ``run_forever`` reconciles: queue-dispatched runs that are unfinished, idle for
+  ``stale_seconds``, and missing from the queue are put back on it;
+- the heartbeat polls for cancellation, so a cancelled run's in-flight model or
+  tool call is stopped within ``cancel_poll_seconds``.
 """
 
 from __future__ import annotations
@@ -13,9 +23,10 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from uuid import uuid4
 
-from agent_harness.domain import ConcurrencyError, RunQueue, RunRecord, RunStatus
+from agent_harness.domain import ConcurrencyError, RunQueue, RunRecord, RunStatus, utc_now
 from agent_harness.notifications import WebhookNotifier
 from agent_harness.orchestrator import AgentOrchestrator
 
@@ -37,6 +48,10 @@ class Worker:
         max_unexpected_failures: int = 3,
         sleep: Sleep = asyncio.sleep,
         notifier: WebhookNotifier | None = None,
+        max_attempts: int = 5,
+        cancel_poll_seconds: float = 2.0,
+        reconcile_seconds: float = 60.0,
+        stale_seconds: float = 300.0,
     ) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
@@ -51,6 +66,12 @@ class Worker:
         self._max_unexpected_failures = max_unexpected_failures
         self._unexpected_failures: dict[str, int] = {}
         self._notifier = notifier
+        if max_attempts < 1 or cancel_poll_seconds <= 0 or reconcile_seconds <= 0 or stale_seconds <= 0:
+            raise ValueError("max_attempts and the reliability intervals must be positive")
+        self._max_attempts = max_attempts
+        self._cancel_poll = cancel_poll_seconds
+        self._reconcile_every = reconcile_seconds
+        self._stale = timedelta(seconds=stale_seconds)
 
     async def run_once(self) -> RunRecord | None:
         """Claim and execute one run; return it, or ``None`` if the queue was empty."""
@@ -58,10 +79,18 @@ class Worker:
         run_id = await self._queue.claim(self.worker_id, self._lease_seconds)
         if run_id is None:
             return None
+        attempts_of = getattr(self._queue, "attempts", None)
+        attempts = await attempts_of(run_id) if attempts_of is not None else 0
+        if attempts > self._max_attempts:
+            await self._dead_letter(run_id, attempts, "claimed repeatedly without finishing "
+                                    "(the worker crashed or lost its lease each time)")
+            await self._queue.release(run_id, self.worker_id, requeue=False)
+            return None
         execution = asyncio.create_task(self._orchestrator.run(run_id))
         heartbeat = asyncio.create_task(self._heartbeat(run_id, execution))
         result: RunRecord | None = None
         give_up = False
+        cancelled = False
         try:
             result = await execution
             if self._notifier is not None and run_is_settled(result):
@@ -73,7 +102,11 @@ class Worker:
         except asyncio.CancelledError:
             if not heartbeat.done():
                 raise  # shutdown: the finally block puts the run back on the queue
-            logger.warning("worker %s lost lease on run %s", self.worker_id, run_id)
+            if heartbeat.result() == "cancelled":
+                cancelled = True
+                logger.info("run %s was cancelled; stopped its in-flight work", run_id)
+            else:
+                logger.warning("worker %s lost lease on run %s", self.worker_id, run_id)
             return None
         except ConcurrencyError:
             logger.warning("run %s was advanced by another worker", run_id)
@@ -84,11 +117,12 @@ class Worker:
             give_up = failures >= self._max_unexpected_failures
             if give_up:
                 logger.exception(
-                    "run %s raised %d times; removing it from the queue "
+                    "run %s raised %d times; failing it and removing it from the queue "
                     "(resume it explicitly after investigating)",
                     run_id,
                     failures,
                 )
+                await self._dead_letter(run_id, failures, "raised unexpected errors repeatedly")
             else:
                 logger.exception("run %s raised; releasing it for another attempt", run_id)
             return None
@@ -98,7 +132,7 @@ class Worker:
                 await heartbeat
             # Release only acts if we still hold the lease. Anything but a settled
             # run goes back on the queue so it is resumed rather than forgotten.
-            settled = result is not None and run_is_settled(result)
+            settled = (result is not None and run_is_settled(result)) or cancelled
             await self._queue.release(
                 run_id, self.worker_id, requeue=not settled and not give_up
             )
@@ -106,21 +140,65 @@ class Worker:
     async def run_forever(self, stop: asyncio.Event) -> None:
         """Process runs until ``stop`` is set; finish the current run first."""
 
+        loop = asyncio.get_running_loop()
+        next_reconcile = loop.time()
         while not stop.is_set():
+            if loop.time() >= next_reconcile:
+                await self.reconcile()
+                next_reconcile = loop.time() + self._reconcile_every
             processed = await self.run_once()
             if processed is None:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=self._poll_interval)
 
-    async def _heartbeat(self, run_id: str, execution: asyncio.Task[RunRecord]) -> None:
-        interval = self._lease_seconds / 3
+    async def reconcile(self) -> list[str]:
+        """Requeue queue-dispatched runs that fell out of the queue; return their IDs."""
+
+        find = getattr(self._queue, "orphaned_runs", None)
+        if find is None:
+            return []
+        try:
+            orphans: list[str] = await find(utc_now() - self._stale)
+            for run_id in orphans:
+                await self._queue.enqueue(run_id)
+        except Exception:  # noqa: BLE001 - reconciliation must never stop the worker
+            logger.exception("reconciling orphaned runs failed")
+            return []
+        if orphans:
+            logger.warning("requeued %d orphaned run(s): %s", len(orphans), ", ".join(orphans))
+        return orphans
+
+    async def _dead_letter(self, run_id: str, attempts: int, reason: str) -> None:
+        dead_letter = getattr(self._orchestrator, "dead_letter", None)
+        if dead_letter is None:
+            return
+        try:
+            await dead_letter(run_id, attempts=attempts, reason=reason)
+            logger.error("dead-lettered run %s after %d attempts: %s", run_id, attempts, reason)
+        except Exception:  # noqa: BLE001 - leave it for an operator rather than crash the worker
+            logger.exception("could not dead-letter run %s", run_id)
+
+    async def _heartbeat(self, run_id: str, execution: asyncio.Task[RunRecord]) -> str:
+        """Renew the lease and watch for cancellation; returns why it stopped execution."""
+
+        renew_every = self._lease_seconds / 3
+        tick = min(renew_every, self._cancel_poll)
+        since_renew = 0.0
+        is_cancelled = getattr(self._orchestrator, "is_cancelled", None)
         while not execution.done():
-            await self._sleep(interval)
+            await self._sleep(tick)
             if execution.done():
-                return
-            if not await self._queue.renew(run_id, self.worker_id, self._lease_seconds):
+                return "done"
+            since_renew += tick
+            if is_cancelled is not None and await is_cancelled(run_id):
                 execution.cancel()
-                return
+                return "cancelled"
+            if since_renew >= renew_every:
+                since_renew = 0.0
+                if not await self._queue.renew(run_id, self.worker_id, self._lease_seconds):
+                    execution.cancel()
+                    return "lost_lease"
+        return "done"
 
 
 def run_is_settled(run: RunRecord) -> bool:

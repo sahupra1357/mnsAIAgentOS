@@ -132,12 +132,18 @@ CREATE TABLE IF NOT EXISTS quota_reservations (
 CREATE INDEX IF NOT EXISTS quota_reservations_tenant ON quota_reservations(tenant);
 """
 
+# Worker reliability (Phase 12c): how often a queued run was claimed without finishing.
+QUEUE_ATTEMPTS = """
+ALTER TABLE run_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+"""
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline tables", BASELINE),
     (2, "tool catalog", TOOL_CATALOG),
     (3, "queryable run columns", RUN_COLUMNS),
     (4, "retention guard", RETENTION),
     (5, "quota reservations", RESERVATIONS),
+    (6, "queue attempt counts", QUEUE_ATTEMPTS),
 )
 LATEST = MIGRATIONS[-1][0]
 

@@ -265,6 +265,54 @@ class StoreContract:
                 await self.store.list_runs(RunQuery(cursor="not-a-cursor"))
         asyncio.run(body())
 
+    def test_queue_attempts_atomic_enqueue_and_orphans(self) -> None:
+        async def body() -> None:
+            queued = run("q1")
+            queued.dispatch = "queue"
+            await self.store.create_run_and_enqueue(queued, created(queued))
+            self.assertEqual(await self.store.attempts("q1"), 0)
+            self.assertEqual(await self.store.claim("w1", 10), "q1")  # queued in the same step
+            self.assertEqual(await self.store.attempts("q1"), 1)
+            await self.store.release("q1", "w1", requeue=True)
+            self.assertEqual(await self.store.claim("w2", 10), "q1")
+            self.assertEqual(await self.store.attempts("q1"), 2)  # survives requeue
+            self.clock.now += 100  # the lease expires: a crashed worker
+            self.assertEqual(await self.store.claim("w3", 10), "q1")
+            self.assertEqual(await self.store.attempts("q1"), 3)
+            await self.store.release("q1", "w3")
+            self.assertEqual(await self.store.attempts("q1"), 0)  # no longer queued
+            await self.store.enqueue("q1")
+            self.assertEqual(await self.store.attempts("q1"), 0)  # a new queue entry starts over
+
+            old = utc_now() - timedelta(hours=1)
+            layout = [("orphan", "queue", RunStatus.RUNNING, None), ("inline", "inline", RunStatus.RUNNING, None),
+                      ("done", "queue", RunStatus.COMPLETED, None), ("child", "queue", RunStatus.RUNNING, "orphan"),
+                      ("waiting", "queue", RunStatus.AWAITING_INPUT, None)]
+            for run_id, dispatch, status, parent in layout:
+                record = RunRecord(id=run_id, model_profile="p", messages=[Message(Role.USER, "x")],
+                                   dispatch=dispatch, parent_run_id=parent, created_at=old, updated_at=old)
+                await self.store.create_run(record, created(record))
+                record.status = status
+                record.updated_at = old
+                await self.store.save_checkpoint(record, [], expected_version=0)
+            # Checkpoints stamp updated_at with the current time, so move the cutoff instead.
+            stale_before = utc_now() + timedelta(minutes=5)
+            self.assertEqual(await self.store.orphaned_runs(stale_before), ["orphan"])
+            self.assertEqual(await self.store.orphaned_runs(utc_now() - timedelta(minutes=5)), [])  # not stale yet
+            await self.store.enqueue("orphan")
+            self.assertEqual(await self.store.orphaned_runs(stale_before), [])  # queued again
+        asyncio.run(body())
+
+    def test_list_runs_by_end_user(self) -> None:
+        async def body() -> None:
+            for run_id, user in (("u-a1", "alice"), ("u-b1", "bob"), ("u-a2", "alice"), ("u-none", None)):
+                record = RunRecord(id=run_id, model_profile="p", messages=[Message(Role.USER, "x")], end_user=user)
+                await self.store.create_run(record, created(record))
+            page = await self.store.list_runs(RunQuery(end_user="alice"))
+            self.assertEqual(sorted(r.id for r in page.runs), ["u-a1", "u-a2"])
+            self.assertEqual({r.end_user for r in page.runs}, {"alice"})
+        asyncio.run(body())
+
 class InMemoryStoreContract(StoreContract, unittest.TestCase):
     def make_store(self, clock: Clock) -> Any:
         return InMemoryRunStore(lease_clock=clock)

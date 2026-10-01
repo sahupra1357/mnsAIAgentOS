@@ -39,7 +39,8 @@ class InMemoryRunStore:
 
     def __init__(self, *, lease_clock: Callable[[], float] = time.time) -> None:
         self._lease_clock = lease_clock
-        self._queue: dict[str, tuple[int, str | None, float]] = {}
+        # run_id -> (order, holder, lease expiry, attempts)
+        self._queue: dict[str, tuple[int, str | None, float, int]] = {}
         self._queue_order = itertools.count()
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[RunEvent]] = {}
@@ -50,6 +51,7 @@ class InMemoryRunStore:
         # run_id -> (tenant, token ceiling, cost ceiling, reserved at)
         self._reservations: dict[str, tuple[str, int | None, float | None, datetime]] = {}
         self._lock = asyncio.Lock()
+        self._create_lock = asyncio.Lock()
 
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
         _validate_identifier(run_id, "run_id")
@@ -70,7 +72,7 @@ class InMemoryRunStore:
             if run_id not in self._runs:
                 raise KeyError(f"unknown run: {run_id}")
             if run_id not in self._queue:
-                self._queue[run_id] = (next(self._queue_order), None, 0.0)
+                self._queue[run_id] = (next(self._queue_order), None, 0.0, 0)
 
     async def claim(self, worker_id: str, lease_seconds: float) -> str | None:
         _validate_identifier(worker_id, "worker_id")
@@ -78,13 +80,14 @@ class InMemoryRunStore:
             now = self._lease_clock()
             available = [
                 (order, run_id)
-                for run_id, (order, holder, expires) in self._queue.items()
+                for run_id, (order, holder, expires, _) in self._queue.items()
                 if holder is None or expires <= now
             ]
             if not available:
                 return None
             order, run_id = min(available)
-            self._queue[run_id] = (order, worker_id, now + lease_seconds)
+            attempts = self._queue[run_id][3] + 1
+            self._queue[run_id] = (order, worker_id, now + lease_seconds, attempts)
             return run_id
 
     async def renew(self, run_id: str, worker_id: str, lease_seconds: float) -> bool:
@@ -93,7 +96,7 @@ class InMemoryRunStore:
             now = self._lease_clock()
             if entry is None or entry[1] != worker_id or entry[2] <= now:
                 return False
-            self._queue[run_id] = (entry[0], worker_id, now + lease_seconds)
+            self._queue[run_id] = (entry[0], worker_id, now + lease_seconds, entry[3])
             return True
 
     async def release(self, run_id: str, worker_id: str, *, requeue: bool = False) -> None:
@@ -102,9 +105,30 @@ class InMemoryRunStore:
             if entry is None or entry[1] != worker_id:
                 return
             if requeue:
-                self._queue[run_id] = (entry[0], None, 0.0)
+                self._queue[run_id] = (entry[0], None, 0.0, entry[3])
             else:
                 del self._queue[run_id]
+
+    async def attempts(self, run_id: str) -> int:
+        async with self._lock:
+            entry = self._queue.get(run_id)
+            return entry[3] if entry is not None else 0
+
+    async def orphaned_runs(self, stale_before: datetime, *, limit: int = 100) -> list[str]:
+        async with self._lock:
+            found = sorted(
+                (run for run in self._runs.values()
+                 if run.parent_run_id is None and run.dispatch == "queue"
+                 and run.status in {RunStatus.QUEUED, RunStatus.RUNNING}
+                 and run.updated_at < stale_before and run.id not in self._queue),
+                key=lambda run: run.updated_at,
+            )
+            return [run.id for run in found[:limit]]
+
+    async def create_run_and_enqueue(self, run: RunRecord, event: RunEvent) -> None:
+        async with self._create_lock:
+            await self.create_run(run, event)
+            await self.enqueue(run.id)
 
     async def get_tool_result(
         self, tool_name: str, idempotency_key: str

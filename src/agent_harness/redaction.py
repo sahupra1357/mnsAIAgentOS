@@ -79,6 +79,10 @@ class RedactingRunStore:
             run, [self._redactor.event(e) for e in events], expected_version=expected_version
         )
 
+    async def create_run_and_enqueue(self, run: RunRecord, event: RunEvent) -> None:
+        # Explicit, so the event is masked like create_run's (not forwarded unmasked).
+        await self._store.create_run_and_enqueue(run, self._redactor.event(event))
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)
 
