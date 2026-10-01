@@ -50,14 +50,21 @@ max_retries = 1
 temperature = 0.2
 
 # --- llama.cpp ----------------------------------------------------------------
-# llama-server -m model.gguf --jinja -c 16384 --port 8080
-# --jinja is required for tool calls. `model` is a label; the server runs one model.
+# Configured for a llama.cpp router (`llama serve --models-preset ... --port 9931 --jinja`),
+# which loads models on demand and can serve several, so `model` must name the exact
+# model to route to. --jinja is required for tool calls.
+# Plain single-model server instead:
+#   llama-server -m model.gguf --jinja -c 16384 --port 8080
+#   endpoint = "http://127.0.0.1:8080/v1", any `model` label, context_window = 16384
 [models.llamacpp]
 adapter = "llama_cpp"
-model = "local-gguf"
-endpoint = "http://127.0.0.1:8080/v1"
-context_window = 16384
-timeout_seconds = 180
+model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
+endpoint = "http://127.0.0.1:9931/v1"
+# Keep equal to the server's context size for this model (ctx-size in the router's
+# models preset). A tool-using run outgrows 4096 quickly; raise both together.
+context_window = 4096
+# The router unloads idle models (--sleep-idle-seconds); reloading a 27B model is slow.
+timeout_seconds = 600
 max_retries = 1
 # Thinking models (Qwen3, DeepSeek-R1): start llama-server with
 # --reasoning-format deepseek so reasoning comes back separately. Without a parser,
