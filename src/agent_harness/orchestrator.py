@@ -3104,6 +3104,10 @@ def _result_submitted(run: RunRecord, events: Sequence[RunEvent]) -> bool:
     assistant = next((m for m in reversed(run.messages) if m.role is Role.ASSISTANT), None)
     if assistant is None or run.output is None or run.messages[-1].role is not Role.TOOL:
         return False  # e.g. a steer or stop hook added a message after the result
+    if any(c.name == ASK_USER_TOOL for c in assistant.tool_calls):
+        # The same turn asked the user something: the model must see the answer
+        # (and may revise the result) before the run ends.
+        return False
     calls = {c.id for c in assistant.tool_calls if c.name == SUBMIT_RESULT_TOOL}
     return bool(calls) and any(
         e.type is EventType.TOOL_RESPONDED

@@ -191,6 +191,41 @@ class AskUserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("The user answered: production", child.messages[-2].content)
 
 
+class StructuredOutputInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_answer_is_seen_when_the_same_turn_also_submitted_a_result(self) -> None:
+        schema = {"type": "object", "properties": {"env": {"type": "string"}}, "required": ["env"]}
+        both = ModelResponse(tool_calls=(ToolCall("s1", "submit_result", {"env": "staging"}),
+                                         ToolCall("q1", ASK_USER_TOOL, QUESTION)),
+                             finish_reason=FinishReason.TOOL_CALLS)
+        revised = ModelResponse(tool_calls=(ToolCall("s2", "submit_result", {"env": "production"}),),
+                                finish_reason=FinishReason.TOOL_CALLS)
+        model = Scripted([both, revised])
+        orch = orchestrator(model)
+        run = await orch.create_run(model_profile="p", messages=[Message(Role.USER, "deploy")],
+                                    output_schema=schema)
+        paused = await orch.run(run.id)
+        self.assertEqual(paused.status, RunStatus.AWAITING_INPUT)
+        await orch.answer(run.id, call_id="q1", answer="production")
+        finished = await orch.run(run.id)
+        self.assertEqual(len(model.requests), 2)  # the model got a turn to see the answer
+        self.assertIn("The user answered: production", model.requests[1].messages[-1].content)
+        self.assertEqual((finished.status, finished.output), (RunStatus.COMPLETED, {"env": "production"}))
+
+    async def test_earlier_submission_stands_if_the_model_then_answers_in_text(self) -> None:
+        schema = {"type": "object", "properties": {"env": {"type": "string"}}, "required": ["env"]}
+        both = ModelResponse(tool_calls=(ToolCall("s1", "submit_result", {"env": "staging"}),
+                                         ToolCall("q1", ASK_USER_TOOL, QUESTION)),
+                             finish_reason=FinishReason.TOOL_CALLS)
+        model = Scripted([both, text("Staging it is.")])
+        orch = orchestrator(model)
+        run = await orch.create_run(model_profile="p", messages=[Message(Role.USER, "deploy")],
+                                    output_schema=schema)
+        await orch.run(run.id)
+        await orch.answer(run.id, call_id="q1", answer="staging is fine")
+        finished = await orch.run(run.id)
+        self.assertEqual((finished.status, finished.output), (RunStatus.COMPLETED, {"env": "staging"}))
+
+
 class ConfigTests(unittest.TestCase):
     def test_interaction_section(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
