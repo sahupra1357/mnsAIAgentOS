@@ -11,6 +11,15 @@ Make model selection a configuration concern. Orchestration code must depend on 
 
 A model request should carry messages, available tool schemas, sampling controls, a timeout, and trace metadata. A normalized response should represent assistant text, zero or more tool calls, usage, provider request ID, and finish reason.
 
+`ModelRequest.response_schema` (a JSON Schema) and `ModelRequest.tool_choice` (`auto`,
+`none`, `required`, or one tool name) default to `None`, and adapters must then leave the
+payload unchanged. The OpenAI-compatible adapter maps them to `response_format`
+(`json_schema`, strict) and `tool_choice` (a named tool becomes
+`{"type": "function", "function": {"name": ...}}`); native Ollama maps the schema to
+`format` and has no `tool_choice`. The orchestrator uses them for runs with an
+`output_schema` (see `structured_output.py`) and validates results itself, because servers
+enforce both loosely.
+
 Preserve provider-only fields inside adapter metadata. Do not leak provider SDK types into shared domain objects.
 
 ## Configuration

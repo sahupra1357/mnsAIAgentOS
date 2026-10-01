@@ -18,7 +18,7 @@ a principal with a tenant and a role (viewer < operator < admin; see
     GET  /runs?status=&parent=&children=&created_after=&created_before=&limit=&cursor=&tenant=
                                     (newest first; ``tenant`` only for all-tenant principals)
     POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?, "mode"?,
-                                     "planning"?}
+                                     "planning"?, "output_schema"?}
     GET  /runs/{id}
     GET  /runs/{id}/events?after=N
     GET  /runs/{id}/events/stream?after=N   (server-sent events)
@@ -305,7 +305,7 @@ class HarnessAPI:
 
     async def _create_run(self, body: dict[str, Any], principal: Principal) -> dict[str, Any]:
         unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode", "template_args",
-                               "planning"}
+                               "planning", "output_schema"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         prompt = _required_text(body.get("prompt"), "prompt")
@@ -329,6 +329,9 @@ class HarnessAPI:
             await check_quota(self._store, self._quotas, tenant)
         except QuotaExceeded as exc:
             raise ApiError(429, str(exc)) from exc
+        output_schema = body.get("output_schema")
+        if output_schema is not None and not isinstance(output_schema, dict):
+            raise ApiError(400, "output_schema must be a JSON Schema object")
         messages = [Message(role=Role.USER, content=prompt)]
         if system:
             messages.insert(0, Message(role=Role.SYSTEM, content=system))
@@ -343,6 +346,7 @@ class HarnessAPI:
             planning=_optional_bool(body.get("planning"), "planning"),
             tenant=tenant,
             created_by=principal.name,
+            output_schema=output_schema,
         )
         await self._queue.enqueue(run.id)
         return {"id": run.id, "status": run.status.value, "model_profile": profile}
@@ -404,6 +408,8 @@ class HarnessAPI:
             "completed_at": run.completed_at.isoformat() if run.completed_at else None,
             "error": run.error,
             "output": _final_output(run),
+            # The validated structured result, for runs created with output_schema.
+            "result": run.output,
             "mode": run.mode.value,
             "parent_run_id": run.parent_run_id,
             "depth": run.depth,

@@ -321,7 +321,7 @@ Order matters: 6.1 is the foundation for most of the rest.
 
 **Phase 11 – Operator and model-interface gaps** [harness-operations, llm-providers, model-gateway, interactive-extensibility] — four stacked PRs (11a → `main`, each later one on the previous branch):
 11a (item 1) on `phase-11a-run-listing` — implemented; 11b (item 2) on `phase-11b-reasoning` — implemented;
-11c (item 3) on `phase-11c-structured-output`; 11d (item 4) on `phase-11d-ask-user`.
+11c (item 3) on `phase-11c-structured-output` — implemented; 11d (item 4) on `phase-11d-ask-user`.
 No classifier-based model routing: the user decided against it (extra call, loses the
 prefix cache, overkill).
 1. Run listing: an optional `RunLister` store protocol (`list_runs(RunQuery) -> RunPage`)
@@ -331,10 +331,12 @@ prefix cache, overkill).
    parsed from `reasoning_content` / `reasoning` / Ollama `thinking`, optional
    `<think>` splitting (`reasoning_tags`), `reasoning_history = "drop" | "keep"` (default
    `drop`, so the prefix cache is unaffected); CLI `--show-reasoning`.
-3. Structured output: `ModelRequest.response_format` and `tool_choice` (default `None`,
-   so payloads are unchanged). A run's `output_schema` uses `response_format` when the run
-   has no tools, otherwise a `submit_result` tool (forced with `tool_choice` once if the
-   model answers in plain text). The validated result goes to `run.output`.
+3. Structured output: `ModelRequest.response_schema` and `tool_choice` (default `None`,
+   so payloads are unchanged). A run's `output_schema` is sent as `response_format` when
+   the run has no tools, otherwise as a `submit_result` tool. A plain answer that is valid
+   JSON is accepted; otherwise the model is asked again (with tools, `tool_choice` forces
+   `submit_result`), and the run fails after 2 rejections. The result goes to `run.output`
+   (API `result`). Not combinable with plan-and-execute.
 4. `ask_user(question, options?)` tool, off by default (`[interaction] ask_user = true`):
    pauses via the approval path with `kind = "question"`; `answer(run_id, call_id, text)`,
    CLI `answer`, API `POST /runs/{id}/answer`.

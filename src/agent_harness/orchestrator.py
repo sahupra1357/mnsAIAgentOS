@@ -61,6 +61,16 @@ from agent_harness.permissions import (
 )
 from agent_harness.telemetry import NoopTelemetry, sanitize_attributes
 from agent_harness.versioning import spec_sha256, system_prompt_sha256, tools_sha256
+from agent_harness.structured_output import (
+    MAX_OUTPUT_REPAIRS,
+    SUBMIT_RESULT_TOOL,
+    check_output_schema,
+    repair_message,
+    result_from_arguments,
+    result_from_text,
+    submit_result_spec,
+)
+from agent_harness.tools.validation import ArgumentValidationError
 from agent_harness.domain import (
     ApprovalRequest,
     ArtifactRef,
@@ -254,10 +264,13 @@ class AgentOrchestrator:
         planning: bool | None = None,
         tenant: str = "default",
         created_by: str | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted.
 
         The lineage arguments are set when the orchestrator spawns a subagent.
+        ``output_schema`` requires the run to end with a result matching that JSON
+        Schema; the validated result is stored in ``run.output``.
         """
 
         identifier = run_id or uuid4().hex
@@ -287,6 +300,9 @@ class AgentOrchestrator:
         use_plan = parent_run_id is None and (
             planning if planning is not None else self._planning.enabled
         )
+        schema = check_output_schema(output_schema) if output_schema is not None else None
+        if schema is not None and use_plan:
+            raise ValueError("output_schema cannot be combined with plan-and-execute runs")
         if use_plan:
             head = next((i for i, m in enumerate(initial_messages) if m.role is not Role.SYSTEM),
                         len(initial_messages))
@@ -309,6 +325,7 @@ class AgentOrchestrator:
             planning=use_plan,
             tenant=tenant,
             created_by=created_by,
+            output_schema=schema,
         )
         recorded_versions = {
             "system_prompt_sha256": system_prompt_sha256(initial_messages),
@@ -329,6 +346,8 @@ class AgentOrchestrator:
         payload["tools"] = {spec.name: spec_sha256(spec) for spec in self._specs_for(run)}
         if use_plan:
             payload["planning"] = True
+        if schema is not None:
+            payload["output_schema"] = True
         if tenant != "default":
             payload["tenant"] = tenant
         if created_by is not None:
@@ -582,10 +601,23 @@ class AgentOrchestrator:
                     return True
             return False
 
+        if run.output_schema is not None and _result_submitted(run, events):
+            # A valid submit_result ends the run without another model turn,
+            # unless a steer or stop hook adds a message for the model.
+            if await self._apply_steers(run, events):
+                return False
+            if await self._stop_hook_continues(run, events):
+                return False
+            await self._complete(run, events)
+            return True
+
         if _has_accepted_final_response(run.messages, events):
             # A steer that arrived while the model was answering reopens the turn.
             if await self._apply_steers(run, events):
                 return False
+            if run.output_schema is not None and run.output is None:
+                if await self._check_final_output(run, events):
+                    return run.status.is_terminal
             if run.planning and await self._plan_on_final(run, events):
                 return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
             if await self._stop_hook_continues(run, events):
@@ -840,6 +872,7 @@ class AgentOrchestrator:
         run.status = RunStatus.RUNNING
         run.completed_at = None
         run.error = None
+        run.output = None  # a continued structured run must produce a new result
         run.messages.extend(added)
         payload: dict[str, Any] = {"chars": len(added[0].content)}
         if prompt_hook is not None:
@@ -1081,6 +1114,9 @@ class AgentOrchestrator:
                 messages=request_messages,
                 tools=specs,
                 metadata={"run_id": run.id, "step": str(run.step_count)},
+                # Without tools the server constrains the reply itself.
+                response_schema=run.output_schema if not specs else None,
+                tool_choice=SUBMIT_RESULT_TOOL if specs and _submit_forced(events) else None,
             )
             streamed = self._should_stream(client)
             if streamed:
@@ -1575,6 +1611,9 @@ class AgentOrchestrator:
         if call.name == TODO_TOOL:
             await self._write_todos(run, events, call, attempt)
             return
+        if call.name == SUBMIT_RESULT_TOOL and run.output_schema is not None:
+            await self._submit_result(run, events, call, attempt)
+            return
         if call.name in META_TOOLS and self._tool_loading.dynamic:
             await self._meta_tool(run, events, call, attempt)
             return
@@ -1705,6 +1744,9 @@ class AgentOrchestrator:
                 loaded = tuple(s for s in loaded if s.risk is ToolRisk.READ_ONLY)
             else:
                 specs += (UPDATE_PLAN_SPEC, REVISE_PLAN_SPEC)
+        if run.output_schema is not None and (specs or loaded):
+            # Before loaded tools, so its position never changes (prefix cache).
+            specs += (submit_result_spec(run.output_schema),)
         return specs + loaded
 
     def _permission(
@@ -2433,6 +2475,67 @@ class AgentOrchestrator:
             ),),
         )
 
+    async def _submit_result(
+        self, run: RunRecord, events: list[RunEvent], call: ToolCall, attempt: int
+    ) -> None:
+        assert run.output_schema is not None
+        try:
+            value = result_from_arguments(call.arguments, run.output_schema)
+        except ArgumentValidationError as exc:
+            result = ToolResult(call.id, call.name, ToolResultStatus.VALIDATION_ERROR,
+                                {"error": str(exc)},
+                                f"The result does not match the required schema: {exc}. "
+                                "Fix it and call submit_result again.")
+            self._append_tool_message(run, result)
+            await self._record_tool_result(run, events, result, attempt=attempt)
+            return
+        run.output = value
+        result = ToolResult(call.id, call.name, ToolResultStatus.SUCCESS, {"accepted": True},
+                            "Result recorded. The task is complete.")
+        self._append_tool_message(run, result)
+        await self._record_tool_result(run, events, result, attempt=attempt)
+
+    async def _check_final_output(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Validate a plain final answer of a structured run.
+
+        Returns False when the answer is a valid JSON result (stored in
+        ``run.output``). Otherwise asks the model again, forcing ``submit_result``
+        when tools are offered, or fails the run after ``MAX_OUTPUT_REPAIRS``;
+        returns True in both cases.
+        """
+
+        assert run.output_schema is not None
+        tool_mode = bool(self._specs_for(run))
+        try:
+            # A valid JSON answer is accepted even when submit_result was offered.
+            run.output = result_from_text(run.messages[-1].content, run.output_schema)
+            return False
+        except ArgumentValidationError as exc:
+            reason = (
+                f"the reply was not a valid result ({exc}); submit it with submit_result"
+                if tool_mode else str(exc)
+            )
+        rejected = _output_rejections(events)
+        if rejected >= MAX_OUTPUT_REPAIRS:
+            await self._fail(
+                run, events,
+                f"output did not match output_schema after {rejected + 1} attempts: {reason}",
+            )
+            return True
+        run.messages.append(Message(role=Role.USER, content=repair_message(reason, tool_mode=tool_mode)))
+        await self._checkpoint(
+            run,
+            events,
+            RunEvent(
+                run_id=run.id,
+                type=EventType.OUTPUT_REJECTED,
+                payload={"attempt": rejected + 1, "reason": reason[:500], "force_tool": tool_mode},
+                step=run.step_count,
+                created_at=self._clock(),
+            ),
+        )
+        return True
+
     def _child_budget(
         self, run: RunRecord, definition: SubagentDefinition, *, share: int = 1
     ) -> RunBudget | None:
@@ -2908,6 +3011,44 @@ def _latest_state_event(events: Sequence[RunEvent]) -> RunEvent | None:
     return next((e for e in reversed(events) if e.type not in _ANNOTATION_EVENTS), None)
 
 
+def _output_rejections(events: Sequence[RunEvent]) -> int:
+    """Rejected final answers since the conversation's latest user turn."""
+
+    count = 0
+    for event in reversed(events):
+        if event.type in {EventType.USER_MESSAGE_ADDED, EventType.RUN_CREATED}:
+            break
+        count += event.type is EventType.OUTPUT_REJECTED
+    return count
+
+
+def _submit_forced(events: Sequence[RunEvent]) -> bool:
+    """True while the latest rejection asks for submit_result and no answer followed yet."""
+
+    for event in reversed(events):
+        if event.type is EventType.MODEL_RESPONDED and event.payload.get("ok") is True:
+            return False
+        if event.type is EventType.OUTPUT_REJECTED:
+            return bool(event.payload.get("force_tool"))
+    return False
+
+
+def _result_submitted(run: RunRecord, events: Sequence[RunEvent]) -> bool:
+    """True when the latest assistant turn's submit_result call was accepted."""
+
+    assistant = next((m for m in reversed(run.messages) if m.role is Role.ASSISTANT), None)
+    if assistant is None or run.output is None or run.messages[-1].role is not Role.TOOL:
+        return False  # e.g. a steer or stop hook added a message after the result
+    calls = {c.id for c in assistant.tool_calls if c.name == SUBMIT_RESULT_TOOL}
+    return bool(calls) and any(
+        e.type is EventType.TOOL_RESPONDED
+        and e.step == run.step_count
+        and e.payload.get("call_id") in calls
+        and e.payload.get("status") == ToolResultStatus.SUCCESS.value
+        for e in events
+    )
+
+
 def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
     latest = _latest_state_event(events)
     if latest is None:
@@ -2924,7 +3065,9 @@ def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
 
 
 _QUOTA_WINDOW = timedelta(days=1)
-_ORCHESTRATOR_TOOLS = frozenset({AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, *META_TOOLS, *PLAN_TOOLS})
+_ORCHESTRATOR_TOOLS = frozenset(
+    {AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, SUBMIT_RESULT_TOOL, *META_TOOLS, *PLAN_TOOLS}
+)
 
 
 def _wrap_untrusted(tool_name: str, content: str) -> str:

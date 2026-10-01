@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "title": {"type": "string", "maxLength": 120},
+    "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+    "affected_services": {"type": "array", "items": {"type": "string"}},
+    "next_steps": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+  },
+  "required": ["title", "severity", "affected_services", "next_steps"],
+  "additionalProperties": false
+}

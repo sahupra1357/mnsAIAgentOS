@@ -57,6 +57,10 @@ def _parser() -> argparse.ArgumentParser:
         "--stream", action="store_true", help="print assistant text as it is generated"
     )
     run.add_argument(
+        "--output-schema", type=Path, metavar="SCHEMA.json",
+        help="require the final result to match this JSON Schema; prints the result as JSON",
+    )
+    run.add_argument(
         "--show-reasoning", action="store_true",
         help="also print the model's reasoning, when the server returns it (to stderr)",
     )
@@ -314,6 +318,7 @@ async def _run_command(args: argparse.Namespace) -> int:
             versions=app.run_versions(profile),
             template={"name": template.name, "sha256": template.sha256} if template else None,
             planning=args.planning,
+            output_schema=_load_schema(args.output_schema),
             messages=messages,
             budget=RunBudget(
                 max_steps=args.max_steps,
@@ -381,7 +386,11 @@ async def _print_result(
                 file=sys.stderr,
             )
         return 3
-    if streamed:
+    if run.output is not None:
+        if streamed:
+            print()
+        print(json.dumps(run.output, indent=2, ensure_ascii=False))
+    elif streamed:
         print()  # the answer was already written as it streamed
     else:
         for message in reversed(run.messages):
@@ -559,6 +568,18 @@ async def _runs_command(args: argparse.Namespace) -> int:
     if page.next_cursor is not None:
         print(f"more: --cursor {page.next_cursor}", file=sys.stderr)
     return 0
+
+
+def _load_schema(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        schema = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path}: not valid JSON ({exc.msg})") from exc
+    if not isinstance(schema, dict):
+        raise ValueError(f"{path}: a JSON Schema must be an object")
+    return schema
 
 
 def _named_args(pairs: Sequence[str]) -> dict[str, str]:
