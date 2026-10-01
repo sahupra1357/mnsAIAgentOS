@@ -49,7 +49,12 @@ _PROFILE_FIELDS = {
     "API_MODE": "api_mode",
     "PRICING": "pricing",
     "FALLBACK": "fallback",
+    "REASONING_TAGS": "reasoning_tags",
+    "REASONING_HISTORY": "reasoning_history",
 }
+# Marks dataclass fields that versioning.profile_sha256 skips while they hold their default.
+HASH_OMIT_DEFAULT = MappingProxyType({"hash": "omit_default"})
+REASONING_HISTORY_MODES = ("drop", "keep")
 _PRICING_FIELDS = (
     "input_usd_per_million_tokens",
     "output_usd_per_million_tokens",
@@ -106,6 +111,11 @@ class ModelProfile:
     api_mode: str = "openai"
     pricing: ModelPricing | None = None
     fallback: tuple[str, ...] = ()
+    # Reasoning ("thinking") handling. Fields added after profile hashing existed
+    # are left out of the profile hash while at their default, so older runs do
+    # not report config drift.
+    reasoning_tags: bool = field(default=False, metadata=HASH_OMIT_DEFAULT)
+    reasoning_history: str = field(default="drop", metadata=HASH_OMIT_DEFAULT)
 
     def __post_init__(self) -> None:
         if not self.adapter.strip():
@@ -147,6 +157,12 @@ class ModelProfile:
         if len(set(fallback)) != len(fallback):
             raise ConfigError("model profile fallback must not repeat a profile")
         object.__setattr__(self, "fallback", fallback)
+        if not isinstance(self.reasoning_tags, bool):
+            raise ConfigError("model profile reasoning_tags must be true or false")
+        if self.reasoning_history not in REASONING_HISTORY_MODES:
+            raise ConfigError(
+                f"model profile reasoning_history must be one of: {', '.join(REASONING_HISTORY_MODES)}"
+            )
 
 
 def _validated_headers_env(raw: Mapping[str, str]) -> dict[str, str]:
@@ -888,6 +904,10 @@ def _parse_environment_value(key: str, field_name: str, value: str) -> Any:
             return float(value)
         if field_name in {"max_retries", "context_window"}:
             return int(value)
+        if field_name == "reasoning_tags":
+            if value.strip().lower() not in {"true", "false", "1", "0"}:
+                raise ValueError("must be true or false")
+            return value.strip().lower() in {"true", "1"}
         if field_name in {"parameters", "headers_env", "pricing"}:
             parsed = json.loads(value)
             if not isinstance(parsed, dict):
@@ -920,6 +940,8 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
         "api_mode",
         "pricing",
         "fallback",
+        "reasoning_tags",
+        "reasoning_history",
     }
     unknown = set(raw) - allowed
     if unknown:
@@ -966,6 +988,10 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
             api_mode=_required_string(raw.get("api_mode", "openai"), f"models.{name}.api_mode"),
             pricing=_parse_pricing(name, raw.get("pricing")),
             fallback=tuple(fallback),
+            reasoning_tags=raw.get("reasoning_tags", False),
+            reasoning_history=_required_string(
+                raw.get("reasoning_history", "drop"), f"models.{name}.reasoning_history"
+            ),
         )
     except (TypeError, ValueError) as exc:
         if isinstance(exc, ConfigError):

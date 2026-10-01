@@ -145,7 +145,31 @@ server = "vllm"            # modal: vllm | sglang
 api_mode = "openai"        # ollama: openai | native
 pricing = { gpu_usd_per_second = 0.0 }       # validated now, used by cost estimation later
 fallback = ["llamacpp"]    # validated now, used by fallback routing later
+reasoning_tags = false     # split <think>...</think> out of the answer
+reasoning_history = "drop" # or "keep": send earlier reasoning back to the model
 ```
+
+### Reasoning ("thinking") models
+
+When a server returns a thinking model's reasoning separately, the harness keeps it on
+the assistant message (`Message.reasoning`) instead of discarding it. It is read from
+`reasoning_content` (vLLM, SGLang with `--reasoning-parser`, llama.cpp with
+`--reasoning-format deepseek`, LiteLLM), `reasoning` (Ollama's OpenAI mode, newer
+vLLM), or `thinking` (Ollama `api_mode = "native"` with `parameters.think = true`).
+Field names vary between server versions, so check yours with one request.
+
+- **Server without a reasoning parser:** `reasoning_tags = true` splits a leading
+  `<think>...</think>` block (or reasoning ending in `</think>`) out of the answer.
+  Streamed text is shown before the split, so the tags can appear in `--stream` output.
+- **History:** `reasoning_history = "drop"` (default) never sends earlier reasoning
+  back. Most chat templates strip it anyway, and the prompt prefix stays cacheable.
+  Use `"keep"` for models that expect their reasoning back (sent as
+  `reasoning_content`, or `thinking` for native Ollama); it is then counted against
+  `context_window`.
+- **Records:** the text is saved in the run snapshot. The `model_responded` event holds
+  only `reasoning_chars`.
+- **CLI:** `run`/`continue --show-reasoning` prints it to stderr, as it streams with
+  `--stream`. Custom stream listeners can implement `on_reasoning(run_id, step, text)`.
 
 Check a profile against a live server:
 

@@ -56,7 +56,13 @@ def profile_sha256(profile: Any) -> str:
 
 def _jsonable(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
-        return {f.name: _jsonable(getattr(value, f.name)) for f in fields(value)}
+        return {
+            f.name: _jsonable(getattr(value, f.name))
+            for f in fields(value)
+            # Fields added later stay out of the hash at their default, so
+            # adding them does not change existing digests.
+            if not (f.metadata.get("hash") == "omit_default" and getattr(value, f.name) == f.default)
+        }
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Mapping):

@@ -39,6 +39,9 @@ class ContextLimits:
 
     context_window: int
     output_reserve_tokens: int = 1024
+    # Whether assistant reasoning is sent back (reasoning_history = "keep"), so it
+    # must be counted against the window.
+    counts_reasoning: bool = False
 
     def __post_init__(self) -> None:
         if self.context_window <= 0:
@@ -143,7 +146,8 @@ class BudgetedContextBuilder:
         if summary is not None:
             block = f"\n\n[Summary of {summarized} earlier messages]\n{summary.content.strip()}"
             head[-1] = replace(head[-1], content=head[-1].content + block)
-        head_tokens = sum(self._message_tokens(message) for message in head)
+        reasoning = limits.counts_reasoning
+        head_tokens = sum(self._message_tokens(message, reasoning) for message in head)
         if budget <= 0 or head_tokens > budget:
             raise ContextWindowExceededError(
                 f"context window {limits.context_window} cannot hold the output reserve, "
@@ -153,7 +157,7 @@ class BudgetedContextBuilder:
         high_water = math.floor(budget * self._policy.high_water_ratio)
         low_water = math.floor(budget * self._policy.low_water_ratio)
 
-        unit_tokens = [sum(self._message_tokens(m) for m in unit) for unit in units]
+        unit_tokens = [sum(self._message_tokens(m, reasoning) for m in unit) for unit in units]
         total = head_tokens
         cut = 0
         for index, tokens in enumerate(unit_tokens):
@@ -203,8 +207,10 @@ class BudgetedContextBuilder:
     def _text_tokens(self, text: str) -> int:
         return math.ceil(len(text) / self._policy.chars_per_token)
 
-    def _message_tokens(self, message: Message) -> int:
+    def _message_tokens(self, message: Message, reasoning: bool = False) -> int:
         tokens = self._policy.message_overhead_tokens + self._text_tokens(message.content)
+        if reasoning and message.reasoning:
+            tokens += self._text_tokens(message.reasoning)
         for call in message.tool_calls:
             arguments = json.dumps(call.arguments, separators=(",", ":"), sort_keys=True)
             tokens += self._text_tokens(call.name) + self._text_tokens(arguments)
@@ -275,7 +281,11 @@ def limits_from_profiles(
         reserve = parameters.get("max_tokens")
         if not isinstance(reserve, int) or isinstance(reserve, bool) or reserve <= 0:
             reserve = default_output_reserve_tokens
-        limits[name] = ContextLimits(context_window=window, output_reserve_tokens=reserve)
+        limits[name] = ContextLimits(
+            context_window=window,
+            output_reserve_tokens=reserve,
+            counts_reasoning=getattr(profile, "reasoning_history", "drop") == "keep",
+        )
     return limits
 
 
