@@ -46,6 +46,10 @@ image = (
     # backend replaces the old hf_transfer extra for fast downloads. Wheels only:
     # a resolution problem then fails fast instead of compiling vLLM from source.
     .pip_install(VLLM_PACKAGE, extra_options="--only-binary=:all:")
+    # vLLM samples with FlashInfer by default, which compiles its kernel at startup and
+    # needs the CUDA toolkit (nvcc). This slim image has none, so startup failed with
+    # "Could not find nvcc". Use vLLM's PyTorch sampler instead (slightly slower sampling).
+    .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
 )
 hf_cache = modal.Volume.from_name("agent-harness-hf-cache", create_if_missing=True)
 vllm_cache = modal.Volume.from_name("agent-harness-vllm-cache", create_if_missing=True)
