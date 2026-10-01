@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from os import PathLike
 from pathlib import Path
@@ -32,7 +32,8 @@ from .context import (
     limits_from_profiles,
     summary_input_chars,
 )
-from .domain import ArtifactStore, PermissionMode, StreamListener, TelemetrySink
+from .domain import ArtifactStore, ModelResolver, PermissionMode, StreamListener, TelemetrySink
+from .guardrails import Guardrails
 from .hooks import CommandHook, HookEvent, HookRunner
 from .memory import MEMORY_SEARCH_SPEC, MEMORY_WRITE_SPEC, SQLiteMemoryStore, memory_tool_handlers
 from .permissions import PermissionPolicy
@@ -259,6 +260,7 @@ def build_application(
             ),
             task_tracking=config.tasks.enabled,
             ask_user=config.interaction.ask_user,
+            guardrails=_guardrails(config, models),
             system_context=system_context,
             snapshots=(
                 WorkspaceSnapshotter(
@@ -472,6 +474,15 @@ def _tool_loading(config: HarnessConfig, runtime: ToolRuntime) -> ToolLoadingPol
     if unknown:
         raise ConfigError(f"tool_loading.core lists unknown tools: {', '.join(unknown)}")
     return policy
+
+
+def _guardrails(config: HarnessConfig, models: ModelResolver) -> Guardrails | None:
+    if not config.guardrails.enabled:
+        return None
+    guard = config.guardrails
+    if guard.model.profile:  # a route name is resolved once, here
+        guard = replace(guard, model=replace(guard.model, profile=config.resolve_model_name(guard.model.profile)))
+    return Guardrails(guard, models=models)
 
 
 def _summarizer(

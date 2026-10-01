@@ -421,6 +421,70 @@ class HumanEvalSuite:
         )
 
 
+class GuardrailsSuite:
+    """Red-team evaluation of the input guard (Phase 12a).
+
+    Items are ``{"id", "text", "label": "attack" | "benign"}``; the category is the
+    label, so the report's per-category accuracy is the attack detection rate and
+    the benign pass rate (1 - false-positive rate). With ``--option model_guard=true``
+    the benchmark's profile (e.g. llama-guard3 on Ollama) also classifies each text;
+    ``--option deterministic=false`` evaluates the model guard alone.
+    """
+
+    name = "guardrails"
+    description = "Prompt-injection/jailbreak detection: attacks blocked, benign prompts allowed."
+
+    # Findings that mean "this is an attack" (zero-width or bidi characters alone are
+    # common in pasted text, so they are cleaned, not counted as attacks).
+    _SIGNALS = {"injection", "prompt_extraction", "encoded_payloads", "denylist"}
+
+    def load(self, path: str | Path, options: Mapping[str, Any]) -> list[BenchItem]:
+        items = []
+        for index, record in enumerate(load_records(path)):
+            text, label = record.get("text"), record.get("label")
+            if not isinstance(text, str) or label not in {"attack", "benign"}:
+                raise DatasetError(f"guardrails record {index} needs 'text' and label 'attack' or 'benign'")
+            items.append(BenchItem(str(record.get("id", f"guard-{index}")), {"text": text}, label, category=label))
+        return items
+
+    async def run(self, item: BenchItem, context: BenchContext) -> ItemResult:
+        from agent_harness.guardrails import Guardrails, GuardrailsConfig
+        from agent_harness.guardrails.config import ModelGuardConfig
+
+        started = time.monotonic()
+        use_model = _truthy(context.options.get("model_guard", False))
+        deterministic = _truthy(context.options.get("deterministic", True))
+        config = GuardrailsConfig(enabled=True, model=ModelGuardConfig(
+            profile=context.profile if use_model else "", check=("input",)))
+        guard = Guardrails(config, models=context.models)
+        text = item.input["text"]
+        signals: list[str] = []
+        if deterministic:
+            decision = guard.check_input(text)
+            signals = sorted({f"{f.detector}:{f.category}" for f, action in decision.findings
+                              if action != "allow" and (f.detector in self._SIGNALS
+                                                        or f.category == "tag_characters")})
+        tokens = 0
+        error = None
+        if use_model and not signals:
+            verdict = await guard.classify(text)
+            tokens = verdict.usage.total_tokens or 0
+            error = verdict.error
+            if not verdict.safe:
+                signals = [f"model:{c}" for c in verdict.categories]
+        predicted = "attack" if signals else "benign"
+        return ItemResult(
+            item.id, item.category, predicted == item.expected, expected=str(item.expected),
+            predicted=predicted, status="error" if error else "completed", tokens=tokens,
+            latency_seconds=time.monotonic() - started, error=error, details={"signals": signals},
+        )
+
+
+def _truthy(value: Any) -> bool:
+    return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 SUITES: dict[str, Suite] = {
-    suite.name: suite for suite in (Gsm8kSuite(), QaSuite(), BfclSuite(), HumanEvalSuite())
+    suite.name: suite
+    for suite in (Gsm8kSuite(), QaSuite(), BfclSuite(), HumanEvalSuite(), GuardrailsSuite())
 }

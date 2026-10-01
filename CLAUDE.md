@@ -341,6 +341,22 @@ prefix cache, overkill).
    pauses via the approval path with `kind = "question"`; `answer(run_id, call_id, text)`,
    CLI `answer`, API `POST /runs/{id}/answer`.
 
+**Phase 12 – Guardrails, chat API, reliability, operations** [guardrails, harness-operations, durable-agent-orchestration, model-gateway] — PRs against `main`, in this order:
+12a on `phase-12a-guardrails` — implemented; 12b (chat API) on `phase-12b-chat-api`; 12c (worker reliability) on
+`phase-12c-worker-reliability`; 12d (gateway/operations) on `phase-12d-gateway-ops`. The `/ui` chat page is deferred.
+1. Guardrails (`guardrails/`, `[guardrails]`, off by default; docs/GUARDRAILS.md): input guard on user text
+   (injection, prompt extraction, hidden characters, encoded payloads, flooding, PII, denylist) before each model
+   turn, tracked by `RunRecord.guarded_through`; output guard (canary marker in the system prompt, secrets, PII,
+   denylist) before a reply is recorded; untrusted tool output scanned; taint mode (side-effect tools need approval
+   after untrusted output, even in bypass). Blocked input gets `refusal_message` and the run completes
+   (`guardrail_refused` state event). Optional guard model (Llama Guard 3 via a profile, `parallel` option).
+   Events never contain matched text. `guardrails` bench suite for red-team detection rates.
+2. Chat API: SSE token streaming, CORS, chat transcript endpoint, end-user identity, webhooks.
+3. Worker reliability: persisted attempt counts and dead-lettering, create-and-enqueue in one transaction,
+   reconciler for orphaned runs, prompt cancellation of in-flight calls.
+4. Gateway/operations: per-profile concurrency and Retry-After, strict/prompt structured output, image inputs,
+   doctor improvements, bench resume retries errors, tenant-scoped artifacts, gc for artifacts/snapshots.
+
 ## Validation
 
 `docs/VALIDATION.md` describes six stages: static, unit, scenarios, smoke, benchmarks,
@@ -367,5 +383,6 @@ and gates.
 | Plans, delegation, parallel execution         | `skills/planning-delegation/SKILL.md`           |
 | Migrations, Postgres, tenancy, security, deploy | `skills/production-hardening/SKILL.md`        |
 | Tests, evaluations, release checks            | `skills/harness-verification/SKILL.md`          |
+| Guardrails, prompt injection, jailbreaks, PII | `skills/guardrails/SKILL.md`                    |
 
 The same skills are exposed to Claude Code via symlinks in `.claude/skills/`.

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from agent_harness.coding.config import CodingAgentConfig, parse_coding_config
 from agent_harness.domain import ToolRisk
+from agent_harness.guardrails.config import GuardrailsConfig, GuardrailsConfigError
 from agent_harness.secrets import is_secret_ref
 from agent_harness.mcp.config import McpServerConfig
 
@@ -495,6 +496,7 @@ class HarnessConfig:
     subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
     tasks: TasksConfig = field(default_factory=TasksConfig)
     interaction: InteractionConfig = field(default_factory=InteractionConfig)
+    guardrails: GuardrailsConfig = field(default_factory=GuardrailsConfig)
     instructions: InstructionsConfig = field(default_factory=InstructionsConfig)
     summarization: SummarizationConfig = field(default_factory=SummarizationConfig)
     tool_sources: tuple[ToolSourceConfig, ...] = ()
@@ -539,6 +541,9 @@ class HarnessConfig:
                     raise ConfigError(
                         f"model profile {name!r} falls back to unknown profile {target!r}"
                     )
+        guard = self.guardrails.model.profile
+        if self.guardrails.enabled and guard and guard not in copied and guard not in routes:
+            raise ConfigError(f"guardrails.model.profile {guard!r} is not a configured profile or route")
         object.__setattr__(self, "models", MappingProxyType(copied))
 
     def model_profile(self, name: str | None = None) -> ModelProfile:
@@ -645,6 +650,7 @@ def load_config(
         subagents=_parse_section(raw, "subagents", SubagentsConfig),
         tasks=_parse_section(raw, "tasks", TasksConfig),
         interaction=_parse_section(raw, "interaction", InteractionConfig),
+        guardrails=_parse_guardrails(raw.get("guardrails")),
         instructions=_parse_section(raw, "instructions", InstructionsConfig),
         summarization=_parse_section(raw, "summarization", SummarizationConfig),
         tool_sources=_parse_tool_sources(raw.get("tools")),
@@ -862,6 +868,13 @@ def _parse_hooks(raw: Any) -> tuple[HookConfig, ...]:
             item = {**item, "timeout_seconds": float(item["timeout_seconds"])}
         hooks.append(HookConfig(**item))
     return tuple(hooks)
+
+
+def _parse_guardrails(raw: Any) -> GuardrailsConfig:
+    try:
+        return GuardrailsConfig.from_mapping(raw)
+    except GuardrailsConfigError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _parse_section(raw: Mapping[str, Any], name: str, section_type: Any) -> Any:

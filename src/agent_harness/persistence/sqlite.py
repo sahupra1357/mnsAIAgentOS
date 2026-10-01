@@ -622,6 +622,7 @@ def _decode_run(value: str) -> RunRecord:
         created_by=data.get("created_by"),
         output_schema=data.get("output_schema"),
         output=data.get("output"),
+        guarded_through=int(data.get("guarded_through", 0)),
         plan=_decode_plan(data.get("plan")),
         context_summary=(
             ContextSummary(
