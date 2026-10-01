@@ -1,0 +1,19 @@
+name = "structured_output"
+prompt = "Which city is the capital of France? Reply as structured data."
+
+[output_schema]
+type = "object"
+required = ["city", "country"]
+additionalProperties = false
+[output_schema.properties.city]
+type = "string"
+[output_schema.properties.country]
+type = "string"
+
+[[model]]
+tool_calls = [{ name = "submit_result", arguments = { city = "Paris", country = "France" } }]
+
+[expect]
+status = "completed"
+tool_calls = ["submit_result"]
+result = { city = "Paris", country = "France" }

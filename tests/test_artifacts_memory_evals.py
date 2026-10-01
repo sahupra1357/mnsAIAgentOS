@@ -382,7 +382,7 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
             with redirect_stdout(out), redirect_stderr(err):
                 code = cli.main(["eval", "--config", str(config), str(EXAMPLES), "--report", str(report)])
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(report.read_text())["summary"], {"pass": 3, "fail": 0, "skip": 1})
+            self.assertEqual(json.loads(report.read_text())["summary"], {"pass": 6, "fail": 0, "skip": 1})
             self.assertIn("[PASS] calculator_multiplication", out.getvalue())
 
             failing = Path(directory, "failing.toml")

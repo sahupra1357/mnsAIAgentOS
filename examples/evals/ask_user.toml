@@ -1,0 +1,14 @@
+name = "ask_user"
+prompt = "Book a table for dinner."
+answers = ["Rome, at 8pm"]
+
+[[model]]
+tool_calls = [{ name = "ask_user", arguments = { question = "Which city and time?" } }]
+[[model]]
+content = "Booked a table in Rome at 8pm."
+
+[expect]
+status = "completed"
+tool_calls = ["ask_user"]
+output_contains = ["Rome"]
+events_include = ["approval_requested", "approval_resolved"]

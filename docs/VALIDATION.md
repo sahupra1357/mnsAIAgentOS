@@ -158,10 +158,19 @@ what it unloaded:
 Every action appears as a `residency:<profile>` line in the output and in
 `pipeline-summary.json`.
 
-Benchmarks resume from `results.jsonl`, and **items that ended in an error are not
-retried**. After fixing an environment problem (such as running out of memory),
-delete that benchmark's output directory, and any baseline recorded from the failed
-run, before running it again.
+**Resuming benchmarks.**
+- Benchmarks resume from `results.jsonl`.
+- Items that ended in `error` or `failed` (usually the environment: a server down, out
+  of memory) are **run again** on resume, and the newest result wins. Pass
+  `--no-retry-errors` to keep them.
+- A baseline recorded from a broken run still has to be deleted by hand.
+
+**Smoke-check settings.** `[[smoke]]` entries also take:
+- `strict = true`: a doctor WARN fails the stage. That includes "tool call came back as
+  plain text" and "ran out of tokens".
+- `max_tokens = 512`: thinking models such as Qwen3 and DeepSeek-R1 spend tokens
+  reasoning before they answer, so doctor's default 16- and 128-token probes can run
+  out.
 
 ## Recommended validation matrix
 

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import email.utils
 import json
 import os
+import random
 import time
 from agent_harness.secrets import resolve_secret
 
@@ -69,6 +72,7 @@ class OpenAICompatibleClient:
         sleep: Sleep = asyncio.sleep,
         preserve_raw_response: bool = False,
         monotonic: Callable[[], float] = time.monotonic,
+        jitter_random: Callable[[], float] = random.random,
     ) -> None:
         if profile.api_mode != "openai" and not self.supports_native_api:
             raise ModelConfigurationError(
@@ -81,6 +85,11 @@ class OpenAICompatibleClient:
         self._preserve_raw_response = preserve_raw_response
         self._warm = False
         self._monotonic = monotonic
+        self._random = jitter_random
+        # One client per profile per process (the gateway caches it), so this caps
+        # concurrent requests to the profile's server from this process.
+        self._semaphore = (asyncio.Semaphore(profile.max_concurrency)
+                           if profile.max_concurrency is not None else None)
 
     @property
     def profile(self) -> ModelProfile:
@@ -101,8 +110,9 @@ class OpenAICompatibleClient:
         for attempt in range(attempts):
             cause: BaseException | None = None
             try:
-                async with asyncio.timeout(timeout):
-                    response = await self._transport.post_json(url, payload, headers, timeout)
+                async with self._slot():  # waiting for a slot does not count against the timeout
+                    async with asyncio.timeout(timeout):
+                        response = await self._transport.post_json(url, payload, headers, timeout)
                 self._raise_for_status(response)
                 normalized = self._normalize(response)
                 self._warm = True
@@ -119,10 +129,25 @@ class OpenAICompatibleClient:
                 if cause is None:
                     raise error
                 raise error from cause
-            delay = self._profile.retry_backoff_seconds * (2**attempt)
+            delay = self.retry_delay(attempt, error)
             if delay:
                 await self._sleep(delay)
         raise AssertionError("unreachable retry loop")
+
+    def retry_delay(self, attempt: int, error: BaseException | None = None) -> float:
+        """Exponential backoff, at least the server's Retry-After (capped), with optional jitter."""
+
+        delay = self._profile.retry_backoff_seconds * (2**attempt)
+        retry_after = getattr(error, "retry_after", None)
+        if isinstance(retry_after, (int, float)):
+            delay = max(delay, min(float(retry_after), self._profile.max_retry_after_seconds))
+        jitter = self._profile.retry_jitter
+        if jitter and delay:
+            delay *= 1 + jitter * (2 * self._random() - 1)
+        return max(0.0, delay)
+
+    def _slot(self) -> Any:
+        return self._semaphore if self._semaphore is not None else contextlib.nullcontext()
 
     def _with_cost(self, response: ModelResponse, latency_seconds: float) -> ModelResponse:
         if response.usage.cost_usd is not None:
@@ -165,8 +190,10 @@ class OpenAICompatibleClient:
         headers = self.request_headers()
         headers["Accept"] = "text/event-stream"
         timeout = self._effective_timeout(request)
-        started = self._monotonic()
         accumulator = _StreamAccumulator()
+        slot = self._slot()
+        await slot.__aenter__()  # held for the whole stream
+        started = self._monotonic()
         try:
             async with asyncio.timeout(timeout):
                 streamed = await post_stream(self._completion_url(), payload, headers, timeout)
@@ -188,6 +215,8 @@ class OpenAICompatibleClient:
             raise RetryableProviderError(f"model stream failed: {exc}") from exc
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise MalformedResponseError(f"malformed model stream: {exc}") from exc
+        finally:
+            await slot.__aexit__(None, None, None)
         response = self._normalize_raw(accumulator.as_completion(), streamed.headers)
         self._warm = True
         yield ModelStreamEvent(response=self._with_cost(response, self._monotonic() - started))
@@ -288,17 +317,32 @@ class OpenAICompatibleClient:
             # Chat-completions implementations broadly support max_tokens.
             payload["max_tokens"] = request.max_output_tokens
         if request.response_schema is not None:
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "output", "schema": request.response_schema, "strict": True},
-            }
+            if self._profile.structured_output == "prompt":
+                # For servers that reject response_format: ask for JSON in the prompt instead
+                # (the orchestrator validates the result either way).
+                messages = payload["messages"]
+                assert isinstance(messages, list)
+                messages.append(schema_instruction(request.response_schema))
+            else:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "output", "schema": request.response_schema,
+                                    "strict": self._profile.structured_output == "strict"},
+                }
         if request.tool_choice is not None:
             payload["tool_choice"] = tool_choice_payload(request.tool_choice)
         return payload
 
     @staticmethod
     def _message_payload(message: Message) -> dict[str, object]:
-        result: dict[str, object] = {"role": message.role.value, "content": message.content}
+        content: object = message.content
+        if message.parts:
+            # OpenAI content array: the text, then each image (vision models).
+            content = [{"type": "text", "text": message.content}] + [
+                {"type": "image_url", "image_url": {"url": part.image_url}}
+                for part in message.parts if part.type == "image"
+            ]
+        result: dict[str, object] = {"role": message.role.value, "content": content}
         if message.name is not None:
             result["name"] = message.name
         if message.tool_call_id is not None:
@@ -335,12 +379,17 @@ class OpenAICompatibleClient:
         detail = _safe_error_detail(response.body)
         if response.status in {401, 403}:
             raise AuthenticationError(f"model authentication failed ({response.status}): {detail}")
+        retry_after = parse_retry_after(_header(response.headers, "retry-after"))
         if response.status == 429:
-            raise ThrottlingError(f"model request throttled: {detail}")
+            throttled = ThrottlingError(f"model request throttled: {detail}")
+            throttled.retry_after = retry_after
+            raise throttled
         if response.status in {408, 409, 425} or response.status >= 500:
-            raise RetryableProviderError(
+            transient = RetryableProviderError(
                 f"transient model provider error ({response.status}): {detail}"
             )
+            transient.retry_after = retry_after
+            raise transient
         raise ProviderError(f"model provider error ({response.status}): {detail}")
 
     def _normalize(self, response: HttpResponse) -> ModelResponse:
@@ -397,6 +446,33 @@ class OpenAICompatibleClient:
             metadata=metadata,
             reasoning=reasoning,
         )
+
+
+def schema_instruction(schema: Mapping[str, Any]) -> dict[str, object]:
+    """The user message that asks for JSON when ``structured_output = "prompt"``."""
+
+    return {
+        "role": "user",
+        "content": "Respond with only a JSON value (no other text, no code fence) that matches "
+                   "this JSON Schema:\n" + json.dumps(schema, sort_keys=True, separators=(",", ":")),
+    }
+
+
+def parse_retry_after(value: str | None, *, now: Callable[[], float] = time.time) -> float | None:
+    """Seconds to wait from a Retry-After header (delta-seconds or an HTTP date)."""
+
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    return max(0.0, when.timestamp() - now())
 
 
 _TOOL_CHOICE_MODES = frozenset({"auto", "none", "required"})

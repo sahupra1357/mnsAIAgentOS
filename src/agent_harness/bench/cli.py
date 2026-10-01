@@ -61,6 +61,7 @@ class BenchmarkSpec:
     out: Path | None = None
     docker_image: str = "python:3.12-slim"
     unsafe_local_execution: bool = False
+    retry_errors: bool = True
     baseline: Path | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
 
@@ -118,7 +119,7 @@ async def execute_benchmark(
 
     results = await run_benchmark(
         suite, selected, context, concurrency=spec.concurrency, results_path=results_path,
-        progress=progress,
+        progress=progress, retry_errors=spec.retry_errors,
     )
     selected_profile = config.models[profile]
     report = build_report(
@@ -280,6 +281,10 @@ async def run_pipeline(
                     argv.append("--skip-tools")
                 if entry.get("skip_cache", True):
                     argv.append("--skip-cache")
+                if entry.get("strict"):
+                    argv.append("--strict")  # a WARN (e.g. tool calls as plain text) fails the stage
+                if entry.get("max_tokens"):
+                    argv += ["--max-tokens", str(int(entry["max_tokens"]))]
                 make_room(str(entry["profile"]))
                 ok, detail = _run_command(argv, cwd=repo, env=env)
                 results.append(StageResult(f"smoke:{entry['profile']}", "pass" if ok else "fail", detail))
@@ -390,6 +395,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--option", action="append", default=[], metavar="KEY=VALUE",
                      help="suite option, e.g. question_field=query, match=exact, tools=default")
     run.add_argument("--out", type=Path, help="output directory (results.jsonl + report.json); resumable")
+    run.add_argument("--no-retry-errors", action="store_true",
+                     help="on resume, keep items that ended in error/failed instead of running them again")
     run.add_argument("--docker-image", default="python:3.12-slim", help="humaneval sandbox image")
     run.add_argument("--unsafe-local-execution", action="store_true",
                      help="humaneval: run generated code on this host (trusted use only)")
@@ -433,6 +440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_steps=args.max_steps, max_wall_seconds=args.max_wall_seconds, options=options,
                 out=args.out, docker_image=args.docker_image,
                 unsafe_local_execution=args.unsafe_local_execution,
+                retry_errors=not args.no_retry_errors,
             )
             report, _ = asyncio.run(execute_benchmark(spec))
             _print_report(report)

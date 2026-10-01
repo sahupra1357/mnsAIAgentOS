@@ -343,7 +343,8 @@ prefix cache, overkill).
 
 **Phase 12 – Guardrails, chat API, reliability, operations** [guardrails, harness-operations, durable-agent-orchestration, model-gateway] — PRs against `main`, in this order:
 12a on `phase-12a-guardrails` — implemented; 12b (chat API) on `phase-12b-chat-api` — implemented; 12c (worker reliability) on
-`phase-12c-worker-reliability` — implemented; 12d (gateway/operations) on `phase-12d-gateway-ops`. The `/ui` chat page is deferred.
+`phase-12c-worker-reliability` — implemented; 12d (gateway/operations) on `phase-12d-gateway-ops` — implemented.
+All of Phase 12 is implemented. The `/ui` chat page is deferred.
 1. Guardrails (`guardrails/`, `[guardrails]`, off by default; docs/GUARDRAILS.md): input guard on user text
    (injection, prompt extraction, hidden characters, encoded payloads, flooding, PII, denylist) before each model
    turn, tracked by `RunRecord.guarded_through`; output guard (canary marker in the system prompt, secrets, PII,
@@ -358,8 +359,16 @@ prefix cache, overkill).
    + `run_failed`); `create_run(enqueue=True)` → `create_run_and_enqueue` in one transaction and
    `RunRecord.dispatch = "queue"`; `Worker.reconcile` requeues stale orphaned queue runs (never inline/CLI runs);
    the heartbeat polls `is_cancelled` and stops in-flight calls.
-4. Gateway/operations: per-profile concurrency and Retry-After, strict/prompt structured output, image inputs,
-   doctor improvements, bench resume retries errors, tenant-scoped artifacts, gc for artifacts/snapshots.
+4. Gateway/operations:
+   - profile `max_concurrency`, `retry_jitter`, `max_retry_after_seconds` (Retry-After honoured), and
+     `structured_output = strict|non_strict|prompt` (all hash-stable at their defaults);
+   - images via `Message.parts`, `ContentPart`, CLI `--image`, and API `images`;
+   - `doctor --max-tokens/--strict`, an "ran out of tokens" message, and a router model check; smoke `strict` and
+     `max_tokens`;
+   - bench resume re-runs `error`/`failed` items;
+   - `GET /runs/{id}/artifacts/{aid}` (the global route is admin-only with tenant keys);
+   - `gc` removes old unreferenced artifacts and snapshots;
+   - eval scenarios take `output_schema`, `answers`, `[guardrails]`, and `expect.result`.
 
 ## Validation
 

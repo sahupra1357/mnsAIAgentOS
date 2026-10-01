@@ -20,6 +20,18 @@ payload unchanged. The OpenAI-compatible adapter maps them to `response_format`
 `output_schema` (see `structured_output.py`) and validates results itself, because servers
 enforce both loosely.
 
+Gateway behaviour per profile (Phase 12d):
+- `max_concurrency` is a semaphore on the cached client: one per profile per process.
+- `Retry-After` (seconds or an HTTP date) on 429/5xx sets `RetryableModelError.retry_after`.
+  `retry_delay` takes the larger of backoff and that delay, capped by
+  `max_retry_after_seconds`, then applies `retry_jitter`.
+- `structured_output = "prompt"` sends the schema as a final user message instead of
+  `response_format` / `format`.
+- New profile fields use `HASH_OMIT_DEFAULT`.
+
+`Message.parts` (images) becomes an OpenAI content array (text, then `image_url`), or
+native Ollama `images` (base64 from data URLs only).
+
 Preserve provider-only fields inside adapter metadata. Do not leak provider SDK types into shared domain objects.
 
 ## Configuration
