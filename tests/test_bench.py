@@ -6,10 +6,12 @@ import asyncio
 import gzip
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from agent_harness.bench import SUITES, BenchConfigError, BenchContext, compare_reports, load_records
 from agent_harness.bench.cli import BenchmarkSpec, execute_benchmark, main, run_pipeline
@@ -255,6 +257,28 @@ profile = "ollama"
             self.assertIn("max_accuracy_drop", gate.detail)
             summary = json.loads(Path(directory, "out", "pipeline-summary.json").read_text())
             self.assertEqual(len(summary), 4)
+
+    async def test_offline_stages_ignore_harness_overrides(self) -> None:
+        seen: dict[str, dict[str, str]] = {}
+
+        def fake_run(argv, *, cwd, env):
+            seen[" ".join(argv[1:4])] = dict(env)
+            return True, "ok"
+
+        overrides = {"AGENT_HARNESS_DEFAULT_MODEL_PROFILE": "ollama",
+                     "AGENT_HARNESS_MODEL__OLLAMA__MODEL": "gpt-oss:20b",
+                     "AGENT_HARNESS_USER_SETTINGS": "/home/me/settings.toml"}
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, overrides), \
+                mock.patch("agent_harness.bench.cli._run_command", side_effect=fake_run):
+            await run_pipeline(self._plan(Path(directory)), stages=("unit", "scenarios"))
+            self.assertEqual(os.environ["AGENT_HARNESS_MODEL__OLLAMA__MODEL"], "gpt-oss:20b")  # caller untouched
+        self.assertEqual(len(seen), 2)
+        for env in seen.values():
+            self.assertNotIn("AGENT_HARNESS_DEFAULT_MODEL_PROFILE", env)
+            self.assertNotIn("AGENT_HARNESS_MODEL__OLLAMA__MODEL", env)
+            self.assertFalse(Path(env["AGENT_HARNESS_USER_SETTINGS"]).exists())
+            self.assertFalse(Path(env["AGENT_HARNESS_ENTERPRISE_SETTINGS"]).exists())
 
     async def test_plan_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

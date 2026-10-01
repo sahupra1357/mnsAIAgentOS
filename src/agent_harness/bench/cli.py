@@ -207,6 +207,13 @@ async def run_pipeline(
     src = repo / "src"
     if src.is_dir():
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(src), env.get("PYTHONPATH")]))
+    # The offline stages run as CI does: without the caller's harness overrides
+    # (AGENT_HARNESS_MODEL__*, default profile, ...) and without user/enterprise
+    # settings files, which tests and scripted scenarios would otherwise pick up.
+    # Smoke and benchmarks keep the full environment: they target the live setup.
+    hermetic = {k: v for k, v in env.items() if not k.startswith("AGENT_HARNESS_")}
+    hermetic["AGENT_HARNESS_USER_SETTINGS"] = os.devnull + ".agent-harness-user-settings"
+    hermetic["AGENT_HARNESS_ENTERPRISE_SETTINGS"] = os.devnull + ".agent-harness-enterprise-settings"
     python = sys.executable
     results: list[StageResult] = []
     reports: list[tuple[BenchmarkSpec, dict[str, Any]]] = []
@@ -227,14 +234,16 @@ async def run_pipeline(
                 ok, detail = _run_command(argv, cwd=repo, env={**env, "MYPYPATH": str(src)})
                 results.append(StageResult(f"static:{name}", "pass" if ok else "fail", detail))
         elif stage == "unit":
-            ok, detail = _run_command([python, "-m", "unittest", "discover", "-s", "tests"], cwd=repo, env=env)
+            ok, detail = _run_command(
+                [python, "-m", "unittest", "discover", "-s", "tests"], cwd=repo, env=hermetic
+            )
             results.append(StageResult("unit", "pass" if ok else "fail", detail))
         elif stage == "scenarios":
             path = base / plan.get("scenarios", {}).get("path", "examples/evals")
             ok, detail = _run_command(
                 [python, "-m", "agent_harness", "eval", "--config", str(config), str(path),
                  "--report", str(output_dir / "scenarios.json")],
-                cwd=repo, env=env,
+                cwd=repo, env=hermetic,
             )
             results.append(StageResult("scenarios", "pass" if ok else "fail", detail))
         elif stage == "smoke":
