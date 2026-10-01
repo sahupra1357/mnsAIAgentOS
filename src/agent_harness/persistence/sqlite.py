@@ -390,6 +390,9 @@ class SQLiteRunStore:
         if query.statuses:
             clauses.append(f"status IN ({','.join('?' * len(query.statuses))})")
             params.extend(status.value for status in query.statuses)
+        if query.end_user is not None:
+            clauses.append("json_extract(snapshot_json, '$.end_user') = ?")
+            params.append(query.end_user)
         if query.parent_run_id is not None:
             clauses.append("parent_run_id = ?")
             params.append(query.parent_run_id)
@@ -623,6 +626,7 @@ def _decode_run(value: str) -> RunRecord:
         output_schema=data.get("output_schema"),
         output=data.get("output"),
         guarded_through=int(data.get("guarded_through", 0)),
+        end_user=data.get("end_user"),
         plan=_decode_plan(data.get("plan")),
         context_summary=(
             ContextSummary(

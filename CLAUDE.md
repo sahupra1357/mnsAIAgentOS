@@ -342,7 +342,7 @@ prefix cache, overkill).
    CLI `answer`, API `POST /runs/{id}/answer`.
 
 **Phase 12 – Guardrails, chat API, reliability, operations** [guardrails, harness-operations, durable-agent-orchestration, model-gateway] — PRs against `main`, in this order:
-12a on `phase-12a-guardrails` — implemented; 12b (chat API) on `phase-12b-chat-api`; 12c (worker reliability) on
+12a on `phase-12a-guardrails` — implemented; 12b (chat API) on `phase-12b-chat-api` — implemented; 12c (worker reliability) on
 `phase-12c-worker-reliability`; 12d (gateway/operations) on `phase-12d-gateway-ops`. The `/ui` chat page is deferred.
 1. Guardrails (`guardrails/`, `[guardrails]`, off by default; docs/GUARDRAILS.md): input guard on user text
    (injection, prompt extraction, hidden characters, encoded payloads, flooding, PII, denylist) before each model
@@ -351,7 +351,9 @@ prefix cache, overkill).
    after untrusted output, even in bypass). Blocked input gets `refusal_message` and the run completes
    (`guardrail_refused` state event). Optional guard model (Llama Guard 3 via a profile, `parallel` option).
    Events never contain matched text. `guardrails` bench suite for red-team detection rates.
-2. Chat API: SSE token streaming, CORS, chat transcript endpoint, end-user identity, webhooks.
+2. Chat API: `GET /runs/{id}/stream` (persisted events plus `StreamHub` token previews from in-process
+   workers), `GET /runs/{id}/messages` (chat transcript), `[api] cors_origins`, `user` / `RunRecord.end_user`
+   (audit and listing filter; per-user quotas not included), `[notifications]` webhooks from workers.
 3. Worker reliability: persisted attempt counts and dead-lettering, create-and-enqueue in one transaction,
    reconciler for orphaned runs, prompt cancellation of in-flight calls.
 4. Gateway/operations: per-profile concurrency and Retry-After, strict/prompt structured output, image inputs,

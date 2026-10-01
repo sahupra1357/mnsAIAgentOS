@@ -33,6 +33,7 @@ def summarize_run(run: RunRecord) -> RunSummary:
         depth=run.depth,
         error=run.error,
         title=_title(run),
+        end_user=run.end_user,
     )
 
 

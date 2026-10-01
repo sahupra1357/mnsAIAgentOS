@@ -834,10 +834,12 @@ export AGENT_HARNESS_API_TOKEN="$(python3 -c 'import secrets; print(secrets.toke
 | `GET /healthz` | Liveness (no auth) |
 | `GET /profiles` | Profiles (adapter, model, context window, fallback) and routes |
 | `GET /runs` | List runs newest first: `status`, `parent`, `children`, `created_after`, `created_before`, `limit` (≤ 200), `cursor` → `{"runs", "next_cursor"}` |
-| `POST /runs` | `{"prompt", "system"?, "model_profile"?, "budget"?}` → `202 {"id", ...}` (queued) |
+| `POST /runs` | `{"prompt", "system"?, "model_profile"?, "budget"?, "output_schema"?, "user"?}` → `202 {"id", ...}` (queued) |
 | `GET /runs/{id}` | Status, usage, error, final `output`, and `pending_approval` |
 | `GET /runs/{id}/events?after=N` | Event log from index N |
 | `GET /runs/{id}/events/stream?after=N` | Server-sent events until the run completes or pauses |
+| `GET /runs/{id}/stream?after=N` | The same, plus live `delta` token previews (`text`/`reasoning`) for chat UIs |
+| `GET /runs/{id}/messages` | Chat transcript: user and assistant turns, `ask_user` questions and answers (`?reasoning=true` adds reasoning) |
 | `POST /runs/{id}/cancel` | Cancel |
 | `POST /runs/{id}/resume` | Re-enqueue an interrupted run |
 | `GET /runs/{id}/approval` | The pending tool call, with its arguments |
@@ -851,6 +853,44 @@ All routes except `/healthz` require `Authorization: Bearer $AGENT_HARNESS_API_T
 the boundary: unknown fields, oversized text, and out-of-range budgets are rejected. A
 run that keeps raising unexpected errors is removed from the queue after 3 attempts;
 it can be resumed explicitly after investigation.
+
+### Building a chat front end on the API
+
+| Chat action | Endpoint |
+|---|---|
+| New chat | `POST /runs {"prompt", "user": "<end-user id>"}` |
+| Send a message | `POST /runs/{id}/messages {"content"}` |
+| Show the reply as it is written | `GET /runs/{id}/stream` |
+| Render the conversation | `GET /runs/{id}/messages` |
+| Sidebar | `GET /runs?user=<id>` |
+| Stop | `POST /runs/{id}/cancel` |
+| Answer a question or approve | `POST /runs/{id}/answer` and `POST /runs/{id}/approval` |
+
+- **Token previews.**
+  - `delta` events in `GET /runs/{id}/stream` come from runs executed **in the API
+    process** (`agent-harness serve --workers N`); separate `worker` processes publish
+    none, and clients then see each reply when it is recorded.
+  - Previews are not authoritative: render the final text from `model_responded` or
+    `GET /runs/{id}/messages`.
+  - With output guardrails on, replies are checked before they are shown, so no
+    previews are sent.
+- **`user`** records which end user a service created the run for. It goes on the
+  run, in `run_created` for audit, and is filterable in `GET /runs?user=` and
+  `agent-harness runs --user`. It is set by an operator key on the user's behalf;
+  it is not authentication.
+- **CORS.** Allow browser origins with `[api] cors_origins = ["https://chat.example.com"]`
+  (`"*"` allows any origin). Preflight requests are answered without authentication;
+  every other request still needs a bearer key.
+- **Webhooks.** These avoid polling for paused or finished runs:
+  ```toml
+  [notifications]
+  webhook_url = "https://hooks.example.com/agent-harness"
+  secret_env = "AGENT_HARNESS_WEBHOOK_SECRET"   # adds X-Agent-Harness-Signature: sha256=<HMAC of the body>
+  statuses = ["awaiting_input", "completed", "failed", "cancelled", "budget_exhausted"]
+  ```
+  - Workers POST `{"run_id", "status", "tenant", "end_user", "parent_run_id", "error",
+    "updated_at"}`, never message text.
+  - Delivery is best effort (2 retries) and never affects the run.
 
 ## Artifacts, Memory, and Evaluations
 

@@ -18,10 +18,12 @@ a principal with a tenant and a role (viewer < operator < admin; see
     GET  /runs?status=&parent=&children=&created_after=&created_before=&limit=&cursor=&tenant=
                                     (newest first; ``tenant`` only for all-tenant principals)
     POST /runs                      {"prompt", "system"?, "model_profile"?, "budget"?, "mode"?,
-                                     "planning"?, "output_schema"?}
+                                     "planning"?, "output_schema"?, "user"?}
     GET  /runs/{id}
     GET  /runs/{id}/events?after=N
     GET  /runs/{id}/events/stream?after=N   (server-sent events)
+    GET  /runs/{id}/stream?after=N  (server-sent events plus live token previews: chat UIs)
+    GET  /runs/{id}/messages        (chat transcript: user and assistant turns only)
     POST /runs/{id}/cancel
     POST /runs/{id}/messages       {"content", "budget"?}  (continue a completed run)
     POST /runs/{id}/steer          {"content"}  (message for a run in progress)
@@ -48,6 +50,8 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from agent_harness.access import Principal, PrincipalDirectory, Quota, QuotaExceeded, check_quota
+from agent_harness.notifications import notifier_from_config
+from agent_harness.streaming import StreamHub
 from agent_harness.access import Role as AccessRole
 from agent_harness.config import ConfigError, HarnessConfig
 from agent_harness.domain import (
@@ -108,6 +112,8 @@ class HarnessAPI:
         templates: Mapping[str, Template] | None = None,
         principals: PrincipalDirectory | None = None,
         quotas: Mapping[str, Quota] | None = None,
+        stream_hub: StreamHub | None = None,
+        cors_origins: Sequence[str] = (),
     ) -> None:
         if auth_token is not None and len(auth_token) < 16:
             raise ValueError("API auth token must be at least 16 characters")
@@ -130,6 +136,8 @@ class HarnessAPI:
         self._templates = dict(templates or {})
         self._stop = asyncio.Event()
         self._worker_tasks: list[asyncio.Task[None]] = []
+        self._hub = stream_hub
+        self._cors = frozenset(cors_origins)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -137,6 +145,18 @@ class HarnessAPI:
             return
         if scope["type"] != "http":
             return
+        origin = _header(scope, b"origin")
+        allowed = origin if origin and ("*" in self._cors or origin in self._cors) else None
+        if allowed is not None:
+            send = _with_cors(send, allowed)
+            if scope["method"] == "OPTIONS":  # preflight: answered before authentication
+                await send({"type": "http.response.start", "status": 204, "headers": [
+                    (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
+                    (b"access-control-allow-headers", b"authorization, content-type"),
+                    (b"access-control-max-age", b"600"),
+                ]})
+                await send({"type": "http.response.body", "body": b""})
+                return
         try:
             await self._dispatch(scope, receive, send)
         except ApiError as exc:
@@ -228,6 +248,8 @@ class HarnessAPI:
             ("GET", ""): lambda: self._send_run(send, run_id),
             ("GET", "/events"): lambda: self._send_events(send, run_id, query),
             ("GET", "/events/stream"): lambda: self._stream_events(send, run_id, query),
+            ("GET", "/stream"): lambda: self._stream_chat(send, run_id, query),
+            ("GET", "/messages"): lambda: self._send_transcript(send, run_id, query),
             ("POST", "/cancel"): lambda: self._cancel(send, run_id),
             ("POST", "/messages"): lambda: self._continue(send, run_id, receive, owned.tenant),
             ("POST", "/steer"): lambda: self._steer(send, run_id, receive),
@@ -308,7 +330,7 @@ class HarnessAPI:
 
     async def _create_run(self, body: dict[str, Any], principal: Principal) -> dict[str, Any]:
         unknown = set(body) - {"prompt", "system", "model_profile", "budget", "mode", "template_args",
-                               "planning", "output_schema"}
+                               "planning", "output_schema", "user"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         prompt = _required_text(body.get("prompt"), "prompt")
@@ -350,6 +372,7 @@ class HarnessAPI:
             tenant=tenant,
             created_by=principal.name,
             output_schema=output_schema,
+            end_user=_text(body.get("user"), "user", required=False),
         )
         await self._queue.enqueue(run.id)
         return {"id": run.id, "status": run.status.value, "model_profile": profile}
@@ -376,6 +399,7 @@ class HarnessAPI:
             run_query = RunQuery(
                 tenant=tenant,
                 statuses=statuses,
+                end_user=_single(query, "user"),
                 parent_run_id=_single(query, "parent"),
                 include_children=(_single(query, "children") or "").lower() in {"1", "true", "yes"},
                 created_after=_timestamp(_single(query, "created_after")),
@@ -416,6 +440,7 @@ class HarnessAPI:
             "mode": run.mode.value,
             "parent_run_id": run.parent_run_id,
             "depth": run.depth,
+            "end_user": run.end_user,
             "todos": [
                 {"id": t.id, "content": t.content, "status": t.status.value} for t in run.todos
             ],
@@ -470,6 +495,58 @@ class HarnessAPI:
                 await send({"type": "http.response.body", "body": f"event: end\ndata: {end}\n\n".encode()})
                 return
             await asyncio.sleep(self._stream_poll)
+
+    async def _stream_chat(self, send: Send, run_id: str, query: Mapping[str, list[str]]) -> None:
+        """Server-sent events for chat UIs: live ``delta`` previews plus persisted events.
+
+        ``delta`` events (``{"type": "text"|"reasoning", "step", "text"}``) are previews
+        from runs executing in this process; the persisted events (``model_responded``,
+        ``run_completed``, ...) and ``GET /runs/{id}/messages`` are authoritative. The
+        stream ends with ``end`` once the run is settled (finished or waiting for input).
+        """
+
+        await self._load(run_id)
+        cursor = _after(query)
+        await send({"type": "http.response.start", "status": 200, "headers": [
+            (b"content-type", b"text/event-stream"), (b"cache-control", b"no-store"),
+            (b"x-accel-buffering", b"no"),
+        ]})
+
+        async def emit(name: str, data: Any, event_id: int | None = None) -> None:
+            head = f"id: {event_id}\n" if event_id is not None else ""
+            chunk = f"{head}event: {name}\ndata: {json.dumps(data, sort_keys=True, default=str)}\n\n"
+            await send({"type": "http.response.body", "body": chunk.encode(), "more_body": True})
+
+        with (self._hub.subscribe(run_id) if self._hub is not None else contextlib.nullcontext()) as deltas:
+            while True:
+                events = list(await self._store.list_events(run_id))
+                for index in range(cursor, len(events)):
+                    await emit(events[index].type.value, _event_payload(index, events[index]), index)
+                cursor = len(events)
+                run = await self._load(run_id)
+                if run_is_settled(run):
+                    await send({"type": "http.response.body",
+                                "body": f"event: end\ndata: {json.dumps({'status': run.status.value})}\n\n".encode()})
+                    return
+                if deltas is None:
+                    await asyncio.sleep(self._stream_poll)
+                    continue
+                with contextlib.suppress(asyncio.TimeoutError):
+                    item = await asyncio.wait_for(deltas.get(), timeout=self._stream_poll)
+                    await emit("delta", item)
+                    while not deltas.empty():
+                        await emit("delta", deltas.get_nowait())
+
+    async def _send_transcript(self, send: Send, run_id: str, query: Mapping[str, list[str]]) -> None:
+        run = await self._load(run_id)
+        with_reasoning = (_single(query, "reasoning") or "").lower() in {"1", "true", "yes"}
+        await _json(send, 200, {
+            "id": run.id,
+            "status": run.status.value,
+            "messages": _transcript(run, with_reasoning=with_reasoning),
+            "pending_approval": await self._approval_payload(run_id)
+            if run.status is RunStatus.AWAITING_INPUT else None,
+        })
 
     async def _send_artifact(self, send: Send, artifact_id: str) -> None:
         data = await self._artifacts.get(artifact_id) if self._artifacts else None
@@ -754,6 +831,49 @@ def _event_payload(index: int, event: Any) -> dict[str, Any]:
     }
 
 
+def _header(scope: Scope, name: bytes) -> str | None:
+    for key, value in scope.get("headers", []):
+        if key.lower() == name:
+            return bytes(value).decode("latin-1")
+    return None
+
+
+def _with_cors(send: Send, origin: str) -> Send:
+    async def wrapped(message: Mapping[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            headers = list(message.get("headers", []))
+            headers += [(b"access-control-allow-origin", origin.encode("latin-1")), (b"vary", b"origin")]
+            message = {**message, "headers": headers}
+        await send(message)
+
+    return wrapped
+
+
+def _transcript(run: RunRecord, *, with_reasoning: bool = False) -> list[dict[str, Any]]:
+    """User and assistant turns as a chat shows them (no system, tool, or hook messages)."""
+
+    turns: list[dict[str, Any]] = []
+    for index, message in enumerate(run.messages):
+        if message.role is Role.USER and not message.content.startswith("[Context from hooks]"):
+            turns.append({"index": index, "role": "user", "content": message.content})
+        elif message.role is Role.ASSISTANT:
+            for call in message.tool_calls:
+                if call.name == "ask_user":
+                    turns.append({"index": index, "role": "assistant", "kind": "question",
+                                  "content": str(call.arguments.get("question", "")),
+                                  "options": list(call.arguments.get("options") or [])})
+            if message.content:
+                turn: dict[str, Any] = {"index": index, "role": "assistant", "content": message.content}
+                if with_reasoning and message.reasoning:
+                    turn["reasoning"] = message.reasoning
+                turns.append(turn)
+        elif (message.role is Role.TOOL and message.name == "ask_user"
+              and message.content.startswith("The user answered: ")):
+            turns.append({"index": index, "role": "user", "kind": "answer",
+                          "content": message.content[len("The user answered: "):]})
+    return turns
+
+
 def _single(query: Mapping[str, list[str]], name: str) -> str | None:
     values = query.get(name)
     if not values:
@@ -778,6 +898,7 @@ def _summary_payload(summary: RunSummary) -> dict[str, Any]:
         "model_profile": summary.model_profile,
         "tenant": summary.tenant,
         "created_by": summary.created_by,
+        "end_user": summary.end_user,
         "parent_run_id": summary.parent_run_id,
         "depth": summary.depth,
         "step_count": summary.step_count,
@@ -812,6 +933,7 @@ def create_api(
     worker_count: int = 1,
     lease_seconds: float = 60.0,
     poll_interval_seconds: float = 1.0,
+    stream_hub: StreamHub | None = None,
 ) -> HarnessAPI:
     """Build the API for a :class:`~agent_harness.application.HarnessApplication`."""
 
@@ -826,6 +948,7 @@ def create_api(
             app.store,
             lease_seconds=lease_seconds,
             poll_interval_seconds=poll_interval_seconds,
+            notifier=notifier_from_config(app.config),
         )
         for _ in range(worker_count)
     ]
@@ -841,4 +964,6 @@ def create_api(
         artifacts=app.artifacts,
         templates=app.templates,
         principals=PrincipalDirectory(api_keys_from_config(app.config.api_keys), legacy_token=auth_token),
+        stream_hub=stream_hub,
+        cors_origins=app.config.api_cors_origins,
     )

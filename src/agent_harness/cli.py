@@ -22,7 +22,9 @@ from .coding import CODING_AGENT_SYSTEM_PROMPT
 from .config import ConfigError, load_config
 from .application import open_memory_store
 from .memory import SQLiteMemoryStore
-from .domain import HarnessError, Message, Role, RunBudget, RunQuery, RunRecord, RunStatus, utc_now
+from .domain import (
+    HarnessError, Message, Role, RunBudget, RunQuery, RunRecord, RunStatus, StreamListener, utc_now,
+)
 from .model_gateway import ModelGateway, StdlibHttpTransport
 from .model_gateway.diagnostics import CheckStatus, diagnose
 from .api import create_api
@@ -32,6 +34,8 @@ from .settings import SettingsError, load_layers, render_effective
 from .templates import expand_prompt
 from .evals import load_scenarios, run_scenario, summarize
 from .telemetry import JsonLinesTelemetry
+from .notifications import notifier_from_config
+from .streaming import StreamHub
 from .worker import Worker
 
 
@@ -151,6 +155,7 @@ def _parser() -> argparse.ArgumentParser:
     runs.add_argument("--status", action="append", default=[],
                       help="only these statuses (repeat or comma-separate)")
     runs.add_argument("--tenant", help="only this tenant's runs")
+    runs.add_argument("--user", help="only runs created for this end user")
     runs.add_argument("--parent", help="list the subagent runs of this run")
     runs.add_argument("--children", action="store_true", help="include subagent runs")
     runs.add_argument("--limit", type=int, default=20)
@@ -292,7 +297,7 @@ class _StdoutStream:
             sys.stderr.flush()
 
 
-def _build(args: argparse.Namespace, *, stream: _StdoutStream | None = None) -> HarnessApplication:
+def _build(args: argparse.Namespace, *, stream: StreamListener | None = None) -> HarnessApplication:
     telemetry_path: Path | None = getattr(args, "telemetry_file", None)
     telemetry = None
     if telemetry_path is not None:
@@ -561,6 +566,7 @@ async def _status_command(args: argparse.Namespace) -> int:
 async def _runs_command(args: argparse.Namespace) -> int:
     query = RunQuery(
         tenant=args.tenant,
+        end_user=args.user,
         statuses=tuple(
             RunStatus(item.strip()) for value in args.status for item in value.split(",") if item.strip()
         ),
@@ -802,11 +808,12 @@ async def _serve_command(args: argparse.Namespace) -> int:
         import uvicorn
     except ImportError as exc:
         raise ValueError("serve requires uvicorn: pip install 'agent-harness[api]'") from exc
-    app = _build(args)
+    hub = StreamHub()  # live token previews for GET /runs/{id}/stream
+    app = _build(args, stream=hub)
     token = _api_token(args, has_keys=bool(app.config.api_keys))
     async with app:
         await _start_tools(app)
-        api = create_api(app, auth_token=token, worker_count=args.workers)
+        api = create_api(app, auth_token=token, worker_count=args.workers, stream_hub=hub)
         server = uvicorn.Server(
             uvicorn.Config(api, host=args.host, port=args.port, lifespan="on", log_level="info")
         )
@@ -829,6 +836,7 @@ async def _worker_command(args: argparse.Namespace) -> int:
                 app.store,
                 lease_seconds=args.lease_seconds,
                 poll_interval_seconds=args.poll_seconds,
+                notifier=notifier_from_config(app.config),
             )
             for _ in range(args.workers)
         ]

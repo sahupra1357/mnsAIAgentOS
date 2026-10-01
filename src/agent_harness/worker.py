@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
 from agent_harness.domain import ConcurrencyError, RunQueue, RunRecord, RunStatus
+from agent_harness.notifications import WebhookNotifier
 from agent_harness.orchestrator import AgentOrchestrator
 
 
@@ -35,6 +36,7 @@ class Worker:
         poll_interval_seconds: float = 1.0,
         max_unexpected_failures: int = 3,
         sleep: Sleep = asyncio.sleep,
+        notifier: WebhookNotifier | None = None,
     ) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
@@ -48,6 +50,7 @@ class Worker:
         self._sleep = sleep
         self._max_unexpected_failures = max_unexpected_failures
         self._unexpected_failures: dict[str, int] = {}
+        self._notifier = notifier
 
     async def run_once(self) -> RunRecord | None:
         """Claim and execute one run; return it, or ``None`` if the queue was empty."""
@@ -61,6 +64,11 @@ class Worker:
         give_up = False
         try:
             result = await execution
+            if self._notifier is not None and run_is_settled(result):
+                try:
+                    await self._notifier.notify(result)
+                except Exception:  # noqa: BLE001 - notifications never affect the run
+                    logger.exception("webhook notification for run %s failed", run_id)
             return result
         except asyncio.CancelledError:
             if not heartbeat.done():

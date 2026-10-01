@@ -110,6 +110,19 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
 - `GET /runs` is scoped to the principal's tenant; only a `"*"` principal may pass
   `tenant=`. CLI: `agent-harness runs`.
 
+### Chat API (Phase 12b)
+- `streaming.StreamHub` is the orchestrator's `StreamListener` in `serve`. `GET /runs/{id}/stream`
+  merges hub `delta` previews with persisted events and ends with `end` when the run is settled.
+  Separate worker processes publish nothing to the hub.
+- `GET /runs/{id}/messages` (`_transcript`): user and assistant turns only, plus `ask_user`
+  questions and answers. Never the system prompt, tool output, or hook context.
+- CORS (`[api] cors_origins`): the `send` wrapper adds headers for allowed origins. Preflight
+  (OPTIONS) is answered before auth only for allowed origins.
+- `RunRecord.end_user` (`create_run(end_user=)`, `RunQuery.end_user`) is audit and listing data,
+  not an identity check. SQLite and Postgres filter on the snapshot JSON (no index).
+- `notifications.WebhookNotifier`: workers notify settled runs. HMAC signature; best effort;
+  the payload holds no message text.
+
 ## 6. Workers and queue
 - Add store methods `claim_next_run(worker_id, lease_seconds)`, `renew_lease`, and
   `release`. In SQLite, the claim is a single `UPDATE ... WHERE lease_expires_at < now`
