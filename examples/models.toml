@@ -128,6 +128,25 @@ temperature = 0.2
 
 # Enable repository coding tools by setting enabled = true. The default Docker
 # backend has no network and pauses before writes, commands, commits, or PRs.
+# --- Guardrails (docs/GUARDRAILS.md) ----------------------------------------------
+# Input/output/tool-output checks against prompt injection, jailbreaks, system-prompt
+# leaks, secrets, and PII. Blocked input gets refusal_message; the chat continues.
+# [guardrails]
+# enabled = true
+# refusal_message = "I can't help with that request."
+# [guardrails.input]
+# pii = "redact"                # default "allow"
+# [guardrails.model]            # optional safety classifier (ollama pull llama-guard3:1b)
+# profile = "guard"
+# check = ["input", "output"]
+#
+# [models.guard]
+# adapter = "ollama"
+# model = "llama-guard3:1b"
+# endpoint = "http://127.0.0.1:11434/v1"
+# timeout_seconds = 30
+# max_retries = 0
+
 # Let runs ask the user clarifying questions (pauses the run; answer with
 # `agent-harness answer RUN_ID "..."` or POST /runs/{id}/answer). Off by default.
 # [interaction]

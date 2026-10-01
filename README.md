@@ -486,6 +486,19 @@ fallback = ["claude"]                   # use it only when Modal keeps failing
 Alternatively, run the LiteLLM Proxy yourself and point an ordinary
 `openai_compatible` profile at it.
 
+## Guardrails
+
+`[guardrails] enabled = true` checks user input, model replies, and untrusted tool
+output for prompt injection, jailbreaks, system-prompt leaks, secrets, and PII. A
+blocked turn gets a refusal message, and the conversation continues. After untrusted
+tool output, side-effect tools need approval (taint mode). An optional guard model
+(Llama Guard 3 on Ollama) adds content-safety classification. Detection rates are
+measured with the `guardrails` benchmark suite.
+
+On the bundled 30-prompt sample, patterns plus `llama-guard3:1b` caught 14 of 15
+attacks with no false positives. See [docs/GUARDRAILS.md](docs/GUARDRAILS.md) for the
+detectors, actions, events, and limits.
+
 ## Structured Output
 
 A run can be required to end with a JSON result that matches a schema:

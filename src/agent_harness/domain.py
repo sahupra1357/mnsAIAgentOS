@@ -82,6 +82,9 @@ class EventType(StrEnum):
     PLAN_STEP_UPDATED = "plan_step_updated"
     PLAN_REVISED = "plan_revised"
     OUTPUT_REJECTED = "output_rejected"
+    # Guardrails (Phase 12a): a check found something (annotation), or refused a turn.
+    GUARDRAIL_DECIDED = "guardrail_decided"
+    GUARDRAIL_REFUSED = "guardrail_refused"
 
 
 class PermissionMode(StrEnum):
@@ -274,6 +277,8 @@ class RunRecord:
     # and the validated result once the run produced it.
     output_schema: JsonObject | None = None
     output: Any = None
+    # Guardrails: messages[:guarded_through] have passed the input guard.
+    guarded_through: int = 0
 
 
 @dataclass(frozen=True, slots=True)

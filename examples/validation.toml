@@ -45,6 +45,17 @@ baseline = "../baselines/bfcl-ollama.json"
 [benchmark.thresholds]
 max_accuracy_drop = 0.05
 
+# Guardrails red-team set (no model needed; add `options = { model_guard = true }` and a
+# guard profile such as llama-guard3 to include the classifier). See docs/GUARDRAILS.md.
+# [[benchmark]]
+# name = "guardrails"
+# suite = "guardrails"
+# data = "bench/guardrails_sample.jsonl"
+# profile = "ollama"
+# baseline = "../baselines/guardrails.json"
+# [benchmark.thresholds]
+# max_accuracy_drop = 0.0
+
 # [[benchmark]]
 # name = "humaneval-modal"
 # suite = "humaneval"                       # runs generated code in Docker (no network)

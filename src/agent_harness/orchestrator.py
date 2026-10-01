@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from dataclasses import field, replace
@@ -72,6 +73,7 @@ from agent_harness.structured_output import (
 )
 from agent_harness.tools.validation import ArgumentValidationError, validate_arguments
 from agent_harness.interaction import ASK_USER_SPEC, ASK_USER_TOOL
+from agent_harness.guardrails import GuardDecision, Guardrails
 from agent_harness.domain import (
     ApprovalRequest,
     ArtifactRef,
@@ -198,6 +200,7 @@ class AgentOrchestrator:
         subagent_limits: SubagentLimits | None = None,
         task_tracking: bool = False,
         ask_user: bool = False,
+        guardrails: Guardrails | None = None,
         system_context: Callable[[], SystemContext] | None = None,
         snapshots: FileSnapshotter | None = None,
         summarizer: ContextSummarizer | None = None,
@@ -234,6 +237,9 @@ class AgentOrchestrator:
         self._agent_spec = agent_spec(tuple(self._agents.values())) if self._agents else None
         self._task_tracking = task_tracking
         self._ask_user = ask_user
+        self._guardrails = guardrails
+        # Guardrail events from tool-output checks, recorded with the tool's result.
+        self._tool_guard_events: dict[tuple[str, str], list[RunEvent]] = {}
         self._system_context = system_context
         self._snapshots = snapshots
         self._summarizer = summarizer
@@ -310,6 +316,8 @@ class AgentOrchestrator:
             head = next((i for i, m in enumerate(initial_messages) if m.role is not Role.SYSTEM),
                         len(initial_messages))
             initial_messages.insert(head, Message(role=Role.SYSTEM, content=PLANNER_INSTRUCTIONS))
+        if self._guardrails is not None and self._guardrails.uses_canary:
+            _add_canary(initial_messages)
         prompt_hook = await self._user_prompt_hook(identifier, initial_messages, model_profile)
 
         now = self._clock()
@@ -618,6 +626,9 @@ class AgentOrchestrator:
             # A steer that arrived while the model was answering reopens the turn.
             if await self._apply_steers(run, events):
                 return False
+            if _refused(events):
+                await self._complete(run, events)  # a guardrail refusal ends the turn as it is
+                return True
             if run.output_schema is not None and run.output is None:
                 if await self._check_final_output(run, events):
                     return run.status.is_terminal
@@ -1108,6 +1119,11 @@ class AgentOrchestrator:
     async def _perform_model_turn(
         self, run: RunRecord, events: list[RunEvent]
     ) -> None:
+        parallel_guard: "asyncio.Future[tuple[list[RunEvent], bool]] | None" = None
+        if self._guardrails is not None:
+            refused, parallel_guard = await self._guard_input(run, events)
+            if refused:
+                return
         latest = _latest_state_event(events)
         pending_request = (
             latest is not None
@@ -1169,20 +1185,44 @@ class AgentOrchestrator:
                 response_schema=run.output_schema if not specs else None,
                 tool_choice=SUBMIT_RESULT_TOOL if specs and _submit_forced(events) else None,
             )
-            streamed = self._should_stream(client)
-            if streamed:
+            streamed = parallel_guard is None and self._should_stream(client)
+            if parallel_guard is not None:
+                # The guard model checks the new input while the main model answers;
+                # an unsafe verdict discards the answer before anything is recorded.
+                main = asyncio.ensure_future(client.complete(request))
+                try:
+                    verdict_events, blocked = await parallel_guard
+                except BaseException:
+                    main.cancel()
+                    raise
+                if blocked:
+                    main.cancel()
+                    with contextlib.suppress(BaseException):
+                        await main
+                    await self._refuse(run, events, "input", verdict_events)
+                    return
+                if verdict_events:
+                    await self._checkpoint(run, events, *verdict_events)
+                run.guarded_through = len(run.messages)
+                response = await main
+            elif streamed:
                 response = await self._consume_stream(client, request, run)
             else:
                 response = await client.complete(request)
             _validate_model_response(response)
         except BaseException as exc:
+            if parallel_guard is not None:
+                parallel_guard.cancel()
             self._emit_model_call(run, attempt, started, streamed, error=exc)
             if not isinstance(exc, Exception):
                 raise
             await self._handle_model_error(run, events, exc, attempt)
             return
         self._emit_model_call(run, attempt, started, streamed, response=response)
-        await self._accept_model_response(run, events, response, attempt, view)
+        guard_events: list[RunEvent] = []
+        if self._guardrails is not None:
+            response, guard_events = await self._guard_output(run, response)
+        await self._accept_model_response(run, events, response, attempt, view, guard_events)
         await self._run_hook(
             run,
             events,
@@ -1354,6 +1394,7 @@ class AgentOrchestrator:
         response: ModelResponse,
         attempt: int,
         view: ContextView | None,
+        guard_events: Sequence[RunEvent] = (),
     ) -> None:
         usage_tokens = response.usage.total_tokens
         if usage_tokens is not None:
@@ -1394,9 +1435,12 @@ class AgentOrchestrator:
             }
             if view.summarized_messages:
                 payload["context"]["summarized_messages"] = view.summarized_messages
+        if response.metadata.get("guardrail"):
+            payload["guardrail"] = response.metadata["guardrail"]
         await self._checkpoint(
             run,
             events,
+            *guard_events,  # annotations first, so MODEL_RESPONDED stays the latest state event
             RunEvent(
                 run_id=run.id,
                 type=EventType.MODEL_RESPONDED,
@@ -1633,7 +1677,7 @@ class AgentOrchestrator:
             hook_context = hook.context if hook is not None else ""
             # Permissions see the final arguments, so a hook cannot rewrite a
             # call into something a deny rule would have blocked.
-            permission = self._permission(spec, call, run.mode)
+            permission = self._permission(spec, call, run.mode, run)
             if permission.action == "deny":
                 await self._deny_tool(run, events, call, permission.reason, source="permission",
                                       permission=permission)
@@ -1815,9 +1859,22 @@ class AgentOrchestrator:
         return specs + loaded
 
     def _permission(
-        self, spec: ToolSpec, call: ToolCall, mode: PermissionMode
+        self, spec: ToolSpec, call: ToolCall, mode: PermissionMode, run: RunRecord | None = None
     ) -> PermissionDecision:
-        return self._permissions.decide(spec, call, mode)
+        decision = self._permissions.decide(spec, call, mode)
+        if (
+            self._guardrails is not None
+            and self._guardrails.taint
+            and run is not None
+            and spec.risk is not ToolRisk.READ_ONLY
+            and decision.action in {None, "allow"}
+            and _tainted(run.messages)
+        ):
+            # Taint mode: untrusted content may be steering the model, so a person decides.
+            return PermissionDecision(
+                "ask", "untrusted tool output entered the conversation this turn "
+                "(guardrails taint mode); approve this side-effect call only if you expect it")
+        return decision
 
     async def _deny_tool(
         self,
@@ -2001,6 +2058,7 @@ class AgentOrchestrator:
         if artifact is not None:
             payload["artifact_id"] = artifact.id
             payload["artifact_size"] = artifact.size
+        extra_events = (*self._tool_guard_events.pop((run.id, result.call_id), ()), *extra_events)
         await self._checkpoint(
             run,
             events,
@@ -2202,7 +2260,7 @@ class AgentOrchestrator:
             spec = specs.get(call.name)
             if spec is None or _pending_tool_request(events, run.step_count, call.id) is not None:
                 continue
-            permission = self._permission(spec, call, run.mode)
+            permission = self._permission(spec, call, run.mode, run)
             if permission.action in {"deny", "ask"}:
                 continue
             if call.name == AGENT_TOOL:
@@ -2601,6 +2659,140 @@ class AgentOrchestrator:
         )
         return True
 
+    # -- guardrails (Phase 12a) ------------------------------------------------------------
+
+    async def _guard_input(
+        self, run: RunRecord, events: list[RunEvent]
+    ) -> tuple[bool, "asyncio.Future[tuple[list[RunEvent], bool]] | None"]:
+        """Check user text added since the last check; True if the turn was refused.
+
+        Returns a pending model-guard check when ``[guardrails.model] parallel``
+        is on, so it can run alongside the main model call.
+        """
+
+        guard = self._guardrails
+        assert guard is not None
+        start = min(run.guarded_through, len(run.messages))
+        indices = [i for i in range(start, len(run.messages)) if _guarded_input(run.messages[i])]
+        if not indices:
+            run.guarded_through = len(run.messages)  # saved with the next checkpoint
+            return False, None
+        annotations: list[RunEvent] = []
+        blocked = False
+        for index in indices:
+            decision = guard.check_input(run.messages[index].content)
+            if decision.changed:
+                run.messages[index] = replace(run.messages[index], content=decision.text)
+            annotations += self._guard_events(run, decision, extra={"message_index": index})
+            blocked = blocked or decision.blocked
+        if blocked:
+            await self._refuse(run, events, "input", annotations)
+            return True, None
+        latest = run.messages[indices[-1]].content
+        if guard.model_checks("input"):
+            if guard.config.model.parallel:
+                if annotations:
+                    await self._checkpoint(run, events, *annotations)
+                return False, asyncio.ensure_future(self._model_guard(run, "input", latest))
+            verdict_events, model_blocked = await self._model_guard(run, "input", latest)
+            annotations += verdict_events
+            if model_blocked:
+                await self._refuse(run, events, "input", annotations)
+                return True, None
+        run.guarded_through = len(run.messages)
+        if annotations:
+            await self._checkpoint(run, events, *annotations)
+        return False, None
+
+    async def _guard_output(
+        self, run: RunRecord, response: ModelResponse
+    ) -> tuple[ModelResponse, list[RunEvent]]:
+        """Check a reply before it is recorded: redact it, or replace it with a refusal."""
+
+        guard = self._guardrails
+        assert guard is not None
+        canary = Guardrails.find_canary(run.messages)
+        events: list[RunEvent] = []
+        decision = guard.check_output(response.content, canary=canary) if response.content else None
+        if decision is not None:
+            events += self._guard_events(run, decision)
+        blocked = decision is not None and decision.blocked
+        reasoning = response.reasoning
+        if reasoning and not blocked:
+            checked = guard.check_output(reasoning, canary=canary)
+            events += self._guard_events(run, checked, extra={"part": "reasoning"})
+            reasoning = None if checked.blocked else checked.text  # drop leaked reasoning
+        if response.content and not blocked and guard.model_checks("output"):
+            user_text = next((m.content for m in reversed(run.messages) if _guarded_input(m)), "")
+            verdict_events, blocked = await self._model_guard(run, "output", user_text, response.content)
+            events += verdict_events
+        if blocked:
+            return replace(
+                response, content=guard.config.refusal_message, tool_calls=(), reasoning=None,
+                finish_reason=FinishReason.STOP, metadata={**response.metadata, "guardrail": "blocked"},
+            ), events
+        if decision is not None and decision.changed:
+            response = replace(response, content=decision.text,
+                               metadata={**response.metadata, "guardrail": "redacted"})
+        if reasoning != response.reasoning:
+            response = replace(response, reasoning=reasoning)
+        return response, events
+
+    async def _model_guard(
+        self, run: RunRecord, stage: str, user_text: str, assistant_text: str | None = None
+    ) -> tuple[list[RunEvent], bool]:
+        guard = self._guardrails
+        assert guard is not None
+        verdict = await guard.classify(user_text, assistant_text)
+        tokens = verdict.usage.total_tokens
+        if tokens:
+            run.consumed_tokens += tokens  # the guard model counts against the budget
+        if verdict.error is None and verdict.safe:
+            return [], False
+        payload: dict[str, Any] = {
+            "stage": stage, "detector": "model", "category": ",".join(verdict.categories) or "unsafe",
+            "action": "flag" if verdict.safe else "block", "count": 1,
+        }
+        if verdict.error is not None:
+            payload["error"] = verdict.error[:200]
+        return [self._guard_event(run, payload)], not verdict.safe
+
+    async def _refuse(
+        self, run: RunRecord, events: list[RunEvent], stage: str, annotations: Sequence[RunEvent]
+    ) -> None:
+        guard = self._guardrails
+        assert guard is not None
+        run.messages.append(Message(role=Role.ASSISTANT, content=guard.config.refusal_message))
+        run.guarded_through = len(run.messages)
+        detectors = sorted({str(e.payload.get("detector")) for e in annotations
+                            if e.payload.get("action") == "block"})
+        await self._checkpoint(
+            run,
+            events,
+            *annotations,
+            RunEvent(
+                run_id=run.id,
+                type=EventType.GUARDRAIL_REFUSED,
+                payload={"stage": stage, "detectors": detectors},
+                step=run.step_count,
+                created_at=self._clock(),
+            ),
+        )
+
+    def _guard_events(
+        self, run: RunRecord, decision: GuardDecision, *, extra: Mapping[str, Any] | None = None
+    ) -> list[RunEvent]:
+        return [self._guard_event(run, {**item, **(extra or {})}) for item in decision.summary()]
+
+    def _guard_event(self, run: RunRecord, payload: Mapping[str, Any]) -> RunEvent:
+        return RunEvent(
+            run_id=run.id,
+            type=EventType.GUARDRAIL_DECIDED,
+            payload=dict(payload),
+            step=run.step_count,
+            created_at=self._clock(),
+        )
+
     def _child_budget(
         self, run: RunRecord, definition: SubagentDefinition, *, share: int = 1
     ) -> RunBudget | None:
@@ -2737,6 +2929,12 @@ class AgentOrchestrator:
 
         content = _tool_message_content(result)
         if self._is_untrusted(result.name):
+            if self._guardrails is not None:
+                decision = self._guardrails.check_tool_output(content)
+                content = decision.text
+                guard_events = self._guard_events(run, decision, extra={"tool": result.name})
+                if guard_events:
+                    self._tool_guard_events[(run.id, result.call_id)] = guard_events
             content = _wrap_untrusted(result.name, content)
         if suffix:
             content += "\n\n[Context from hooks]\n" + suffix
@@ -2941,6 +3139,8 @@ class AgentOrchestrator:
         )
 
     def _should_stream(self, client: ModelClient) -> bool:
+        if self._guardrails is not None and self._guardrails.holds_output:
+            return False  # replies are checked first; an unchecked preview could leak
         return (
             self._stream_listener is not None
             and callable(getattr(client, "stream", None))
@@ -3003,8 +3203,10 @@ def _has_accepted_final_response(
     return (
         messages[-1].role is Role.ASSISTANT
         and not messages[-1].tool_calls
-        and latest.type is EventType.MODEL_RESPONDED
-        and latest.payload.get("ok") is True
+        and (
+            (latest.type is EventType.MODEL_RESPONDED and latest.payload.get("ok") is True)
+            or latest.type is EventType.GUARDRAIL_REFUSED
+        )
     )
 
 
@@ -3026,6 +3228,7 @@ _ANNOTATION_EVENTS = frozenset(
         EventType.PLAN_CREATED,
         EventType.PLAN_STEP_UPDATED,
         EventType.PLAN_REVISED,
+        EventType.GUARDRAIL_DECIDED,
     }
 )
 
@@ -3116,6 +3319,45 @@ def _result_submitted(run: RunRecord, events: Sequence[RunEvent]) -> bool:
         and e.payload.get("status") == ToolResultStatus.SUCCESS.value
         for e in events
     )
+
+
+def _guarded_input(message: Message) -> bool:
+    """User-originated text: prompts, follow-ups, steers, and ask_user answers."""
+
+    if message.role is Role.USER:
+        return not message.content.startswith("[Context from hooks]")
+    return (message.role is Role.TOOL and message.name == ASK_USER_TOOL
+            and message.content.startswith("The user answered:"))
+
+
+def _tainted(messages: Sequence[Message]) -> bool:
+    """True when untrusted tool output arrived since the latest user message."""
+
+    for message in reversed(messages):
+        if message.role is Role.USER and not message.content.startswith("[Context from hooks]"):
+            return False
+        if message.role is Role.TOOL and message.content.startswith("<untrusted-tool-output"):
+            return True
+    return False
+
+
+def _refused(events: Sequence[RunEvent]) -> bool:
+    latest = _latest_state_event(events)
+    return latest is not None and latest.type is EventType.GUARDRAIL_REFUSED
+
+
+def _add_canary(messages: list[Message]) -> None:
+    """Append a leak-detection marker to the system prompt (one per system prompt text)."""
+
+    index = next((i for i, m in enumerate(messages) if m.role is Role.SYSTEM), None)
+    if index is None:
+        canary = Guardrails.canary_for("")
+        messages.insert(0, Message(role=Role.SYSTEM, content=Guardrails.canary_instruction(canary).strip()))
+        return
+    content = messages[index].content
+    if Guardrails.find_canary(messages) is None:
+        canary = Guardrails.canary_for(content)
+        messages[index] = replace(messages[index], content=content + Guardrails.canary_instruction(canary))
 
 
 def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
