@@ -1059,6 +1059,11 @@ events.
 
 ## Validation
 
+Watch a pipeline run, then debug from `validation-results/index.html`, which includes
+per-item transcripts of failures and a telemetry summary: see
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+
 See [`docs/VALIDATION.md`](docs/VALIDATION.md). CI runs these stages offline on every
 PR: lint, types, unit tests, and scripted scenarios. With your model servers and
 downloaded public datasets you can also run:

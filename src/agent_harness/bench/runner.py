@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .core import BenchConfigError, BenchContext, BenchItem, ItemResult
+from .core import CURRENT_ITEM, transcript_path, BenchConfigError, BenchContext, BenchItem, ItemResult
 from .suites import Suite
 
 Progress = Callable[[ItemResult, int, int], None]
@@ -27,6 +27,7 @@ async def run_benchmark(
     results_path: Path | None = None,
     progress: Progress | None = None,
     retry_errors: bool = True,
+    keep_passing_transcripts: bool = False,
 ) -> list[ItemResult]:
     """Run every item once. With ``results_path``, results are appended as they
     finish and items already recorded there are skipped, so an interrupted run
@@ -57,6 +58,7 @@ async def run_benchmark(
         nonlocal completed
         async with semaphore:
             started = time.monotonic()
+            token = CURRENT_ITEM.set(item.id)
             try:
                 result = await suite.run(item, context)
             except BenchConfigError:
@@ -65,6 +67,11 @@ async def run_benchmark(
                 result = ItemResult(item.id, item.category, False, status="error",
                                     error=f"{type(exc).__name__}: {exc}"[:500],
                                     latency_seconds=time.monotonic() - started)
+            finally:
+                CURRENT_ITEM.reset(token)
+        directory = getattr(context, "transcripts", None)
+        if directory is not None and result.correct and not keep_passing_transcripts:
+            transcript_path(directory, item.id).unlink(missing_ok=True)  # keep failures only
         async with lock:
             done[item.id] = result
             completed += 1

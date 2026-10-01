@@ -44,6 +44,14 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
   in `examples/bench/`. Never commit public dataset files or run live models in tests.
 - Model-generated code runs only through an `ExecutionRuntime`: Docker by default,
   local only with an explicit unsafe flag.
+- Observability:
+  - `run_pipeline(on_result=, on_progress=, telemetry_path=)` reports each `StageResult`
+    as it is added.
+  - `BenchContext.transcripts` plus `CURRENT_ITEM` make `run_agent` save each item's
+    full run, and the runner deletes passing items' transcripts unless `transcripts = "all"`.
+  - `html_report.write_html_report` writes a static, escaped `index.html` at the end of
+    every pipeline run.
+  - The user-facing guide is `docs/TROUBLESHOOTING.md`.
 - Local model residency (`bench/residency.py`, plan `[residency]`, off by default):
   - Before each smoke or benchmark entry of an `ollama`/`llama_cpp` profile,
     `ResidencyManager.prepare` unloads models above `min_params_b` (or `min_size_gb`)

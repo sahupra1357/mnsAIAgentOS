@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextvars
+import json
+import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +24,14 @@ from agent_harness.domain import (
 )
 from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
+
+
+# The benchmark item being run (set by the runner), so run_agent can name its transcript.
+CURRENT_ITEM: contextvars.ContextVar[str | None] = contextvars.ContextVar("bench_item", default=None)
+
+
+def transcript_path(directory: Path, item_id: str) -> Path:
+    return directory / (re.sub(r"[^A-Za-z0-9._-]", "_", item_id)[:120] + ".json")
 
 
 class BenchConfigError(ValueError):
@@ -94,6 +105,8 @@ class BenchContext:
     telemetry: TelemetrySink | None = None
     execution: ExecutionFactory | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
+    # Where run_agent writes each item's full run (messages, events) for debugging.
+    transcripts: Path | None = None
 
     async def run_agent(
         self, messages: Sequence[Message], tools: ToolExecutor, *, budget: RunBudget | None = None
@@ -114,6 +127,9 @@ class BenchContext:
         )
         finished = await orchestrator.run(run.id)
         events = await store.list_events(run.id)
+        item_id = CURRENT_ITEM.get()
+        if self.transcripts is not None and item_id is not None:
+            self._write_transcript(item_id, finished, events)
         output = next(
             (m.content for m in reversed(finished.messages) if m.role is Role.ASSISTANT and not m.tool_calls),
             "",
@@ -123,3 +139,25 @@ class BenchContext:
             e.type is EventType.TOOL_RESPONDED and e.payload.get("status") != "success" for e in events
         )
         return AgentOutcome(finished, output, calls, errors)
+
+    def _write_transcript(self, item_id: str, run: RunRecord, events: Sequence[Any]) -> None:
+        assert self.transcripts is not None
+        self.transcripts.mkdir(parents=True, exist_ok=True)
+        transcript = {
+            "item_id": item_id,
+            "run_id": run.id,
+            "model_profile": run.model_profile,
+            "status": run.status.value,
+            "error": run.error,
+            "steps": run.step_count,
+            "tokens": run.consumed_tokens,
+            "messages": [
+                {"role": m.role.value, "content": m.content, "name": m.name, "tool_call_id": m.tool_call_id,
+                 "tool_calls": [asdict(c) for c in m.tool_calls], "reasoning": m.reasoning}
+                for m in run.messages
+            ],
+            "events": [{"type": e.type.value, "step": e.step, "payload": e.payload,
+                        "created_at": e.created_at.isoformat()} for e in events],
+        }
+        transcript_path(self.transcripts, item_id).write_text(
+            json.dumps(transcript, indent=2, default=str), encoding="utf-8")
