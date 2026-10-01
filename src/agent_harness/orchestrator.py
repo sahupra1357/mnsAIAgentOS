@@ -70,7 +70,8 @@ from agent_harness.structured_output import (
     result_from_text,
     submit_result_spec,
 )
-from agent_harness.tools.validation import ArgumentValidationError
+from agent_harness.tools.validation import ArgumentValidationError, validate_arguments
+from agent_harness.interaction import ASK_USER_SPEC, ASK_USER_TOOL
 from agent_harness.domain import (
     ApprovalRequest,
     ArtifactRef,
@@ -196,6 +197,7 @@ class AgentOrchestrator:
         subagents: Sequence[SubagentDefinition] = (),
         subagent_limits: SubagentLimits | None = None,
         task_tracking: bool = False,
+        ask_user: bool = False,
         system_context: Callable[[], SystemContext] | None = None,
         snapshots: FileSnapshotter | None = None,
         summarizer: ContextSummarizer | None = None,
@@ -231,6 +233,7 @@ class AgentOrchestrator:
         self._agent_limits = subagent_limits or SubagentLimits()
         self._agent_spec = agent_spec(tuple(self._agents.values())) if self._agents else None
         self._task_tracking = task_tracking
+        self._ask_user = ask_user
         self._system_context = system_context
         self._snapshots = snapshots
         self._summarizer = summarizer
@@ -691,16 +694,20 @@ class AgentOrchestrator:
         feedback: str | None = None,
         mode: PermissionMode | str | None = None,
         actor: str | None = None,
+        answer: str | None = None,
     ) -> RunRecord:
         """Resolve one paused tool call without executing it in this operation.
 
         ``feedback`` is returned to the model on denial (e.g. how to revise a
         plan). ``mode`` applies to plan approvals: the permission mode to switch
-        to once the plan is approved (default ``default``).
+        to once the plan is approved (default ``default``). ``answer`` answers an
+        ``ask_user`` question (``kind = "question"``); denying one declines it.
         """
 
         if feedback is not None:
             _validate_user_text(feedback)
+        if answer is not None:
+            _validate_user_text(answer)
         target_mode = PermissionMode(mode) if mode is not None else None
 
         _validate_identifier(run_id, "run_id")
@@ -716,7 +723,7 @@ class AgentOrchestrator:
         if waiting is not None:
             return await self._resolve_child_approval(
                 run, events, waiting, call_id=call_id, approved=approved,
-                feedback=feedback, mode=target_mode, actor=actor,
+                feedback=feedback, mode=target_mode, actor=actor, answer=answer,
             )
         if request is None or request.payload.get("call_id") != call_id:
             raise ValueError("tool call is not awaiting approval")
@@ -725,6 +732,11 @@ class AgentOrchestrator:
             raise ValueError("approval request references an unknown tool call")
         if target_mode is not None and request.payload.get("kind") != "plan":
             raise ValueError("mode can only be chosen when approving a plan")
+        question = request.payload.get("kind") == "question"
+        if answer is not None and not question:
+            raise ValueError("only an ask_user question takes an answer")
+        if question and approved and answer is None:
+            raise ValueError("a question is answered with answer text, not approved")
 
         now = self._clock()
         if run.started_at is not None and now > request.created_at:
@@ -737,6 +749,10 @@ class AgentOrchestrator:
             resolution["mode"] = target_mode.value
         if feedback is not None:
             resolution["feedback_chars"] = len(feedback)
+        if question:
+            resolution["kind"] = "question"
+        if answer is not None:
+            resolution["answer_chars"] = len(answer)  # the text itself goes to the model only
         approval_event = RunEvent(
             run_id=run.id,
             type=EventType.APPROVAL_RESOLVED,
@@ -744,20 +760,40 @@ class AgentOrchestrator:
             step=run.step_count,
             created_at=now,
         )
-        if approved:
+        if approved and not question:
             await self._checkpoint(run, events, approval_event)
             return run
 
-        result = ToolResult(
-            call_id=call.id,
-            name=call.name,
-            status=ToolResultStatus.POLICY_DENIED,
-            output={"error": "approval_denied"},
-            model_message=(
-                "The user denied permission to execute this tool call."
-                + (f" Their feedback: {feedback}" if feedback else "")
-            ),
-        )
+        if question and approved:
+            result = ToolResult(
+                call_id=call.id,
+                name=call.name,
+                status=ToolResultStatus.SUCCESS,
+                output={"answered": True},
+                model_message=f"The user answered: {answer}",
+            )
+        elif question:
+            result = ToolResult(
+                call_id=call.id,
+                name=call.name,
+                status=ToolResultStatus.POLICY_DENIED,
+                output={"error": "question_declined"},
+                model_message=(
+                    "The user declined to answer. Continue with your best judgment and state "
+                    "any assumptions you make." + (f" Their note: {feedback}" if feedback else "")
+                ),
+            )
+        else:
+            result = ToolResult(
+                call_id=call.id,
+                name=call.name,
+                status=ToolResultStatus.POLICY_DENIED,
+                output={"error": "approval_denied"},
+                model_message=(
+                    "The user denied permission to execute this tool call."
+                    + (f" Their feedback: {feedback}" if feedback else "")
+                ),
+            )
         self._append_tool_message(run, result)
         response_event = RunEvent(
             run_id=run.id,
@@ -774,6 +810,19 @@ class AgentOrchestrator:
         )
         await self._checkpoint(run, events, approval_event, response_event)
         return run
+
+    async def answer(
+        self, run_id: str, *, call_id: str, answer: str, actor: str | None = None
+    ) -> RunRecord:
+        """Answer the run's pending ``ask_user`` question (also one asked by a subagent).
+
+        Like ``resolve_approval``, this only records the answer; run or resume
+        the run (or enqueue it for a worker) to continue.
+        """
+
+        return await self.resolve_approval(
+            run_id, call_id=call_id, approved=True, answer=answer, actor=actor
+        )
 
     async def _user_prompt_hook(
         self, run_id: str, messages: list[Message], model_profile: str
@@ -1003,12 +1052,14 @@ class AgentOrchestrator:
         feedback: str | None,
         mode: PermissionMode | None,
         actor: str | None = None,
+        answer: str | None = None,
     ) -> RunRecord:
         """Forward a decision to the subagent the run waits on, then unpause it."""
 
         child_id = str(waiting.payload["child_run_id"])
         await self.resolve_approval(
-            child_id, call_id=call_id, approved=approved, feedback=feedback, mode=mode, actor=actor
+            child_id, call_id=call_id, approved=approved, feedback=feedback, mode=mode, actor=actor,
+            answer=answer,
         )
         now = self._clock()
         if run.started_at is not None and now > waiting.created_at:
@@ -1603,6 +1654,18 @@ class AgentOrchestrator:
         if call.name == EXIT_PLAN_TOOL:
             await self._handle_exit_plan(run, events, call, spec, approved, attempt)
             return
+        if call.name == ASK_USER_TOOL:
+            # Pauses; answer() / resolve_approval() supply the tool result.
+            try:
+                validate_arguments(call.arguments, spec.input_schema)
+            except ArgumentValidationError as exc:
+                result = ToolResult(call.id, call.name, ToolResultStatus.VALIDATION_ERROR,
+                                    {"error": str(exc)}, f"Invalid question: {exc}")
+                self._append_tool_message(run, result)
+                await self._record_tool_result(run, events, result, attempt=attempt)
+                return
+            await self._request_approval(run, events, call, spec, kind="question")
+            return
         if permission.action == "ask" and not approved:
             await self._request_approval(run, events, call, spec, reason=permission.reason)
             return
@@ -1734,6 +1797,8 @@ class AgentOrchestrator:
             specs += (self._agent_spec,)
         if self._task_tracking:
             specs += (TODO_SPEC,)
+        if self._ask_user:
+            specs += (ASK_USER_SPEC,)
         if run.planning:
             if run.plan is None:
                 # Explore read-only, then plan: nothing can change before the plan exists.
@@ -3039,6 +3104,10 @@ def _result_submitted(run: RunRecord, events: Sequence[RunEvent]) -> bool:
     assistant = next((m for m in reversed(run.messages) if m.role is Role.ASSISTANT), None)
     if assistant is None or run.output is None or run.messages[-1].role is not Role.TOOL:
         return False  # e.g. a steer or stop hook added a message after the result
+    if any(c.name == ASK_USER_TOOL for c in assistant.tool_calls):
+        # The same turn asked the user something: the model must see the answer
+        # (and may revise the result) before the run ends.
+        return False
     calls = {c.id for c in assistant.tool_calls if c.name == SUBMIT_RESULT_TOOL}
     return bool(calls) and any(
         e.type is EventType.TOOL_RESPONDED
@@ -3066,7 +3135,7 @@ def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
 
 _QUOTA_WINDOW = timedelta(days=1)
 _ORCHESTRATOR_TOOLS = frozenset(
-    {AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, SUBMIT_RESULT_TOOL, *META_TOOLS, *PLAN_TOOLS}
+    {AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, SUBMIT_RESULT_TOOL, ASK_USER_TOOL, *META_TOOLS, *PLAN_TOOLS}
 )
 
 

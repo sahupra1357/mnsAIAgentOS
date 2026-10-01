@@ -321,7 +321,7 @@ Order matters: 6.1 is the foundation for most of the rest.
 
 **Phase 11 – Operator and model-interface gaps** [harness-operations, llm-providers, model-gateway, interactive-extensibility] — four stacked PRs (11a → `main`, each later one on the previous branch):
 11a (item 1) on `phase-11a-run-listing` — implemented; 11b (item 2) on `phase-11b-reasoning` — implemented;
-11c (item 3) on `phase-11c-structured-output` — implemented; 11d (item 4) on `phase-11d-ask-user`.
+11c (item 3) on `phase-11c-structured-output` — implemented; 11d (item 4) on `phase-11d-ask-user` — implemented. All of Phase 11 is implemented.
 No classifier-based model routing: the user decided against it (extra call, loses the
 prefix cache, overkill).
 1. Run listing: an optional `RunLister` store protocol (`list_runs(RunQuery) -> RunPage`)

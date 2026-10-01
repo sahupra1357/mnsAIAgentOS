@@ -29,6 +29,8 @@ a principal with a tenant and a role (viewer < operator < admin; see
     POST /runs/{id}/resume
     GET  /runs/{id}/approval
     POST /runs/{id}/approval        {"call_id", "decision", "feedback"?, "mode"?}
+    POST /runs/{id}/answer          {"call_id", "answer"}  (reply to an ask_user question;
+                                     "decision": "deny" on /approval declines it)
     POST /runs/{id}/mode            {"mode": "default" | "accept_edits" | "plan" | "bypass"}
     POST /runs/{id}/rewind          {"to_step", "confirm"?}  (dry run unless confirm)
 """
@@ -235,6 +237,7 @@ class HarnessAPI:
             ("POST", "/resume"): lambda: self._resume(send, run_id),
             ("GET", "/approval"): lambda: self._send_approval(send, run_id),
             ("POST", "/approval"): lambda: self._decide(send, run_id, receive, principal),
+            ("POST", "/answer"): lambda: self._answer(send, run_id, receive, principal),
         }
         handler = routes.get((method, rest))
         if handler is None:
@@ -634,6 +637,30 @@ class HarnessAPI:
             raise ApiError(409, str(exc)) from exc
         await self._queue.enqueue(run_id)
         await _json(send, 202, {"id": run.id, "status": run.status.value, "decision": decision})
+
+
+    async def _answer(self, send: Send, run_id: str, receive: Receive, principal: Principal) -> None:
+        body = await self._body(receive)
+        unknown = set(body) - {"call_id", "answer"}
+        if unknown:
+            raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            raise ApiError(400, "call_id is required")
+        answer = _text(body.get("answer"), "answer", required=True)
+        assert answer is not None
+        await self._load(run_id)
+        pending = await self._orchestrator.pending_approval(run_id)
+        if pending is None or pending.kind != "question":
+            raise ApiError(409, "run is not waiting for an answer")
+        if pending.call_id != call_id:
+            raise ApiError(409, f"pending call ID is {pending.call_id!r}")
+        try:
+            run = await self._orchestrator.answer(run_id, call_id=call_id, answer=answer, actor=principal.name)
+        except ValueError as exc:
+            raise ApiError(409, str(exc)) from exc
+        await self._queue.enqueue(run_id)
+        await _json(send, 202, {"id": run.id, "status": run.status.value})
 
 
 def _require(principal: Principal, role: AccessRole) -> None:
