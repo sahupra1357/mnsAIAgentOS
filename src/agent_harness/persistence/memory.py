@@ -15,6 +15,8 @@ from uuid import uuid4
 from agent_harness.domain import (
     ConcurrencyError,
     RunEvent,
+    RunPage,
+    RunQuery,
     RunRecord,
     RunStatus,
     SteerMessage,
@@ -23,6 +25,8 @@ from agent_harness.domain import (
     ToolResult,
     utc_now,
 )
+
+from .listing import decode_cursor, encode_cursor, summarize_run
 
 
 class InMemoryRunStore:
@@ -155,6 +159,20 @@ class InMemoryRunStore:
         async with self._lock:
             self._reservations.pop(run_id, None)
 
+    async def list_runs(self, query: RunQuery) -> RunPage:
+        after = decode_cursor(query.cursor) if query.cursor else None
+        async with self._lock:
+            matches = [
+                run for run in self._runs.values()
+                if _matches(run, query) and (after is None or (run.created_at, run.id) < after)
+            ]
+            matches.sort(key=lambda r: (r.created_at, r.id), reverse=True)
+            page = [summarize_run(run) for run in matches[: query.limit + 1]]
+        more = len(page) > query.limit
+        page = page[: query.limit]
+        cursor = encode_cursor(page[-1].created_at, page[-1].id) if more else None
+        return RunPage(runs=tuple(page), next_cursor=cursor)
+
     async def purge_runs(self, before: datetime, *, dry_run: bool = True) -> list[str]:
         async with self._lock:
             ids = [r.id for r in sorted(self._runs.values(), key=lambda r: r.updated_at)
@@ -274,6 +292,23 @@ class InMemoryRunStore:
         _validate_identifier(run_id, "run_id")
         async with self._lock:
             return tuple(deepcopy(self._events.get(run_id, ())))
+
+
+def _matches(run: RunRecord, query: RunQuery) -> bool:
+    if query.tenant is not None and run.tenant != query.tenant:
+        return False
+    if query.statuses and run.status not in query.statuses:
+        return False
+    if query.parent_run_id is not None:
+        if run.parent_run_id != query.parent_run_id:
+            return False
+    elif not query.include_children and run.parent_run_id is not None:
+        return False
+    if query.created_after is not None and run.created_at < query.created_after:
+        return False
+    if query.created_before is not None and run.created_at >= query.created_before:
+        return False
+    return True
 
 
 def _with_event_id(event: RunEvent) -> RunEvent:

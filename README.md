@@ -213,6 +213,7 @@ agent-harness continue --config models.toml RUN_ID "Now draft the customer email
 agent-harness steer    --config models.toml RUN_ID "Focus on the billing impact"
 agent-harness cancel   --config models.toml RUN_ID
 agent-harness status   --config models.toml RUN_ID
+agent-harness runs     --config models.toml --status awaiting_input,failed
 ```
 
 - **`continue`** reopens a completed run with a follow-up message. The model sees the
@@ -227,6 +228,12 @@ agent-harness status   --config models.toml RUN_ID
   step boundary instead of crashing.
 - **`status`** shows steps, tokens (including cached), cost, and active time against
   the budget.
+- **`runs`** lists runs, newest first: ID, status, profile, steps, tokens, cost, and a
+  title taken from the first user message. Only top-level runs are shown by default;
+  `--children` includes subagent runs, and `--parent RUN_ID` lists one run's subagents.
+  Filter with `--status` (repeat or comma-separate) and `--tenant`. `--limit` sets the
+  page size, and a longer listing prints a `--cursor` value for the next page. Use
+  `--json` for scripts.
 
 The same actions are available over HTTP: `POST /runs/{id}/messages`,
 `POST /runs/{id}/steer`, `POST /runs/{id}/cancel`, and `GET /runs/{id}/usage`.
@@ -722,6 +729,7 @@ export AGENT_HARNESS_API_TOKEN="$(python3 -c 'import secrets; print(secrets.toke
 |---|---|
 | `GET /healthz` | Liveness (no auth) |
 | `GET /profiles` | Profiles (adapter, model, context window, fallback) and routes |
+| `GET /runs` | List runs newest first: `status`, `parent`, `children`, `created_after`, `created_before`, `limit` (≤ 200), `cursor` → `{"runs", "next_cursor"}` |
 | `POST /runs` | `{"prompt", "system"?, "model_profile"?, "budget"?}` → `202 {"id", ...}` (queued) |
 | `GET /runs/{id}` | Status, usage, error, final `output`, and `pending_approval` |
 | `GET /runs/{id}/events?after=N` | Event log from index N |
@@ -730,6 +738,9 @@ export AGENT_HARNESS_API_TOKEN="$(python3 -c 'import secrets; print(secrets.toke
 | `POST /runs/{id}/resume` | Re-enqueue an interrupted run |
 | `GET /runs/{id}/approval` | The pending tool call, with its arguments |
 | `POST /runs/{id}/approval` | `{"call_id", "decision": "allow" \| "deny"}`, then re-enqueue |
+
+`GET /runs` lists only the caller's tenant. An all-tenant (`"*"`) key may add
+`tenant=` to pick one; any other key gets `403` for another tenant.
 
 All routes except `/healthz` require `Authorization: Bearer $AGENT_HARNESS_API_TOKEN`.
 `--insecure-no-auth` is accepted only with a loopback `--host`. Inputs are validated at
@@ -887,3 +898,9 @@ Before changing a component, agents should read the corresponding `SKILL.md` and
 ## Current Scope
 
 This first version is a solid local and single-service foundation. Horizontal worker scaling would add a queue/lease layer around persisted run IDs. The coding mode includes a Docker sandbox, while distributed idempotency, telemetry exporters, and a production approval UI/notification channel remain deliberate extension points.
+
+*Update:* the queue and lease layer (Phase 4c), durable idempotency (Phase 4a), an
+optional OpenTelemetry exporter (Phase 4b), and a Postgres store for multi-host
+deployments (Phase 9) have since been added. Approvals are still collected by polling
+(`GET /runs/{id}/approval` or `agent-harness runs --status awaiting_input`); there is no
+push notification channel yet.

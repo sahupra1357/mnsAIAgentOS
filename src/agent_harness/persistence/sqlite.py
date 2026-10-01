@@ -8,7 +8,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -29,6 +29,8 @@ from agent_harness.domain import (
     Role,
     RunBudget,
     RunEvent,
+    RunPage,
+    RunQuery,
     RunRecord,
     PermissionMode,
     RunStatus,
@@ -41,6 +43,7 @@ from agent_harness.domain import (
     utc_now,
 )
 
+from .listing import decode_cursor, encode_cursor, summarize_run
 from .memory import _validate_identifier, _validate_run_event
 from .migrations import apply_sqlite_migrations, schema_version
 
@@ -378,6 +381,42 @@ class SQLiteRunStore:
         async with self._lock:
             self._connection.execute("DELETE FROM quota_reservations WHERE run_id = ?", (run_id,))
 
+    async def list_runs(self, query: RunQuery) -> RunPage:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if query.tenant is not None:
+            clauses.append("tenant = ?")
+            params.append(query.tenant)
+        if query.statuses:
+            clauses.append(f"status IN ({','.join('?' * len(query.statuses))})")
+            params.extend(status.value for status in query.statuses)
+        if query.parent_run_id is not None:
+            clauses.append("parent_run_id = ?")
+            params.append(query.parent_run_id)
+        elif not query.include_children:
+            clauses.append("parent_run_id IS NULL")
+        if query.created_after is not None:
+            clauses.append("created_at >= ?")
+            params.append(_utc_text(query.created_after))
+        if query.created_before is not None:
+            clauses.append("created_at < ?")
+            params.append(_utc_text(query.created_before))
+        if query.cursor:
+            created_at, run_id = decode_cursor(query.cursor)
+            clauses.append("(created_at < ? OR (created_at = ? AND id < ?))")
+            params.extend((_utc_text(created_at), _utc_text(created_at), run_id))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        async with self._lock:
+            rows = self._connection.execute(
+                f"SELECT snapshot_json FROM runs {where} ORDER BY created_at DESC, id DESC LIMIT ?",
+                (*params, query.limit + 1),
+            ).fetchall()
+        page = [summarize_run(_decode_run(row["snapshot_json"])) for row in rows]
+        more = len(page) > query.limit
+        page = page[: query.limit]
+        cursor = encode_cursor(page[-1].created_at, page[-1].id) if more else None
+        return RunPage(runs=tuple(page), next_cursor=cursor)
+
     async def purge_runs(self, before: datetime, *, dry_run: bool = True) -> list[str]:
         """Delete finished runs last updated before ``before`` (with their events and rows).
 
@@ -591,6 +630,12 @@ def _decode_run(value: str) -> RunRecord:
             else None
         ),
     )
+
+
+def _utc_text(value: datetime) -> str:
+    """Stored timestamps are UTC ISO text; compare against the same form."""
+
+    return value.astimezone(UTC).isoformat() if value.tzinfo is not None else value.isoformat()
 
 
 def _like_prefix(value: str) -> str:

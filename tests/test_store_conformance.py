@@ -21,6 +21,7 @@ from agent_harness.domain import (
     Message,
     Role,
     RunEvent,
+    RunQuery,
     RunRecord,
     RunStatus,
     ToolCatalogEntry,
@@ -214,6 +215,55 @@ class StoreContract:
             self.assertEqual(len(await self.store.list_events("t2")), 1)
         asyncio.run(body())
 
+
+    def test_list_runs(self) -> None:
+        async def body() -> None:
+            base = utc_now() - timedelta(hours=1)
+            layout = [("a", "acme", RunStatus.COMPLETED, None), ("b", "acme", RunStatus.RUNNING, None),
+                      ("c", "acme", RunStatus.FAILED, None), ("d", "other", RunStatus.COMPLETED, None),
+                      ("a-child", "acme", RunStatus.COMPLETED, "a")]
+            for minute, (run_id, tenant, status, parent) in enumerate(layout):
+                record = RunRecord(id=run_id, model_profile="p", tenant=tenant, parent_run_id=parent,
+                                   depth=1 if parent else 0, created_at=base + timedelta(minutes=minute),
+                                   messages=[Message(Role.USER, f"task {run_id}\nmore detail")])
+                await self.store.create_run(record, created(record))
+                record.status = status
+                record.step_count = 2
+                await self.store.save_checkpoint(record, [], expected_version=0)
+
+            page = await self.store.list_runs(RunQuery())
+            self.assertEqual([r.id for r in page.runs], ["d", "c", "b", "a"])  # newest first, top-level only
+            self.assertIsNone(page.next_cursor)
+            first = page.runs[-1]
+            self.assertEqual((first.title, first.status, first.step_count, first.tenant),
+                             ("task a", RunStatus.COMPLETED, 2, "acme"))
+
+            acme = await self.store.list_runs(RunQuery(tenant="acme"))
+            self.assertEqual([r.id for r in acme.runs], ["c", "b", "a"])
+            done = await self.store.list_runs(
+                RunQuery(tenant="acme", statuses=(RunStatus.COMPLETED, RunStatus.FAILED)))
+            self.assertEqual([r.id for r in done.runs], ["c", "a"])
+            children = await self.store.list_runs(RunQuery(parent_run_id="a"))
+            self.assertEqual([(r.id, r.parent_run_id, r.depth) for r in children.runs], [("a-child", "a", 1)])
+            everything = await self.store.list_runs(RunQuery(include_children=True))
+            self.assertEqual(len(everything.runs), 5)
+            window = await self.store.list_runs(RunQuery(created_after=base + timedelta(minutes=1),
+                                                         created_before=base + timedelta(minutes=3)))
+            self.assertEqual([r.id for r in window.runs], ["c", "b"])
+
+            # Pages follow each other without gaps or repeats.
+            seen: list[str] = []
+            cursor = None
+            while True:
+                page = await self.store.list_runs(RunQuery(limit=3, cursor=cursor, include_children=True))
+                seen.extend(r.id for r in page.runs)
+                if page.next_cursor is None:
+                    break
+                cursor = page.next_cursor
+            self.assertEqual(seen, ["a-child", "d", "c", "b", "a"])
+            with self.assertRaises(ValueError):
+                await self.store.list_runs(RunQuery(cursor="not-a-cursor"))
+        asyncio.run(body())
 
 class InMemoryStoreContract(StoreContract, unittest.TestCase):
     def make_store(self, clock: Clock) -> Any:
