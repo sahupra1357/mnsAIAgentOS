@@ -26,7 +26,11 @@ MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 TOOL_CALL_PARSER = "hermes"  # must match the model family (hermes, llama3_json, mistral, ...)
 MAX_MODEL_LEN = 32768  # keep equal to the profile's context_window
 GPU = "L40S"
-VLLM_PACKAGE = "vllm"  # pin to a version you have tested, e.g. "vllm==<version>"
+# Pin vLLM. Unpinned, pip may backtrack to an old release that has no wheel and must
+# be compiled against CUDA, which fails in the image builder ("CUDA_HOME is not set").
+# 0.30.0 is checked to accept every flag used below. When upgrading, check that the
+# flags still exist.
+VLLM_PACKAGE = "vllm==0.30.0"
 PORT = 8000
 
 # Prefix (KV) caching is on by default in vLLM; do not pass --no-enable-prefix-caching.
@@ -38,8 +42,10 @@ MAX_CONCURRENT_REQUESTS = 32
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install(VLLM_PACKAGE, "huggingface_hub[hf_transfer]")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    # vLLM brings a compatible huggingface_hub (>= 1.31), whose built-in hf_xet
+    # backend replaces the old hf_transfer extra for fast downloads. Wheels only:
+    # a resolution problem then fails fast instead of compiling vLLM from source.
+    .pip_install(VLLM_PACKAGE, extra_options="--only-binary=:all:")
 )
 hf_cache = modal.Volume.from_name("agent-harness-hf-cache", create_if_missing=True)
 vllm_cache = modal.Volume.from_name("agent-harness-vllm-cache", create_if_missing=True)
