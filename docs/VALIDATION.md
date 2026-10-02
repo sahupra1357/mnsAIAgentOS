@@ -40,7 +40,23 @@ different, stronger profile as the judge where you can: a model grading its own 
 is lenient. `judge_max_tokens` (default 1024) leaves room for thinking models. The verdict
 is stored in each item's `details.judge`.
 
+| `context` | Context handling past the window: trimming, `token_counting = "server"` (`context_capped` events), overflow recovery. The fact to recall sits in the newest part of a long conversation | Synthetic (no download): `examples/bench/context_sample.jsonl` | `{"needle", "question", "answer", "filler": "prose" \| "json" \| "code"}` |
+| `memory` | Long-term memory: notes are saved (and embedded), then found with `memory_search` using different wording | Synthetic: `examples/bench/memory_sample.jsonl` | `{"notes": [...], "question", "answer"}` |
+
 List the suites with `agent-harness-bench suites`.
+
+**Live checks of context and memory.** `context` is built to overflow a small window: JSON
+and code filler use more tokens per character than the estimate assumes, which is what
+server counting and overflow recovery are for. Each item records `omitted_messages`,
+`context_capped`, and `context_overflows` in `details`; a run where all three are 0 did
+not reach the window, so raise `turns` or `chars_per_turn`.
+
+`memory` needs an embedding model when `search` is `semantic` or `hybrid`:
+`ollama pull nomic-embed-text`, plus `options.embedding_profile = "embed"` (the `embed`
+profile in `examples/models.toml`). Embedding failures make the item an error rather than
+silently falling back to keyword search.
+
+Both have commented entries at the end of `examples/validation.toml`.
 
 ### Getting the datasets
 

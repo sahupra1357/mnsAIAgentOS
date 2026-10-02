@@ -96,6 +96,7 @@ class AgentOutcome:
     output: str
     tool_calls: list[str]
     tool_errors: int
+    events: list[Any] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -143,7 +144,7 @@ class BenchContext:
         errors = sum(
             e.type is EventType.TOOL_RESPONDED and e.payload.get("status") != "success" for e in events
         )
-        return AgentOutcome(finished, output, calls, errors)
+        return AgentOutcome(finished, output, calls, errors, list(events))
 
     async def call_model(self, request: ModelRequest) -> ModelResponse:
         """One direct model call (suites that test raw model behaviour, such as BFCL).

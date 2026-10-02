@@ -68,6 +68,9 @@ endpoint = "http://127.0.0.1:9931/v1"
 # Keep equal to the server's context size for this model (ctx-size in the router's
 # models preset). A tool-using run outgrows 4096 quickly; raise both together.
 context_window = 4096
+# Count large requests with the server's tokenizer (/apply-template + /tokenize) before
+# sending, so a 4096 window is not overrun by the 3.5-chars-per-token estimate.
+token_counting = "server"
 # The router unloads idle models (--sleep-idle-seconds); reloading a 27B model is slow.
 timeout_seconds = 600
 max_retries = 1
@@ -95,6 +98,7 @@ timeout_seconds = 120
 cold_start_timeout_seconds = 600
 max_retries = 1
 context_window = 32768
+token_counting = "server"   # vLLM /tokenize (not available with server = "sglang")
 
 [models.modal.headers_env]
 Modal-Key = "MODAL_PROXY_TOKEN_ID"
@@ -110,6 +114,17 @@ max_tokens = 1024
 # Estimated cost per request, so --max-cost-usd works. Use your GPU's actual rate.
 # [models.modal.pricing]
 # gpu_usd_per_second = 0.0003
+
+# Embeddings for [memory] search = "semantic" / "hybrid" and the memory benchmark:
+#   ollama pull nomic-embed-text
+[models.embed]
+adapter = "ollama"
+model = "nomic-embed-text"
+endpoint = "http://127.0.0.1:11434/v1"
+timeout_seconds = 60
+
+[models.embed.parameters]
+max_tokens = 1024   # unused by /embeddings; keeps every example profile capped
 
 # --- LiteLLM (optional; pip install -e '.[litellm]') ------------------------------
 # Only profiles with adapter = "litellm" use LiteLLM; everything else stays direct.

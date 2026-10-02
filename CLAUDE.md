@@ -411,6 +411,10 @@ Also `[orchestrator]` (all `OrchestratorSettings`) and `AGENT_HARNESS_SET__SECTI
    `semantic_memory.py`, client `embed()`, CLI `memory reindex`.
 6. MCP `resources` / `prompts` (read-only `server__mcp_*` tools) and `list_changed` re-sync.
 7. `[web_fetch]`: text of one page; private addresses refused; redirects re-checked per hop.
+Live checks (on `phase-14b-live-checks`): bench suites `context` (overflows a small window with
+JSON/code/prose filler; reports omitted/capped/overflow counts) and `memory` (save, embed, find
+with different wording). Example profiles `llamacpp`/`modal` use `token_counting = "server"`, and
+`[models.embed]` is `nomic-embed-text` on Ollama.
 
 ## Validation
 

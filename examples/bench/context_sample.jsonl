@@ -1,0 +1,3 @@
+{"id": "context-json", "filler": "json", "needle": "The vault code for warehouse 7 is 4817.", "question": "What is the vault code for warehouse 7?", "answer": "4817"}
+{"id": "context-code", "filler": "code", "needle": "The release codename is Bluefin.", "question": "What is the release codename?", "answer": "Bluefin"}
+{"id": "context-prose", "filler": "prose", "needle": "The meeting moved to Thursday at 3pm.", "question": "On which day is the meeting now?", "answer": "Thursday"}
