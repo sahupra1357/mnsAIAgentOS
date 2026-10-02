@@ -126,6 +126,15 @@ Everything above stays network-free:
 - **Usage accounting:** usage counts top-level runs only (`parent_run_id` column). Tokens and
   cost use runs updated in the window, which is conservative.
 
+## Per-user quotas (Phase 13)
+
+- `[user_quotas]` limits apply per `(tenant, end_user)`. `_admit` passes `end_user=` to
+  `reserve`, and the store then calls `decide(tenant_usage, user_usage)` inside the same
+  transaction or advisory lock, so tenant and user admission are atomic together.
+- Reservations store `end_user` (SQLite migration 7, Postgres migration 4); usage queries
+  filter runs by the snapshot's `end_user` (expression index).
+- `_quota_reason` checks the user's consumption (`user_usage`) before the tenant's.
+
 ## Memory backends (Phase 10)
 
 - **Selection:** `[memory] backend = "sqlite" | "postgres"`. Postgres takes its URL from

@@ -137,6 +137,13 @@ QUEUE_ATTEMPTS = """
 ALTER TABLE run_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
 """
 
+# Per-end-user quotas (Phase 13): who a reservation is for, and runs by end user.
+USER_QUOTAS = """
+ALTER TABLE quota_reservations ADD COLUMN end_user TEXT;
+CREATE INDEX IF NOT EXISTS quota_reservations_user ON quota_reservations(tenant, end_user);
+CREATE INDEX IF NOT EXISTS runs_tenant_end_user
+    ON runs(tenant, json_extract(snapshot_json, '$.end_user'));
+"""
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline tables", BASELINE),
     (2, "tool catalog", TOOL_CATALOG),
@@ -144,6 +151,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (4, "retention guard", RETENTION),
     (5, "quota reservations", RESERVATIONS),
     (6, "queue attempt counts", QUEUE_ATTEMPTS),
+    (7, "per-user quotas", USER_QUOTAS),
 )
 LATEST = MIGRATIONS[-1][0]
 

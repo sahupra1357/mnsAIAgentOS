@@ -152,6 +152,15 @@ def _parser() -> argparse.ArgumentParser:
     _common_runtime_arguments(cancel)
     cancel.add_argument("run_id")
 
+    expire = subcommands.add_parser(
+        "expire",
+        help="resolve approvals and questions past [interaction] timeouts (workers do this too)",
+    )
+    _common_runtime_arguments(expire)
+    expire.add_argument(
+        "--no-resume", action="store_true", help="only resolve; do not continue denied runs here"
+    )
+
     status = subcommands.add_parser("status", help="show a run's status and usage against budget")
     _common_runtime_arguments(status)
     status.add_argument("run_id")
@@ -541,6 +550,21 @@ async def _cancel_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _expire_command(args: argparse.Namespace) -> int:
+    app = _build(args)
+    async with app:
+        expired = await app.orchestrator.expire_pending_input()
+        for run_id in expired:
+            run = await app.orchestrator.run(run_id) if (
+                app.orchestrator.expired_input_resumes and not args.no_resume
+            ) else await app.store.get_run(run_id)
+            status = run.status.value if run is not None else "unknown"
+            print(f"run_id={run_id} status={status}", file=sys.stderr)
+        if not expired:
+            print("no overdue approvals or questions", file=sys.stderr)
+    return 0
+
+
 async def _status_command(args: argparse.Namespace) -> int:
     app = _build(args)
     async with app:
@@ -702,7 +726,13 @@ async def _skills_command(args: argparse.Namespace) -> int:
 
 
 def _config_command(args: argparse.Namespace) -> int:
-    print(render_effective(load_layers(args.config, os.environ)))
+    from agent_harness.config import apply_set_overrides, set_override_keys
+
+    settings = load_layers(args.config, os.environ)
+    settings.raw = apply_set_overrides(settings.raw, os.environ)
+    for dotted, variable in set_override_keys(os.environ).items():
+        settings.provenance[dotted] = f"env {variable}"
+    print(render_effective(settings))
     return 0
 
 
@@ -998,6 +1028,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_cancel_command(args))
         if args.command == "status":
             return asyncio.run(_status_command(args))
+        if args.command == "expire":
+            return asyncio.run(_expire_command(args))
         if args.command == "runs":
             return asyncio.run(_runs_command(args))
         if args.command == "answer":

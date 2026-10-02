@@ -137,6 +137,13 @@ MIGRATIONS += (
     ALTER TABLE run_queue ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
     """),
 )
+MIGRATIONS += (
+    (4, """
+    ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS end_user TEXT;
+    CREATE INDEX IF NOT EXISTS quota_reservations_user ON quota_reservations(tenant, end_user);
+    CREATE INDEX IF NOT EXISTS runs_tenant_end_user ON runs(tenant, ((snapshot_json::jsonb ->> 'end_user')));
+    """),
+)
 LATEST = MIGRATIONS[-1][0]
 
 
@@ -415,31 +422,33 @@ class PostgresRunStore:
 
     # -- quotas and retention -------------------------------------------------------------
 
-    def _tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
+    def _tenant_usage(self, tenant: str, since: datetime, end_user: str | None = None) -> TenantUsage:
         active = "('queued', 'running', 'awaiting_input')"
+        ru = "" if end_user is None else " AND (snapshot_json::jsonb ->> 'end_user') = %(u)s"
+        qu = "" if end_user is None else " AND q.end_user = %(u)s"
         row = self._connection.execute(
             f"""
             SELECT
               (SELECT COUNT(*) FROM runs WHERE tenant = %(t)s AND parent_run_id IS NULL
-                 AND created_at >= %(s)s) AS runs,
+                 AND created_at >= %(s)s{ru}) AS runs,
               (SELECT COALESCE(SUM(consumed_tokens), 0) FROM runs WHERE tenant = %(t)s
-                 AND parent_run_id IS NULL AND updated_at >= %(s)s) AS tokens,
+                 AND parent_run_id IS NULL AND updated_at >= %(s)s{ru}) AS tokens,
               (SELECT COALESCE(SUM(consumed_cost_usd), 0) FROM runs WHERE tenant = %(t)s
-                 AND parent_run_id IS NULL AND updated_at >= %(s)s) AS cost,
+                 AND parent_run_id IS NULL AND updated_at >= %(s)s{ru}) AS cost,
               (SELECT COUNT(*) FROM runs WHERE tenant = %(t)s AND parent_run_id IS NULL
-                 AND status IN {active}) AS active,
+                 AND status IN {active}{ru}) AS active,
               (SELECT COUNT(*) FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
-                 WHERE q.tenant = %(t)s AND r.id IS NULL AND q.created_at >= %(s)s) AS pending,
+                 WHERE q.tenant = %(t)s AND r.id IS NULL AND q.created_at >= %(s)s{qu}) AS pending,
               (SELECT COALESCE(SUM(GREATEST(0, q.tokens - COALESCE(r.consumed_tokens, 0))), 0)
                  FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
-                 WHERE q.tenant = %(t)s AND q.tokens IS NOT NULL
+                 WHERE q.tenant = %(t)s AND q.tokens IS NOT NULL{qu}
                    AND (r.id IS NULL OR r.status IN {active})) AS rtokens,
               (SELECT COALESCE(SUM(GREATEST(0, q.cost_usd - COALESCE(r.consumed_cost_usd, 0))), 0)
                  FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
-                 WHERE q.tenant = %(t)s AND q.cost_usd IS NOT NULL
+                 WHERE q.tenant = %(t)s AND q.cost_usd IS NOT NULL{qu}
                    AND (r.id IS NULL OR r.status IN {active})) AS rcost
             """,
-            {"t": tenant, "s": since},
+            {"t": tenant, "s": since, "u": end_user},
         ).fetchone()
         pending = int(row["pending"])
         return TenantUsage(
@@ -452,23 +461,44 @@ class PostgresRunStore:
         usage: TenantUsage = await self._run(lambda: self._tenant_usage(tenant, since))
         return usage
 
+    async def user_usage(self, tenant: str, end_user: str, since: datetime) -> TenantUsage:
+        """Like ``tenant_usage``, for one end user's top-level runs in that tenant."""
+
+        usage: TenantUsage = await self._run(lambda: self._tenant_usage(tenant, since, end_user))
+        return usage
+
     async def reserve(
-        self, tenant: str, run_id: str, since: datetime, decide: Callable[[TenantUsage], Any]
+        self,
+        tenant: str,
+        run_id: str,
+        since: datetime,
+        decide: Callable[..., Any],
+        *,
+        end_user: str | None = None,
     ) -> Any:
-        """Atomic admission: a per-tenant advisory lock serializes concurrent reservations."""
+        """Atomic admission: a per-tenant advisory lock serializes concurrent reservations.
+
+        With ``end_user``, ``decide`` also receives that user's usage (same lock:
+        a user's runs are all in one tenant).
+        """
 
         def work() -> Any:
             self._connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"quota:{tenant}",))
-            decision = decide(self._tenant_usage(tenant, since))
+            usage = self._tenant_usage(tenant, since)
+            if end_user is None:
+                decision = decide(usage)
+            else:
+                decision = decide(usage, self._tenant_usage(tenant, since, end_user))
             if not isinstance(decision, str):
                 self._connection.execute(
                     """
-                    INSERT INTO quota_reservations(run_id, tenant, tokens, cost_usd, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO quota_reservations(run_id, tenant, tokens, cost_usd, created_at, end_user)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (run_id) DO UPDATE SET tokens = EXCLUDED.tokens,
-                        cost_usd = EXCLUDED.cost_usd, created_at = EXCLUDED.created_at
+                        cost_usd = EXCLUDED.cost_usd, created_at = EXCLUDED.created_at,
+                        end_user = EXCLUDED.end_user
                     """,
-                    (run_id, tenant, decision.tokens, decision.cost_usd, utc_now()),
+                    (run_id, tenant, decision.tokens, decision.cost_usd, utc_now(), end_user),
                 )
             return decision
 

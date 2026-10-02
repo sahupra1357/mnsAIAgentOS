@@ -133,6 +133,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 - **Docker mounts (fixed in Phase 10).** `--mount ...,rw` is invalid; bind mounts are read-write
   by default. The coding runtime used it, so its Docker backend failed against a real daemon.
   Coding images need the tools the agent runs: `python:3.12-slim` has no `git`.
+- **Overrides (Phase 13).** `AGENT_HARNESS_SET__SECTION__KEY=value` sets any table value
+  (lower-cased names, TOML-parsed values). Tests that build configs must not leak such
+  variables; the unit stage already clears `AGENT_HARNESS_*`.
+- **Context overflow (Phase 13).** A provider "context too long" error is retried with a
+  smaller view (2 retries by default, counted in `max_model_attempts`). The cap is persisted in
+  `model_responded` events and applies for the rest of the run on that profile.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A
@@ -376,6 +382,18 @@ All of Phase 12 is implemented. The `/ui` chat page is deferred.
    - `GET /runs/{id}/artifacts/{aid}` (the global route is admin-only with tenant keys);
    - `gc` removes old unreferenced artifacts and snapshots;
    - eval scenarios take `output_schema`, `answers`, `[guardrails]`, and `expect.result`.
+
+**Phase 13 – Limits and deadlines** [durable-agent-orchestration, context-management, harness-operations, production-hardening] — on `phase-13-limits`
+1. Context-overflow recovery: `ContextOverflowError` (adapters classify vLLM/SGLang/llama.cpp/OpenAI
+   messages and parse the stated sizes); the step is retried with a smaller, persisted input cap
+   (`context_overflow_retries`, `context_overflow_shrink`, `context_overflow_patterns`).
+2. Deadlines for paused runs: `[interaction] approval_timeout_seconds`, `question_timeout_seconds`,
+   `on_timeout = deny|cancel|fail`; `expire_pending_input()`, worker reconcile, CLI `expire`.
+3. API rate limits: `[api] rate_limit_per_minute`, `rate_limit_burst` (token bucket per key, 429 +
+   Retry-After; `ratelimit.py`).
+4. Per-user quotas: `[user_quotas]` (+ `[user_quotas.users.NAME]`), reserved with the tenant quota;
+   stores gain `user_usage` and `reserve(..., end_user=)` (SQLite migration 7, Postgres 4).
+Also `[orchestrator]` (all `OrchestratorSettings`) and `AGENT_HARNESS_SET__SECTION__KEY` overrides.
 
 ## Validation
 

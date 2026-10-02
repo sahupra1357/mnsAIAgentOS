@@ -695,6 +695,64 @@ services you control.
 - **Unloaded tools:** calling a tool that is not loaded returns a message telling the
   model to load it first.
 
+## Limits, Deadlines, and Overrides
+
+Every limit below is set in the config file, and any table value can be changed
+without editing it: `AGENT_HARNESS_SET__SECTION__KEY=value` (more `__` parts for nested
+tables; the value is read as TOML, so `60`, `1.5`, `true`, and `["a"]` work, and other
+text is a plain string; names are lower-cased).
+
+```toml
+[orchestrator]                    # loop limits; 0 turns an optional check off
+max_model_attempts = 3            # provider requests per step and profile (incl. adapter retries)
+max_tool_attempts = 3
+max_identical_tool_calls = 5      # identical calls before they are refused
+max_refused_repeats = 2           # refusals before the run fails (-1: never)
+max_tool_calls_per_turn = 32      # a larger reply is refused whole
+context_overflow_retries = 2      # retries with a smaller context when the server says "too long"
+context_overflow_shrink = 0.5     # used when the server does not say by how much
+context_overflow_patterns = []    # extra regexes that mark an error as an overflow
+
+[interaction]
+approval_timeout_seconds = 0      # 0 waits forever
+question_timeout_seconds = 0      # for ask_user questions
+on_timeout = "deny"               # deny | cancel | fail
+
+[api]
+rate_limit_per_minute = 0         # per API key (or client address); 0 = off
+rate_limit_burst = 0              # 0 = rate_limit_per_minute
+
+[user_quotas]                     # per end user (`user` on POST /runs), within the tenant; 0 = no limit
+max_runs_per_day = 0
+max_tokens_per_day = 0
+max_cost_usd_per_day = 0.0
+max_concurrent_runs = 0
+# [user_quotas.users.alice]       # replaces the values above for one user
+# max_runs_per_day = 100
+```
+
+For example, `AGENT_HARNESS_SET__API__RATE_LIMIT_PER_MINUTE=120` or
+`AGENT_HARNESS_SET__USER_QUOTAS__USERS__ALICE__MAX_RUNS_PER_DAY=100`.
+
+- **Context overflow:** when a server rejects a request as larger than its context
+  (vLLM, SGLang, llama.cpp, and OpenAI messages are recognized), the step is retried with
+  a smaller view. The new input cap is the estimate times `context_overflow_shrink`, or the
+  ratio the server states less 10%. The cap is persisted in the `model_responded` event
+  (`context_overflow`, `max_input_tokens`) and applies to the rest of the run on that
+  profile, so later turns stay append-only between trims. This also covers profiles
+  without `context_window`. The retries count against `max_model_attempts`.
+- **Deadlines:** a run paused for an approval or an `ask_user` answer past its timeout is
+  resolved by `on_timeout`. `deny` denies the tool (or declines the question) and the run
+  continues; `cancel` and `fail` end it. Workers check at every reconcile (60 s by
+  default) and enqueue runs that continue; `agent-harness expire` does the same once (for
+  cron, or without workers). The resolution is recorded with `actor = "timeout"`.
+- **Rate limits:** requests beyond the burst get HTTP 429 with `Retry-After`. Failed
+  authentication is limited by client address. `/healthz` and `/readyz` are never
+  limited. The state is per API process.
+- **Per-user quotas:** checked with the tenant's `[[quotas]]` in the same atomic
+  reservation, and again at each step. A refusal names the user (HTTP 429, CLI exit 2).
+  Runs without `end_user` are not limited by them.
+
 ## Production: Storage, Access, Quotas, Security, Deployment
 
 The full guide is in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md), and `deploy/` has a
@@ -704,7 +762,9 @@ compose setup with Postgres, the API, and two workers.
 |---|---|
 | **Storage** | SQLite by default. With `pip install -e '.[postgres]'`, `--database postgresql://...` or `[storage] url_env` uses Postgres. Both run versioned migrations on start, and both pass one conformance suite (`tests/test_store_conformance.py`). |
 | **API access** | `[[api.keys]]`: each key is a principal with a tenant and a role (viewer, operator, or admin). Keys are configured by SHA-256 or read from the environment. Principals only see their tenant's runs, and approvals and mode changes record who acted. |
-| **Quotas** | `[[quotas]]` limits runs, tokens, and cost per tenant over 24 hours, plus concurrent runs. Admission **reserves** budget atomically and caps the run's budget to the grant. The orchestrator re-checks at every step. Refusals are HTTP 429 or CLI exit 2. |
+| **Quotas** | `[[quotas]]` limits runs, tokens, and cost per tenant over 24 hours, plus concurrent runs. `[user_quotas]` adds the same limits per end user. Admission **reserves** budget atomically and caps the run's budget to the grant. The orchestrator re-checks at every step. Refusals are HTTP 429 or CLI exit 2. |
+| **Rate limits** | `[api] rate_limit_per_minute` / `rate_limit_burst` per API key: HTTP 429 with `Retry-After`. |
+| **Deadlines** | `[interaction] approval_timeout_seconds` / `question_timeout_seconds` with `on_timeout`: workers (or `agent-harness expire`) resolve paused runs that waited too long. |
 | **Memory** | `[memory] backend = "sqlite"` (FTS5) or `"postgres"` (full-text search). `agent-harness memory migrate --from sqlite:memory.sqlite3` copies every note. |
 | **Sandboxing** | `[coding.docker] mode = "per_run"` keeps one warm container per run for coding commands. Sandboxed Python tools run in the run's container. The container is removed when the run ends. |
 | **Secrets** | Credential fields accept `NAME`, `env:NAME`, or `file:/run/secrets/name`. |

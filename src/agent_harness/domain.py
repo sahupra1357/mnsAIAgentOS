@@ -785,6 +785,18 @@ class ContextWindowExceededError(PermanentModelError):
     """Even the minimum required context does not fit the model's window."""
 
 
+class ContextOverflowError(PermanentModelError):
+    """The provider rejected a request because it does not fit the model's context.
+
+    Unlike ``ContextWindowExceededError`` (the harness's own estimate), this comes
+    from the server, so a smaller request may succeed. ``limit_tokens`` and
+    ``requested_tokens`` are set when the server's message states them.
+    """
+
+    limit_tokens: int | None = None
+    requested_tokens: int | None = None
+
+
 class QuotaExceededError(HarnessError):
     """A tenant may not start or continue work now (see ``agent_harness.access``)."""
 

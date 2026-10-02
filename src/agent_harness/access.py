@@ -143,6 +143,7 @@ def decide_admission(
     tokens: int | None,
     cost_usd: float | None,
     new_run: bool,
+    subject: str | None = None,
 ) -> Grant | str:
     """Grant a reservation (possibly smaller than asked) or return why not.
 
@@ -150,33 +151,34 @@ def decide_admission(
     concurrent admissions can never both take the same remaining budget.
     """
 
+    who = subject or f"tenant {tenant!r}"
     if new_run and quota.max_runs_per_day is not None and usage.runs >= quota.max_runs_per_day:
-        return f"tenant {tenant!r} reached its limit of {quota.max_runs_per_day} runs per day"
+        return f"{who} reached its limit of {quota.max_runs_per_day} runs per day"
     if new_run and quota.max_concurrent_runs is not None and usage.active_runs >= quota.max_concurrent_runs:
-        return (f"tenant {tenant!r} already has {usage.active_runs} active runs "
+        return (f"{who} already has {usage.active_runs} active runs "
                 f"(limit {quota.max_concurrent_runs})")
     granted_tokens = tokens
     if quota.max_tokens_per_day is not None:
         remaining = quota.max_tokens_per_day - usage.tokens - usage.reserved_tokens
         if remaining <= 0:
-            return f"tenant {tenant!r} has no tokens left of its {quota.max_tokens_per_day} per day"
+            return f"{who} has no tokens left of its {quota.max_tokens_per_day} per day"
         granted_tokens = remaining if tokens is None else min(tokens, remaining)
     granted_cost = cost_usd
     if quota.max_cost_usd_per_day is not None:
         remaining_cost = quota.max_cost_usd_per_day - usage.cost_usd - usage.reserved_cost_usd
         if remaining_cost <= 0:
-            return f"tenant {tenant!r} has no budget left of its ${quota.max_cost_usd_per_day:.2f} per day"
+            return f"{who} has no budget left of its ${quota.max_cost_usd_per_day:.2f} per day"
         granted_cost = remaining_cost if cost_usd is None else min(cost_usd, remaining_cost)
     return Grant(tokens=granted_tokens, cost_usd=granted_cost)
 
 
-def usage_over_limit(quota: Quota, usage: Any, tenant: str) -> str | None:
+def usage_over_limit(quota: Quota, usage: Any, tenant: str, *, kind: str = "tenant") -> str | None:
     """Step-boundary check: consumption (not reservations) already at the limit."""
 
     if quota.max_tokens_per_day is not None and usage.tokens >= quota.max_tokens_per_day:
-        return f"tenant quota: {tenant!r} used its {quota.max_tokens_per_day} tokens for the day"
+        return f"{kind} quota: {tenant!r} used its {quota.max_tokens_per_day} tokens for the day"
     if quota.max_cost_usd_per_day is not None and usage.cost_usd >= quota.max_cost_usd_per_day:
-        return f"tenant quota: {tenant!r} spent its ${quota.max_cost_usd_per_day:.2f} for the day"
+        return f"{kind} quota: {tenant!r} spent its ${quota.max_cost_usd_per_day:.2f} for the day"
     return None
 
 

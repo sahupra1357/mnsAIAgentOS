@@ -37,6 +37,7 @@ from .errors import (
     ProviderError,
     RetryableProviderError,
     ThrottlingError,
+    context_overflow_error,
 )
 from .transport import (
     HttpResponse,
@@ -395,6 +396,11 @@ class OpenAICompatibleClient:
             )
             transient.retry_after = retry_after
             raise transient
+        overflow = context_overflow_error(
+            response.status, detail, response.body.decode("utf-8", errors="replace")[:4000]
+        )
+        if overflow is not None:
+            raise overflow
         raise ProviderError(f"model provider error ({response.status}): {detail}")
 
     def _normalize(self, response: HttpResponse) -> ModelResponse:

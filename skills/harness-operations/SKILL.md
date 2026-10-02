@@ -184,3 +184,12 @@ the feature is not configured.
 - **Adding a store method:** add it to `tests/test_store_conformance.py` and implement it in
   all three stores (memory, SQLite, Postgres).
 
+## Phase 13: rate limits and deadlines
+
+- `ratelimit.RateLimiter`: a token bucket per key (`key:<principal>`, or `addr:<client>`
+  without keys or on failed authentication), checked in `HarnessAPI._dispatch` after
+  `/healthz` and `/readyz`. 429 carries `Retry-After`. Per process.
+- `AgentOrchestrator.expire_pending_input()` lists `awaiting_input` top-level runs,
+  follows a waiting subagent through `pending_approval`, and applies `on_input_timeout`.
+  `deny` goes through `resolve_approval(actor="timeout")`; `Worker.expire_input()` runs
+  after each reconcile and enqueues the runs that continue. CLI: `agent-harness expire`.

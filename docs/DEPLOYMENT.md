@@ -61,6 +61,20 @@ Edit `deploy/models.toml` first so its model profile points at your model server
     `quota_check_seconds`).
   - **Overshoot:** at most one model call's tokens, since usage is known only after the
     call returns.
+- **Per-user quotas.** `[user_quotas] max_runs_per_day, max_tokens_per_day,
+  max_cost_usd_per_day, max_concurrent_runs` apply to every end user (the API's `user`
+  field) within their tenant; `[user_quotas.users.NAME]` replaces them for one user; 0 means
+  no limit. They are reserved in the same transaction as the tenant quota and re-checked at
+  each step. Upgrading adds a column and indexes (SQLite migration 7, Postgres migration 4).
+- **Rate limits.** `[api] rate_limit_per_minute` and `rate_limit_burst` limit requests per
+  API key (per client address without keys): HTTP 429 with `Retry-After`. Each API process
+  keeps its own counters, so with N replicas a caller can reach N times the rate; put a
+  limit at the load balancer too if that matters.
+- **Deadlines for paused runs.** `[interaction] approval_timeout_seconds`,
+  `question_timeout_seconds`, and `on_timeout = "deny" | "cancel" | "fail"`. Workers apply
+  them at every reconcile; without workers, run `agent-harness expire` from cron.
+- **Overrides.** Any table value can be set from the environment, which suits containers:
+  `AGENT_HARNESS_SET__API__RATE_LIMIT_PER_MINUTE=120`.
 - **Secrets.** Credential fields accept an environment variable name, `env:NAME`, or
   `file:/run/secrets/name`. The file form works with Docker and Kubernetes secret mounts.
   Error messages name the reference, never the value.

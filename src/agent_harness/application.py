@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
+from collections.abc import Callable
 from typing import Any
 from os import PathLike
 from pathlib import Path
@@ -11,7 +12,14 @@ from pathlib import Path
 from .agents import SubagentDefinition, SubagentLimits
 from .artifacts import READ_ARTIFACT_SPEC, LocalArtifactStore, read_artifact_handler
 from .coding import create_coding_tool_runtime
-from .config import AgentConfig, ConfigError, HarnessConfig, HookConfig, load_config
+from .config import (
+    AgentConfig,
+    ConfigError,
+    HarnessConfig,
+    HookConfig,
+    OrchestratorConfig,
+    load_config,
+)
 from .instructions import (
     Skill,
     SystemContextBuilder,
@@ -238,7 +246,7 @@ def build_application(
             tools=tool_runtime,
             # Events are masked for secrets on the way into the store.
             store=RedactingRunStore(store, redactor) if redactor is not None else store,
-            settings=settings,
+            settings=settings or orchestrator_settings(config.orchestrator),
             context=BudgetedContextBuilder(context_limits, policy=context_policy),
             fallbacks=models.fallback_profiles,
             telemetry=telemetry,
@@ -274,6 +282,10 @@ def build_application(
             tool_loading=_tool_loading(config, tool_runtime),
         planning=_planning(config),
         quotas=quotas_from_config(config),
+            approval_timeout_seconds=config.interaction.approval_timeout_seconds,
+            question_timeout_seconds=config.interaction.question_timeout_seconds,
+            on_input_timeout=config.interaction.on_timeout,
+            user_quotas=user_quotas_from_config(config),
         )
         return HarnessApplication(
             catalog=catalog,
@@ -317,6 +329,42 @@ def quotas_from_config(config: HarnessConfig) -> dict[str, Quota]:
                         q.max_cost_usd_per_day, q.max_concurrent_runs)
         for q in config.quotas
     }
+
+
+def user_quotas_from_config(config: HarnessConfig) -> Callable[[str], Quota | None] | None:
+    """Per-end-user limits from ``[user_quotas]`` (0 = no limit), or None when unset."""
+
+    if not config.user_quotas.enabled:
+        return None
+
+    def lookup(end_user: str) -> Quota | None:
+        limits = config.user_quotas.for_user(end_user)
+        if not limits.limited:
+            return None
+        return Quota(
+            end_user,
+            limits.max_runs_per_day or None,
+            limits.max_tokens_per_day or None,
+            limits.max_cost_usd_per_day or None,
+            limits.max_concurrent_runs or None,
+        )
+
+    return lookup
+
+
+def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
+    """``[orchestrator]`` as settings: 0 turns an optional limit off (-1: never stop on refusals)."""
+
+    return OrchestratorSettings(
+        max_model_attempts=section.max_model_attempts,
+        max_tool_attempts=section.max_tool_attempts,
+        max_identical_tool_calls=section.max_identical_tool_calls or None,
+        max_refused_repeats=None if section.max_refused_repeats < 0 else section.max_refused_repeats,
+        max_tool_calls_per_turn=section.max_tool_calls_per_turn or None,
+        context_overflow_retries=section.context_overflow_retries,
+        context_overflow_shrink=section.context_overflow_shrink,
+        context_overflow_patterns=section.context_overflow_patterns,
+    )
 
 
 def _is_postgres_url(value: str) -> bool:
