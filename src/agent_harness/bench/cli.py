@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from agent_harness.coding.execution import (
     DockerExecutionRuntime,
@@ -257,7 +257,7 @@ async def run_pipeline(
 
     if telemetry_path is None:
         telemetry_path = output_dir / "telemetry.jsonl"  # always recorded, per run
-    telemetry_sink: JsonLinesTelemetry | None = JsonLinesTelemetry(telemetry_path.open("a", encoding="utf-8"))
+    telemetry_sink: JsonLinesTelemetry | None = JsonLinesTelemetry(_open_append(telemetry_path))
     policy = ResidencyPolicy.from_mapping(plan.get("residency", {}))
     residency: ResidencyManager | None = None
     harness_config = None
@@ -447,6 +447,11 @@ def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, outpu
     )
 
 
+def _open_append(path: Path) -> TextIO:
+    path.parent.mkdir(parents=True, exist_ok=True)  # e.g. a file inside --out, created later
+    return path.open("a", encoding="utf-8")
+
+
 def _pipeline_output_dir(plan_path: Path) -> Path:
     try:
         settings = tomllib.loads(plan_path.read_text(encoding="utf-8")).get("pipeline", {})
@@ -542,8 +547,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 retry_errors=not args.no_retry_errors,
                 transcripts=args.transcripts,
             )
-            sink = (JsonLinesTelemetry(args.telemetry_file.open("a", encoding="utf-8"))
-                    if args.telemetry_file else None)
+            sink = (JsonLinesTelemetry(_open_append(args.telemetry_file)) if args.telemetry_file else None)
             try:
                 report, _ = asyncio.run(execute_benchmark(spec, telemetry=sink))
             finally:

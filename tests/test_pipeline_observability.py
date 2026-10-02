@@ -151,6 +151,61 @@ class RunHistoryTests(unittest.TestCase):
             self.assertIn("history: ", err.getvalue())
 
 
+class SingleCallSuiteTests(unittest.TestCase):
+    def test_bfcl_failures_get_transcripts_and_telemetry(self) -> None:
+        from agent_harness.domain import ToolCall
+
+        class OneCall:
+            """Answers every BFCL item with a single convert_currency call (misses parallel_0)."""
+
+            def resolve(self, profile: str) -> "OneCall":
+                return self
+
+            async def complete(self, request: ModelRequest) -> ModelResponse:
+                names = [t.name for t in request.tools]
+                if "convert_currency" in names:
+                    call = ToolCall("c1", "convert_currency", {"amount": 10, "from_currency": "USD",
+                                                               "to_currency": "EUR"})
+                    return ModelResponse(tool_calls=(call,), finish_reason=FinishReason.TOOL_CALLS,
+                                         usage=Usage(input_tokens=40, output_tokens=10))
+                return ModelResponse(content="I cannot help with that.", finish_reason=FinishReason.STOP)
+
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "plan.toml"
+            path.write_text(f"""
+[pipeline]
+config = "{CONFIG}"
+output_dir = "out"
+
+[[benchmark]]
+name = "bfcl"
+suite = "bfcl"
+data = "{SAMPLES / 'bfcl_sample.json'}"
+answers = "{SAMPLES / 'bfcl_sample_answers.json'}"
+profile = "ollama"
+""")
+            with redirect_stderr(io.StringIO()):
+                asyncio.run(run_pipeline(path, stages=("benchmarks",), models=OneCall()))
+            run = latest_run(Path(raw) / "out")
+            assert run is not None
+            results = [json.loads(line) for line in (run / "bfcl" / "results.jsonl").read_text().splitlines()]
+            failed = [r["id"] for r in results if not r["correct"]]
+            self.assertIn("parallel_0", failed)
+            for item_id in failed:
+                saved = json.loads((run / "bfcl" / "transcripts" / f"{item_id}.json").read_text())
+                self.assertEqual(saved["kind"], "single_model_call")
+                self.assertTrue(saved["request"]["messages"] and saved["request"]["tools"])
+            parallel = json.loads((run / "bfcl" / "transcripts" / "parallel_0.json").read_text())
+            self.assertEqual([c["name"] for c in parallel["response"]["tool_calls"]], ["convert_currency"])
+            self.assertEqual(parallel["response"]["usage"]["input_tokens"], 40)
+            passed = [r["id"] for r in results if r["correct"]]
+            for item_id in passed:
+                self.assertFalse((run / "bfcl" / "transcripts" / f"{item_id}.json").exists())
+            calls = [json.loads(line) for line in (run / "telemetry.jsonl").read_text().splitlines()]
+            self.assertEqual(sum(c["kind"] == "model_call" for c in calls), len(results))
+            self.assertIn('href="bfcl/transcripts/parallel_0.json"', (run / "index.html").read_text())
+
+
 class ObservabilityTests(unittest.TestCase):
     def run_plan(self, directory: Path, **kwargs: Any) -> tuple[list[Any], list[str], list[Any]]:
         shown: list[Any] = []
@@ -189,6 +244,14 @@ class ObservabilityTests(unittest.TestCase):
             self.assertIn("Model and tool calls", html)
             self.assertIn("0.667", html)
             self.assertIn("docs/TROUBLESHOOTING.md", html)
+
+    def test_telemetry_file_in_a_missing_folder_is_created(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            telemetry = Path(raw) / "not" / "yet" / "telemetry.jsonl"
+            with redirect_stderr(io.StringIO()):
+                asyncio.run(run_pipeline(plan(Path(raw)), stages=("benchmarks",), models=Model(),
+                                         telemetry_path=telemetry))
+            self.assertTrue(telemetry.read_text())
 
     def test_report_escapes_everything(self) -> None:
         from agent_harness.bench.cli import StageResult
