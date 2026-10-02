@@ -60,8 +60,13 @@ class OllamaClient(OpenAICompatibleClient):
         for key, value in self._profile.parameters.items():
             if key in _NATIVE_TOP_LEVEL_PARAMETERS:
                 payload[key] = value
+            elif key == "max_tokens":
+                # The OpenAI-style output cap; native mode calls it num_predict.
+                options.setdefault("num_predict", value)
             else:
                 options[key] = value
+        if "num_predict" in self._profile.parameters:
+            options["num_predict"] = self._profile.parameters["num_predict"]
         if self._profile.context_window is not None:
             options["num_ctx"] = self._profile.context_window
         if request.temperature is not None:

@@ -108,6 +108,9 @@ Open the failed item's transcript (the HTML report links it) and read it in this
    |---|---|
    | `model_requested` → `model_responded` with `ok: false, retryable: true`, repeated | Server errors or timeouts; look at the server log at that time |
    | `model_fallback` | The profile gave up and the run switched to its `fallback` |
+| `model_responded` with `provider_attempts: 2`, `retried_errors: ["timeout"]` | The adapter timed out and retried; the call's latency includes the lost attempt |
+| `finish_reason: "length"` | The reply hit the output cap (`max_tokens`); raise it if the answers are legitimately long |
+| Tool results `Refused: your reply made N tool calls` | The model emitted more than `max_tool_calls_per_turn` calls in one reply (a runaway) |
    | `tool_requested` → `tool_responded` with a status other than `success` | A tool failed; the tool message in `messages` says why |
    | `budget_exhausted` | Steps, tokens, time, or cost ran out; raise `max_steps` / `max_wall_seconds` on the benchmark |
    | `output_rejected` | The reply did not match `output_schema`; the next request asks again |
@@ -172,6 +175,8 @@ none exists. A baseline recorded from a broken run must be deleted by hand.
 | Modal image build: `CUDA_HOME is not set` | pip fell back to a vLLM release that must be compiled | Keep `VLLM_PACKAGE` pinned in `examples/modal/vllm_server.py` |
 | vLLM: `Could not find nvcc` at startup | FlashInfer sampler needs the CUDA toolkit | `VLLM_USE_FLASHINFER_SAMPLER=0` (already in the script) |
 | `CERTIFICATE_VERIFY_FAILED` only for Modal | Wrong Python on `PATH` (a moved venv) | Recreate `.venv`; `which agent-harness` |
+| One call takes about twice `timeout_seconds` (e.g. 124 s with 120 s); the report shows `retried timeout` | The first attempt timed out and the retry succeeded. With no output cap the model may be running away | Keep `max_tokens` in the profile's `parameters`; check the server log for long generations |
+| A run fails with `too many tool calls in one reply`, or vLLM keeps generating after the harness gave up | A runaway reply; Modal's proxy does not cancel abandoned vLLM requests | Keep `max_tokens` set; `modal app stop <app>` stops requests still generating |
 | Results ignore a TOML edit | An `AGENT_HARNESS_MODEL__*` variable overrides it | Environment wins over the file: comment it out in `.env` |
 | Context errors or silent truncation on llama.cpp | `context_window` is larger than the server's `ctx-size` | Keep them equal |
 | Benchmark fails at 100% errors, and resume "fixes nothing" | Older versions reused errored items | Current versions rerun them; delete the bad baseline |

@@ -28,6 +28,11 @@ Gateway behaviour per profile (Phase 12d):
 - `structured_output = "prompt"` sends the schema as a final user message instead of
   `response_format` / `format`.
 - New profile fields use `HASH_OMIT_DEFAULT`.
+- A success after adapter retries carries `metadata["provider_attempts"]`,
+  `["retried_errors"]` (error categories) and `["attempt_timeout_seconds"]`; the orchestrator
+  copies them into the `model_responded` event and `model_call` telemetry.
+- Ollama native mode maps `parameters.max_tokens` to `options.num_predict` (an explicit
+  `num_predict` wins), so one output cap works in both API modes.
 
 `Message.parts` (images) becomes an OpenAI content array (text, then `image_url`), or
 native Ollama `images` (base64 from data URLs only).
