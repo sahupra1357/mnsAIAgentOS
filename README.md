@@ -785,7 +785,9 @@ self-running animated SVG, and an editable Excalidraw file. They cover:
 - context summarization;
 - the tool platform;
 - plan-and-execute;
-- API access and tenancy.
+- API access and tenancy (keys, rate limits, tenant and user quotas);
+- context-overflow recovery;
+- limits and deadlines (where each limit applies, and how paused runs expire).
 
 ## Context Window
 
@@ -804,6 +806,13 @@ The stored run history is never modified.
 - **Too large to fit:** if the system prompt, first user message (with any summary), and
   latest turn alone do not fit, the run fails with `ContextWindowExceededError`. It does not send a
   truncated request.
+- **When the server still says "too long":** trimming and summarization work from an
+  estimate (3.5 characters per token), and profiles without `context_window` are not
+  trimmed at all. Code, JSON, and non-English text use more tokens per character, and the
+  server's chat template and tool rendering add tokens of their own. A provider
+  rejection is therefore retried with a smaller, persisted cap; see
+  [Limits, Deadlines, and Overrides](#limits-deadlines-and-overrides) and
+  [the diagram](docs/diagrams/08-context-overflow.svg).
 
 Tune the behavior with `build_application(..., context_policy=ContextPolicy(...))`.
 
@@ -978,6 +987,11 @@ the boundary: unknown fields, oversized text, and out-of-range budgets are rejec
   Runs started from the CLI (`agent-harness run`) are never picked up by workers.
 - **Cancel.** A cancelled run's in-flight model or tool call is stopped within about
   2 seconds, instead of at the next step.
+- **Deadlines.** With `[interaction] approval_timeout_seconds` or
+  `question_timeout_seconds`, each reconcile also resolves approvals and questions that
+  waited too long (`on_timeout`), and enqueues the runs that continue.
+- **Rate limits.** With `[api] rate_limit_per_minute`, a caller over the limit gets
+  `429` with `Retry-After`; health checks are exempt.
 
 ### Building a chat front end on the API
 
@@ -1108,6 +1122,11 @@ Each run can limit:
 - Consumed tokens
 - Estimated cost
 
+Around the budget, the loop has its own guards (`[orchestrator]`, see
+[Limits, Deadlines, and Overrides](#limits-deadlines-and-overrides)): provider attempts per
+step, repeated identical tool calls, tool calls per reply, and context-overflow retries.
+Tenant and end-user quotas cap the budget at admission and are re-checked at every step.
+
 Run state and boundary events are checkpointed after accepted model and tool results. SQLite checkpoints update the run snapshot and append events atomically, using a version field to reject concurrent stale writes.
 
 **Durable tool results.** Successful tool results are stored in the run database
@@ -1180,3 +1199,7 @@ optional OpenTelemetry exporter (Phase 4b), and a Postgres store for multi-host
 deployments (Phase 9) have since been added. Approvals are still collected by polling
 (`GET /runs/{id}/approval` or `agent-harness runs --status awaiting_input`); there is no
 push notification channel yet.
+
+*Update (Phase 12–13):* `[notifications]` webhooks now report runs that pause or finish,
+and paused runs can expire (`[interaction] approval_timeout_seconds`). Phase 13 also added
+context-overflow recovery, API rate limits, and per-user quotas.

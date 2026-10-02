@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 1060" width="1500" height="1060" font-family="Helvetica, Arial, sans-serif">
+<rect width="1500" height="1060" fill="#ffffff"/>
+<text x="40" y="50" font-size="30" fill="#1e1e1e" font-weight="bold"><tspan x="40" dy="0">Limits and deadlines: where each one applies</tspan></text>
+<g class="node" id="n-req"><rect x="40" y="100" width="200" height="80" rx="12" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/><text font-size="18" text-anchor="middle" fill="#1e1e1e"><tspan x="140.0" y="146.3">HTTP request</tspan></text></g>
+<g class="edge" id="e-l1"><polyline points="240,140 290,140" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="290,140 279.2,145.2 279.2,134.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-rate"><polygon points="400.0,75 510,140.0 400.0,205 290,140.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="400.0" y="135.6">within rate</tspan><tspan x="400.0" y="155.6">limit?</tspan></text></g>
+<g class="edge" id="e-l_rate"><polyline points="400,205 400,260" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="400,260 394.8,249.2 405.2,249.2" fill="#ef4444"/></g>
+<g class="node" id="n-e_rate"><rect x="290" y="260" width="220" height="70" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="400.0" y="300.6">429 + Retry-After</tspan></text></g>
+<g class="edge" id="e-l2"><polyline points="510,140 570,140" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="570,140 559.2,145.2 559.2,134.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-quota"><polygon points="690.0,75 810,140.0 690.0,205 570,140.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="690.0" y="135.6">tenant + user</tspan><tspan x="690.0" y="155.6">quota left?</tspan></text></g>
+<g class="edge" id="e-l_quota"><polyline points="690,205 690,260" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="690,260 684.8,249.2 695.2,249.2" fill="#ef4444"/></g>
+<g class="node" id="n-e_quota"><rect x="570" y="260" width="240" height="70" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="690.0" y="300.6">429 quota</tspan></text></g>
+<g class="edge" id="e-l3"><polyline points="810,140 870,140" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="870,140 859.2,145.2 859.2,134.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-run"><rect x="870" y="100" width="240" height="80" rx="12" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="990.0" y="135.6">Run created;</tspan><tspan x="990.0" y="155.6">budget capped</tspan></text></g>
+<g class="edge" id="e-l4"><polyline points="990,180 990,330" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="990,330 984.8,319.2 995.2,319.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-step"><rect x="870" y="330" width="240" height="90" rx="12" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="990.0" y="360.6">Step boundary:</tspan><tspan x="990.0" y="380.6">budgets, tenant and</tspan><tspan x="990.0" y="400.6">user consumption</tspan></text></g>
+<g class="edge" id="e-l_budget"><polyline points="1110,375 1170,375" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="1170,375 1159.2,380.2 1159.2,369.8" fill="#ef4444"/></g>
+<g class="node" id="n-exhausted"><rect x="1170" y="340" width="280" height="70" rx="12" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="380.6">BUDGET_EXHAUSTED</tspan></text></g>
+<g class="edge" id="e-l5"><polyline points="990,420 990,480" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="990,480 984.8,469.2 995.2,469.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-model"><rect x="870" y="480" width="240" height="90" rx="12" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="990.0" y="510.6">Model call: max_tokens</tspan><tspan x="990.0" y="530.6">cap; adapter retries</tspan><tspan x="990.0" y="550.6">recorded</tspan></text></g>
+<g class="edge" id="e-l6"><polyline points="990,570 990,620" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="990,620 984.8,609.2 995.2,609.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-calls"><polygon points="990.0,620 1110,685.0 990.0,750 870,685.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="15" text-anchor="middle" fill="#1e1e1e"><tspan x="990.0" y="671.5">more than</tspan><tspan x="990.0" y="690.2">max_tool_calls_</tspan><tspan x="990.0" y="709.0">per_turn?</tspan></text></g>
+<g class="edge" id="e-l_calls"><polyline points="1110,685 1170,685" fill="none" stroke="#ef4444" stroke-width="2"/><polygon points="1170,685 1159.2,690.2 1159.2,679.8" fill="#ef4444"/></g>
+<g class="node" id="n-refuse"><rect x="1170" y="640" width="280" height="90" rx="12" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1310.0" y="670.6">Refuse the whole reply;</tspan><tspan x="1310.0" y="690.6">fail after</tspan><tspan x="1310.0" y="710.6">max_refused_repeats</tspan></text></g>
+<g class="edge" id="e-l7"><polyline points="990,750 990,820" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="990,820 984.8,809.2 995.2,809.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-tools"><rect x="870" y="820" width="240" height="90" rx="12" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="990.0" y="860.6">Run tools; identical</tspan><tspan x="990.0" y="880.6">repeats refused</tspan></text></g>
+<g class="edge" id="e-l8"><polyline points="870,865 760,865" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="760,865 770.8,859.8 770.8,870.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-paused"><rect x="500" y="820" width="260" height="90" rx="12" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="630.0" y="870.6">AWAITING_INPUT</tspan></text></g>
+<g class="edge" id="e-l9"><polyline points="630,820 630,760" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="630,760 635.2,770.8 624.8,770.8" fill="#1e1e1e"/></g>
+<g class="node" id="n-deadline"><polygon points="630.0,630 760,695.0 630.0,760 500,695.0" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="630.0" y="690.6">deadline</tspan><tspan x="630.0" y="710.6">passed?</tspan></text></g>
+<g class="edge" id="e-l10"><polyline points="500,695 400,695" fill="none" stroke="#1e1e1e" stroke-width="2"/><polygon points="400,695 410.8,689.8 410.8,700.2" fill="#1e1e1e"/></g>
+<g class="node" id="n-action"><rect x="100" y="640" width="300" height="110" rx="12" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/><text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="250.0" y="680.6">on_timeout:</tspan><tspan x="250.0" y="700.6">deny -&gt; continue</tspan><tspan x="250.0" y="720.6">cancel / fail -&gt; end</tspan></text></g>
+<g class="edge" id="e-l_resume"><polyline points="250,640 250,375 870,375" fill="none" stroke="#8b5cf6" stroke-width="2"/><polygon points="870,375 859.2,380.2 859.2,369.8" fill="#8b5cf6"/></g>
+<text x="40" y="976" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">Settings: [api] rate_limit_*, [[quotas]], [user_quotas], [orchestrator], [interaction] *_timeout_seconds / on_timeout.</tspan></text>
+<text x="40" y="1001" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">Override any value: AGENT_HARNESS_SET__SECTION__KEY=value.  Workers check deadlines at every reconcile; without workers run `agent-harness expire`.</tspan></text>
+<rect x="385.04" y="219.5" width="29.92" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="400.0" y="238.1">no</tspan></text>
+<rect x="520.56" y="127.0" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="540.0" y="145.6">yes</tspan></text>
+<rect x="675.04" y="219.5" width="29.92" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="690.0" y="238.1">no</tspan></text>
+<rect x="820.56" y="127.0" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="840.0" y="145.6">yes</tspan></text>
+<rect x="1116.08" y="362.0" width="47.84" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1140.0" y="380.6">over</tspan></text>
+<rect x="1120.56" y="672.0" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1140.0" y="690.6">yes</tspan></text>
+<rect x="975.04" y="772.0" width="29.92" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="990.0" y="790.6">no</tspan></text>
+<rect x="764.2" y="842.0" width="101.60000000000001" height="46" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="815.0" y="860.6">approval /</tspan><tspan x="815.0" y="880.6">ask_user</tspan></text>
+<rect x="430.56" y="682.0" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="450.0" y="700.6">yes</tspan></text>
+<rect x="367.74" y="362.0" width="119.52000000000001" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
+<text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="427.5" y="380.6">deny: resume</tspan></text>
+</svg>
