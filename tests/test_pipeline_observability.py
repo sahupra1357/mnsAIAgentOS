@@ -236,14 +236,6 @@ class ObservabilityTests(unittest.TestCase):
             calls = [json.loads(line) for line in telemetry.read_text().splitlines()]
             self.assertEqual(sum(c["kind"] == "model_call" for c in calls), 3)
 
-    def test_telemetry_file_in_a_missing_folder_is_created(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            telemetry = Path(raw) / "not" / "yet" / "telemetry.jsonl"
-            with redirect_stderr(io.StringIO()):
-                asyncio.run(run_pipeline(plan(Path(raw)), stages=("benchmarks",), models=Model(),
-                                         telemetry_path=telemetry))
-            self.assertTrue(telemetry.read_text())
-
             html = (out.parent / "index.html").read_text()
             self.assertIn("Validation report", html)
             self.assertIn("gsm8k &middot; 1 failed", html)
@@ -252,6 +244,14 @@ class ObservabilityTests(unittest.TestCase):
             self.assertIn("Model and tool calls", html)
             self.assertIn("0.667", html)
             self.assertIn("docs/TROUBLESHOOTING.md", html)
+
+    def test_telemetry_file_in_a_missing_folder_is_created(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            telemetry = Path(raw) / "not" / "yet" / "telemetry.jsonl"
+            with redirect_stderr(io.StringIO()):
+                asyncio.run(run_pipeline(plan(Path(raw)), stages=("benchmarks",), models=Model(),
+                                         telemetry_path=telemetry))
+            self.assertTrue(telemetry.read_text())
 
     def test_report_escapes_everything(self) -> None:
         from agent_harness.bench.cli import StageResult
