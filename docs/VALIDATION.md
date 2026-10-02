@@ -179,11 +179,14 @@ what it unloaded:
 Every action appears as a `residency:<profile>` line in the output and in
 `pipeline-summary.json`.
 
-**Resuming benchmarks.**
-- Benchmarks resume from `results.jsonl`.
-- Items that ended in `error` or `failed` (usually the environment: a server down, out
-  of memory) are **run again** on resume, and the newest result wins. Pass
-  `--no-retry-errors` to keep them.
+**Fresh runs and resuming.**
+- **The pipeline starts every benchmark fresh.** It clears the previous
+  `results.jsonl`, `report.json`, and transcripts first, so the gates always judge new
+  answers. Baselines are kept.
+- **`pipeline --resume`** continues an interrupted run instead: it keeps recorded
+  answers and re-runs only items that ended in `error` or `failed`.
+- **`agent-harness-bench run`** always resumes from `--out` in the same way, unless
+  `--no-retry-errors` is given.
 - A baseline recorded from a broken run still has to be deleted by hand.
 
 **Smoke-check settings.** `[[smoke]]` entries also take:
