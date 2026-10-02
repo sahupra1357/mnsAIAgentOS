@@ -5,8 +5,9 @@ or the model itself) and fix it. Most entries come from real validation runs.
 
 ## The debugging loop
 
-1. **Read the report.** Open `validation-results/index.html`. It shows which stage
-   failed, which benchmark items failed, and a summary of model and tool calls.
+1. **Read the report.** Open `validation-results/index.html`, the run history. Pick a
+   run (the newest is marked "latest") to see which stage failed, which benchmark
+   items failed, and a summary of model and tool calls.
 2. **Find the layer.** Use the table in the next section. The right layer is usually
    obvious from the first failing stage.
 3. **Open the evidence** for that layer. See "Where the evidence is".
@@ -17,7 +18,7 @@ or the model itself) and fix it. Most entries come from real validation runs.
 | First failing stage | Layer | Look at |
 |---|---|---|
 | `static`, `unit` | Harness code or your Python environment | The stage detail line; run the command yourself |
-| `scenarios` | Harness behaviour (scripted models, no network) | `validation-results/scenarios.json` |
+| `scenarios` | Harness behaviour (scripted models, no network) | `<run>/scenarios.json` |
 | `smoke:<profile>` | Model server or connection | The `doctor` lines in the detail; the server log |
 | `residency:*` | Swapping local models | The Ollama and llama.cpp logs; `ollama ps`; `curl localhost:9931/models` |
 | `benchmark:<name>` with errors over 0% | Server under load, budgets, or the harness | Failed items, their transcripts, telemetry |
@@ -26,15 +27,21 @@ or the model itself) and fix it. Most entries come from real validation runs.
 
 ## Where the evidence is
 
+Each pipeline run has its own folder, `validation-results/runs/<YYYY-MM-DD_HH-MM-SS>/`,
+written `<run>` below. `validation-results/latest` (and `latest.txt`) points to the
+newest run. Earlier runs are kept, so you can compare a failing run with the last good
+one.
+
 | Evidence | Location | What it holds |
 |---|---|---|
-| HTML report | `validation-results/index.html` | Everything below, summarized, with links |
-| Stage results | `validation-results/pipeline-summary.json` | Every stage, its status, and its detail |
-| Benchmark items | `validation-results/<name>/results.jsonl` | One line per item: correct, expected, predicted, status, error, latency, tokens. Written live. |
-| **Transcripts** | `validation-results/<name>/transcripts/<item>.json` | The **full run** of every failed item: messages, tool calls and results, reasoning, events, and the error. Use `--transcripts all` to keep passing items too. |
-| Benchmark report | `validation-results/<name>/report.json` | Accuracy with a 95% CI, error rate, per-category scores, latency, tokens, cost, dataset hash |
-| Telemetry | The file given to `--telemetry-file` | One JSON line per model call (profile, latency, tokens, cached tokens, `finish_reason`, `error_category`) and per tool call (tool, status, latency). Never message text. |
-| Scenario results | `validation-results/scenarios.json` | Per scenario: outcome and failure reasons |
+| Run history | `validation-results/index.html` | Every run, newest first, with scores per benchmark and the change from the previous run |
+| HTML report | `<run>/index.html` | Everything below for that run, summarized, with links |
+| Stage results | `<run>/pipeline-summary.json` | Every stage, its status, and its detail |
+| Benchmark items | `<run>/<name>/results.jsonl` | One line per item: correct, expected, predicted, status, error, latency, tokens. Written live. |
+| **Transcripts** | `<run>/<name>/transcripts/<item>.json` | The **full run** of every failed item: messages, tool calls and results, reasoning, events, and the error. Use `--transcripts all` to keep passing items too. |
+| Benchmark report | `<run>/<name>/report.json` | Accuracy with a 95% CI, error rate, per-category scores, latency, tokens, cost, dataset hash |
+| Telemetry | `<run>/telemetry.jsonl` (or the file given to `--telemetry-file`) | One JSON line per model call (profile, latency, tokens, cached tokens, `finish_reason`, `error_category`) and per tool call (tool, status, latency). Never message text. |
+| Scenario results | `<run>/scenarios.json` | Per scenario: outcome and failure reasons |
 | Ollama log | `~/.ollama/logs/server.log` | Model loads, out-of-memory errors, request errors |
 | llama.cpp router log | `/tmp/llama-server.log` (the `--log-file` of `llama serve`) | Loads and unloads, `Compute error`, Metal out of memory |
 | Modal log | `modal app logs <app>` | Image build, cold start, vLLM startup errors, requests |
@@ -52,15 +59,16 @@ Over HTTP, use `GET /runs/{id}/events`. For a chat, use `GET /runs/{id}/messages
 ## Watching a run live
 
 ```bash
-agent-harness-bench pipeline examples/validation.local.toml --telemetry-file validation-results/telemetry.jsonl
-# progress lines go to stderr, and each result is printed as soon as it is known
+agent-harness-bench pipeline examples/validation.local.toml
+# progress lines go to stderr; each result is printed as soon as it is known
+# at the end it prints the run's report and the history page
 ```
 
 In other terminals:
 
 ```bash
-tail -f validation-results/<benchmark>/results.jsonl          # items as they finish
-tail -f validation-results/telemetry.jsonl                    # every model and tool call
+tail -f validation-results/latest/<benchmark>/results.jsonl   # items as they finish
+tail -f validation-results/latest/telemetry.jsonl             # every model and tool call
 tail -f ~/.ollama/logs/server.log   # or /tmp/llama-server.log, or: modal app logs <app>
 ```
 
@@ -135,8 +143,9 @@ agent-harness run --config examples/models.toml --model-profile llamacpp --datab
 agent-harness status --config examples/models.toml --database /tmp/debug.sqlite3 RUN_ID
 ```
 
-Each pipeline run starts benchmarks fresh. `pipeline --resume` continues an interrupted
-run instead, re-running only items that ended in `error` or `failed`.
+Each pipeline run starts benchmarks fresh, in a new run folder. `pipeline --resume`
+continues the latest run's folder instead, re-running only items that ended in `error`
+or `failed`.
 `agent-harness-bench run` always resumes from its `--out` directory; delete that
 directory to start over.
 
@@ -166,7 +175,7 @@ none exists. A baseline recorded from a broken run must be deleted by hand.
 | Results ignore a TOML edit | An `AGENT_HARNESS_MODEL__*` variable overrides it | Environment wins over the file: comment it out in `.env` |
 | Context errors or silent truncation on llama.cpp | `context_window` is larger than the server's `ctx-size` | Keep them equal |
 | Benchmark fails at 100% errors, and resume "fixes nothing" | Older versions reused errored items | Current versions rerun them; delete the bad baseline |
-| Benchmarks print `resuming: … already has results` and finish instantly; telemetry is empty | Older versions of the pipeline reused earlier answers | Current versions start fresh unless `--resume` is given |
+| Benchmarks print `resuming: … already has results` and finish instantly; telemetry is empty | Older versions of the pipeline reused earlier answers | Current versions use a new run folder each time, unless `--resume` is given |
 
 ## Reporting a harness bug
 

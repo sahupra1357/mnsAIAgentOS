@@ -123,19 +123,37 @@ be used in scripts and scheduled jobs.
 ## Watching and debugging a run
 
 ```bash
-agent-harness-bench pipeline examples/validation.local.toml --telemetry-file validation-results/telemetry.jsonl
+agent-harness-bench pipeline examples/validation.local.toml
 ```
+
+**Each run gets its own folder,** and earlier runs are kept for comparison:
+
+```
+validation-results/
+  index.html             run history: every run, newest first, accuracy per benchmark with the change
+  latest.txt, latest ->  the newest run
+  pipeline-summary.json  a copy of the newest run's summary
+  runs/2026-10-02_09-15-12/
+    index.html  pipeline-summary.json  scenarios.json  telemetry.jsonl
+    gsm8k-ollama/  results.jsonl  report.json  transcripts/
+```
+
+- **Gates only.** `--stages gates` on its own re-gates the latest run.
+- **Retention.** `[pipeline] keep_runs = N` keeps only the newest N runs. The default,
+  0, keeps every run.
+- **Baselines** are not inside run folders and are never pruned.
 
 - **Live output.** Results print as soon as they are known. Progress lines (each stage,
   each smoke check and benchmark, `[2/3] ok item (4.2s)`) go to stderr; `--quiet` turns
   them off.
-- **Telemetry.** `--telemetry-file` appends one JSON line per benchmark model and tool
-  call: latency, tokens, cache hits, errors. It never contains message text.
+- **Telemetry.** Every run records `<run>/telemetry.jsonl`: one JSON line per benchmark
+  model and tool call, with latency, tokens, cache hits, and errors. It never contains
+  message text. `--telemetry-file` writes it elsewhere.
 - **Transcripts.** For every failed benchmark item, the full run is saved to
-  `validation-results/<name>/transcripts/<item>.json`: messages, tool calls, reasoning,
+  `<run>/<name>/transcripts/<item>.json`: messages, tool calls, reasoning,
   events. Set `transcripts = "all" | "none"` on a `[[benchmark]]` entry, or pass
   `--transcripts` to `agent-harness-bench run`.
-- **HTML report.** At the end, `validation-results/index.html` summarizes stage results,
+- **HTML report.** At the end, `<run>/index.html` summarizes stage results,
   scores against baselines, failed items (linked to their transcripts), and the
   telemetry. It is a static file: open it in a browser.
 
@@ -180,11 +198,11 @@ Every action appears as a `residency:<profile>` line in the output and in
 `pipeline-summary.json`.
 
 **Fresh runs and resuming.**
-- **The pipeline starts every benchmark fresh.** It clears the previous
-  `results.jsonl`, `report.json`, and transcripts first, so the gates always judge new
-  answers. Baselines are kept.
-- **`pipeline --resume`** continues an interrupted run instead: it keeps recorded
-  answers and re-runs only items that ended in `error` or `failed`.
+- **Every pipeline run answers anew** in its own run folder, so the gates always judge
+  new answers. Baselines are kept.
+- **`pipeline --resume`** continues the latest run's folder instead, for an interrupted
+  run: it keeps recorded answers and re-runs only items that ended in `error` or
+  `failed`.
 - **`agent-harness-bench run`** always resumes from `--out` in the same way, unless
   `--no-retry-errors` is given.
 - A baseline recorded from a broken run still has to be deleted by hand.
