@@ -39,6 +39,7 @@ from agent_harness.model_gateway import ModelGateway
 from .compare import Thresholds, compare_reports
 from .core import BenchConfigError, BenchContext, ExecutionFactory, ItemResult
 from .data import DatasetError, file_sha256
+from .history import finish_run, latest_run, run_directory
 from .html_report import BenchmarkEntry, write_html_report
 from .residency import ResidencyHttp, ResidencyManager, ResidencyPolicy
 from .runner import build_report, run_benchmark
@@ -205,9 +206,13 @@ async def run_pipeline(
     telemetry_path: Path | None = None,
     resume: bool = False,
 ) -> list[StageResult]:
-    """Run the plan's stages. Benchmarks start fresh each run, so the gates judge new
-    answers, not ones recorded by an earlier run; ``resume`` continues an interrupted
-    run instead (items recorded as error/failed are still re-run)."""
+    """Run the plan's stages into a new timestamped folder, ``<output_dir>/runs/<time>``.
+
+    Earlier runs are kept for comparison; ``<output_dir>/index.html`` lists them all and
+    ``latest.txt`` names the newest. ``resume`` continues the latest run's folder (an
+    interrupted run; items recorded as error/failed are re-run), and a gates-only run
+    re-gates the latest run. ``[pipeline] keep_runs = N`` keeps only the newest N runs.
+    """
     base = plan_path.parent
     try:
         plan = tomllib.loads(plan_path.read_text(encoding="utf-8"))
@@ -219,8 +224,13 @@ async def run_pipeline(
         raise BenchConfigError(f"unknown sections in pipeline plan: {sorted(unknown)}")
     config = base / settings.get("config", "models.toml")
     repo = base / settings.get("repo", ".")
-    output_dir = base / settings.get("output_dir", "validation-results")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    root = base / settings.get("output_dir", "validation-results")
+    root.mkdir(parents=True, exist_ok=True)
+    keep_runs = settings.get("keep_runs", 0)
+    if isinstance(keep_runs, bool) or not isinstance(keep_runs, int) or keep_runs < 0:
+        raise BenchConfigError("[pipeline] keep_runs must be a non-negative integer (0 keeps every run)")
+    reuse = resume or ("gates" in stages and "benchmarks" not in stages)
+    output_dir = run_directory(root, reuse=reuse)  # this run's own folder
     env = dict(os.environ)
     src = repo / "src"
     if src.is_dir():
@@ -245,8 +255,9 @@ async def run_pipeline(
         if on_progress is not None:
             on_progress(message)
 
-    telemetry_sink = (JsonLinesTelemetry(telemetry_path.open("a", encoding="utf-8"))
-                      if telemetry_path is not None else None)
+    if telemetry_path is None:
+        telemetry_path = output_dir / "telemetry.jsonl"  # always recorded, per run
+    telemetry_sink: JsonLinesTelemetry | None = JsonLinesTelemetry(telemetry_path.open("a", encoding="utf-8"))
     policy = ResidencyPolicy.from_mapping(plan.get("residency", {}))
     residency: ResidencyManager | None = None
     harness_config = None
@@ -269,107 +280,108 @@ async def run_pipeline(
         for change in residency.prepare(name):
             add(StageResult(f"residency:{name}", change.status, change.detail))
 
-    for stage in stages:
-        if stage not in ALL_STAGES:
-            raise BenchConfigError(f"unknown stage {stage!r}; choose from {ALL_STAGES}")
-        announce(f"== {stage}")
-        if stage == "static":
-            checks = [("compileall", [python, "-m", "compileall", "-q", "src", "tests"])]
-            for tool in ("ruff", "mypy"):
-                if shutil.which(tool):
-                    argv = [tool, "check", "src", "tests"] if tool == "ruff" else [
-                        tool, "src/agent_harness", "--ignore-missing-imports"]
-                    checks.append((tool, argv))
-                else:
-                    add(StageResult(f"static:{tool}", "skip", f"{tool} not installed"))
-            for name, argv in checks:
-                ok, detail = _run_command(argv, cwd=repo, env={**env, "MYPYPATH": str(src)})
-                add(StageResult(f"static:{name}", "pass" if ok else "fail", detail))
-        elif stage == "unit":
-            ok, detail = _run_command(
-                [python, "-m", "unittest", "discover", "-s", "tests"], cwd=repo, env=hermetic
-            )
-            add(StageResult("unit", "pass" if ok else "fail", detail))
-        elif stage == "scenarios":
-            path = base / plan.get("scenarios", {}).get("path", "examples/evals")
-            ok, detail = _run_command(
-                [python, "-m", "agent_harness", "eval", "--config", str(config), str(path),
-                 "--report", str(output_dir / "scenarios.json")],
-                cwd=repo, env=hermetic,
-            )
-            add(StageResult("scenarios", "pass" if ok else "fail", detail))
-        elif stage == "smoke":
-            entries = plan.get("smoke", [])
-            if not entries:
-                add(StageResult("smoke", "skip", "no [[smoke]] entries"))
-            for entry in entries:
-                argv = [python, "-m", "agent_harness", "doctor", "--config", str(config),
-                        "--model-profile", str(entry["profile"])]
-                if entry.get("skip_tools"):
-                    argv.append("--skip-tools")
-                if entry.get("skip_cache", True):
-                    argv.append("--skip-cache")
-                if entry.get("strict"):
-                    argv.append("--strict")  # a WARN (e.g. tool calls as plain text) fails the stage
-                if entry.get("max_tokens"):
-                    argv += ["--max-tokens", str(int(entry["max_tokens"]))]
-                make_room(str(entry["profile"]))
-                announce(f"   doctor {entry['profile']} ...")
-                ok, detail = _run_command(argv, cwd=repo, env=env)
-                add(StageResult(f"smoke:{entry['profile']}", "pass" if ok else "fail", detail))
-        elif stage == "benchmarks":
-            entries = plan.get("benchmark", [])
-            if not entries:
-                add(StageResult("benchmarks", "skip", "no [[benchmark]] entries"))
-            for entry in entries:
-                spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
-                make_room(spec.profile)
-                announce(f"   benchmark {spec.name} ({spec.suite} on {spec.profile or 'default'}) ...")
-                if not resume:
-                    _clear_benchmark_output(spec.out or output_dir)
-                try:
-                    report, _ = await execute_benchmark(spec, models=models, quiet=on_progress is None,
-                                                        telemetry=telemetry_sink)
-                except (BenchConfigError, DatasetError, ConfigError) as exc:
-                    add(StageResult(f"benchmark:{spec.name}", "fail", str(exc)))
-                    continue
-                reports.append((spec, report))
-                metrics = report["metrics"]
-                add(StageResult(
-                    f"benchmark:{spec.name}", "pass",
-                    f"accuracy {metrics['accuracy']:.3f} n={metrics['n']} errors {metrics['error_rate']:.1%}",
-                ))
-        elif stage == "gates":
-            if not reports:
-                for entry in plan.get("benchmark", []):
+    try:
+        for stage in stages:
+            if stage not in ALL_STAGES:
+                raise BenchConfigError(f"unknown stage {stage!r}; choose from {ALL_STAGES}")
+            announce(f"== {stage}")
+            if stage == "static":
+                checks = [("compileall", [python, "-m", "compileall", "-q", "src", "tests"])]
+                for tool in ("ruff", "mypy"):
+                    if shutil.which(tool):
+                        argv = [tool, "check", "src", "tests"] if tool == "ruff" else [
+                            tool, "src/agent_harness", "--ignore-missing-imports"]
+                        checks.append((tool, argv))
+                    else:
+                        add(StageResult(f"static:{tool}", "skip", f"{tool} not installed"))
+                for name, argv in checks:
+                    ok, detail = _run_command(argv, cwd=repo, env={**env, "MYPYPATH": str(src)})
+                    add(StageResult(f"static:{name}", "pass" if ok else "fail", detail))
+            elif stage == "unit":
+                ok, detail = _run_command(
+                    [python, "-m", "unittest", "discover", "-s", "tests"], cwd=repo, env=hermetic
+                )
+                add(StageResult("unit", "pass" if ok else "fail", detail))
+            elif stage == "scenarios":
+                path = base / plan.get("scenarios", {}).get("path", "examples/evals")
+                ok, detail = _run_command(
+                    [python, "-m", "agent_harness", "eval", "--config", str(config), str(path),
+                     "--report", str(output_dir / "scenarios.json")],
+                    cwd=repo, env=hermetic,
+                )
+                add(StageResult("scenarios", "pass" if ok else "fail", detail))
+            elif stage == "smoke":
+                entries = plan.get("smoke", [])
+                if not entries:
+                    add(StageResult("smoke", "skip", "no [[smoke]] entries"))
+                for entry in entries:
+                    argv = [python, "-m", "agent_harness", "doctor", "--config", str(config),
+                            "--model-profile", str(entry["profile"])]
+                    if entry.get("skip_tools"):
+                        argv.append("--skip-tools")
+                    if entry.get("skip_cache", True):
+                        argv.append("--skip-cache")
+                    if entry.get("strict"):
+                        argv.append("--strict")  # a WARN (e.g. tool calls as plain text) fails the stage
+                    if entry.get("max_tokens"):
+                        argv += ["--max-tokens", str(int(entry["max_tokens"]))]
+                    make_room(str(entry["profile"]))
+                    announce(f"   doctor {entry['profile']} ...")
+                    ok, detail = _run_command(argv, cwd=repo, env=env)
+                    add(StageResult(f"smoke:{entry['profile']}", "pass" if ok else "fail", detail))
+            elif stage == "benchmarks":
+                entries = plan.get("benchmark", [])
+                if not entries:
+                    add(StageResult("benchmarks", "skip", "no [[benchmark]] entries"))
+                for entry in entries:
                     spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
-                    report_path = (spec.out or output_dir) / "report.json"
-                    if report_path.exists():
-                        reports.append((spec, json.loads(report_path.read_text())))
-            if not reports:
-                add(StageResult("gates", "skip", "no benchmark reports"))
-            for spec, report in reports:
-                baseline = None
-                if spec.baseline is not None and spec.baseline.exists():
-                    baseline = json.loads(spec.baseline.read_text())
-                gate = compare_reports(report, baseline, spec.thresholds)
-                note = "" if baseline is not None else " (no baseline yet)"
-                add(StageResult(
-                    f"gate:{spec.name}", "pass" if gate.passed else "fail",
-                    "; ".join(gate.lines()) + note,
-                ))
-                if update_baselines and spec.baseline is not None and (gate.passed or baseline is None):
-                    spec.baseline.parent.mkdir(parents=True, exist_ok=True)
-                    spec.baseline.write_text(json.dumps(report, indent=2, sort_keys=True))
-    if residency is not None and policy.restore:
-        for restored in residency.restore("end of pipeline"):
-            add(StageResult("residency:end", restored.status, restored.detail))
-    if telemetry_sink is not None:
-        telemetry_sink.close()
+                    make_room(spec.profile)
+                    announce(f"   benchmark {spec.name} ({spec.suite} on {spec.profile or 'default'}) ...")
+                    try:
+                        report, _ = await execute_benchmark(spec, models=models, quiet=on_progress is None,
+                                                            telemetry=telemetry_sink)
+                    except (BenchConfigError, DatasetError, ConfigError) as exc:
+                        add(StageResult(f"benchmark:{spec.name}", "fail", str(exc)))
+                        continue
+                    reports.append((spec, report))
+                    metrics = report["metrics"]
+                    add(StageResult(
+                        f"benchmark:{spec.name}", "pass",
+                        f"accuracy {metrics['accuracy']:.3f} n={metrics['n']} errors {metrics['error_rate']:.1%}",
+                    ))
+            elif stage == "gates":
+                if not reports:
+                    for entry in plan.get("benchmark", []):
+                        spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
+                        report_path = (spec.out or output_dir) / "report.json"
+                        if report_path.exists():
+                            reports.append((spec, json.loads(report_path.read_text())))
+                if not reports:
+                    add(StageResult("gates", "skip", "no benchmark reports"))
+                for spec, report in reports:
+                    baseline = None
+                    if spec.baseline is not None and spec.baseline.exists():
+                        baseline = json.loads(spec.baseline.read_text())
+                    gate = compare_reports(report, baseline, spec.thresholds)
+                    note = "" if baseline is not None else " (no baseline yet)"
+                    add(StageResult(
+                        f"gate:{spec.name}", "pass" if gate.passed else "fail",
+                        "; ".join(gate.lines()) + note,
+                    ))
+                    if update_baselines and spec.baseline is not None and (gate.passed or baseline is None):
+                        spec.baseline.parent.mkdir(parents=True, exist_ok=True)
+                        spec.baseline.write_text(json.dumps(report, indent=2, sort_keys=True))
+        if residency is not None and policy.restore:
+            for restored in residency.restore("end of pipeline"):
+                add(StageResult("residency:end", restored.status, restored.detail))
+    finally:
+        if telemetry_sink is not None:
+            telemetry_sink.close()
     summary = [{"stage": r.stage, "status": r.status, "detail": r.detail} for r in results]
     (output_dir / "pipeline-summary.json").write_text(json.dumps(summary, indent=2))
     write_html_report(output_dir / "index.html", results, _report_entries(plan, reports, base, config,
                                                                             output_dir), telemetry_path)
+    finish_run(root, output_dir, keep_runs=keep_runs)
     return results
 
 
@@ -433,16 +445,6 @@ def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, outpu
         baseline=base / entry["baseline"] if entry.get("baseline") else None,
         thresholds=Thresholds.from_mapping(entry.get("thresholds", {})),
     )
-
-
-def _clear_benchmark_output(directory: Path) -> None:
-    """Remove a previous run's answers (baselines live elsewhere and are kept)."""
-
-    (directory / "results.jsonl").unlink(missing_ok=True)
-    (directory / "report.json").unlink(missing_ok=True)
-    transcripts = directory / "transcripts"
-    if transcripts.is_dir():
-        shutil.rmtree(transcripts)
 
 
 def _pipeline_output_dir(plan_path: Path) -> Path:
@@ -576,7 +578,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             ))
             failed = [r for r in results if r.status == "fail"]
             print(f"stages: {len(results) - len(failed)} ok, {len(failed)} failed", file=sys.stderr)
-            print(f"report: {_pipeline_output_dir(args.plan) / 'index.html'}", file=sys.stderr)
+            root = _pipeline_output_dir(args.plan)
+            latest = latest_run(root)
+            if latest is not None:
+                print(f"report: {latest / 'index.html'}", file=sys.stderr)
+            print(f"history: {root / 'index.html'}", file=sys.stderr)
             return 1 if failed else 0
     except (BenchConfigError, DatasetError, ConfigError, OSError) as exc:
         print(f"agent-harness-bench: {exc}", file=sys.stderr)

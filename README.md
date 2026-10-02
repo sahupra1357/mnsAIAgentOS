@@ -1059,7 +1059,9 @@ events.
 
 ## Validation
 
-Watch a pipeline run, then debug from `validation-results/index.html`, which includes
+Each pipeline run is kept in its own folder, `validation-results/runs/<time>/`.
+`validation-results/index.html` is the run history. Watch a run, then debug from that
+run's report, which includes
 per-item transcripts of failures and a telemetry summary: see
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 

@@ -14,6 +14,7 @@ from typing import Any
 from unittest import mock
 
 from agent_harness.bench.cli import main, run_pipeline
+from agent_harness.bench.history import all_runs, latest_run
 from agent_harness.domain import FinishReason, ModelRequest, ModelResponse, Role, Usage
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,23 +62,78 @@ class CountingModel(Model):
         return await super().complete(request)
 
 
-class FreshRunTests(unittest.TestCase):
-    def test_each_pipeline_run_answers_again_unless_resuming(self) -> None:
+def latest_benchmark(raw: str) -> Path:
+    run = latest_run(Path(raw) / "out")
+    assert run is not None
+    return run / "gsm8k"
+
+
+class RunHistoryTests(unittest.TestCase):
+    def test_each_run_gets_its_own_folder_and_earlier_runs_are_kept(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = plan(Path(raw), transcripts="failed")
-            out = Path(raw) / "out" / "gsm8k"
+            root = Path(raw) / "out"
             with redirect_stderr(io.StringIO()):
                 first = CountingModel()
-                asyncio.run(run_pipeline(path, stages=("benchmarks",), models=first))
-                self.assertEqual(first.calls, 3)
-                self.assertTrue((out / "transcripts" / "gsm8k-2.json").exists())
-                second = CountingModel()  # a later run must test the model again...
-                asyncio.run(run_pipeline(path, stages=("benchmarks",), models=second))
-                self.assertEqual(second.calls, 3)
-                self.assertEqual(len((out / "results.jsonl").read_text().splitlines()), 3)  # not appended
-                resumed = CountingModel()  # ...while --resume keeps recorded answers
+                asyncio.run(run_pipeline(path, stages=("benchmarks", "gates"), models=first))
+                first_run = latest_run(root)
+                second = CountingModel()  # a later run tests the model again, in a new folder
+                asyncio.run(run_pipeline(path, stages=("benchmarks", "gates"), models=second))
+            self.assertEqual((first.calls, second.calls), (3, 3))
+            runs = all_runs(root)
+            self.assertEqual(len(runs), 2)
+            assert first_run is not None
+            self.assertEqual(runs[1], first_run)  # newest first
+            self.assertEqual(latest_run(root), runs[0])
+            for run in runs:  # each run is complete on its own
+                self.assertTrue((run / "gsm8k" / "transcripts" / "gsm8k-2.json").exists())
+                self.assertTrue((run / "index.html").exists())
+                self.assertTrue((run / "telemetry.jsonl").read_text())  # telemetry is always recorded
+            self.assertEqual((root / "latest.txt").read_text().strip(), f"runs/{runs[0].name}")
+            self.assertEqual(json.loads((root / "pipeline-summary.json").read_text()),
+                             json.loads((runs[0] / "pipeline-summary.json").read_text()))
+            history = (root / "index.html").read_text()
+            self.assertIn("Validation history", history)
+            self.assertIn(f"runs/{runs[0].name}/index.html", history)
+            self.assertIn(f"runs/{runs[1].name}/index.html", history)
+            self.assertIn("(latest)", history)
+
+    def test_resume_and_gates_only_reuse_the_latest_run(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = plan(Path(raw))
+            root = Path(raw) / "out"
+            with redirect_stderr(io.StringIO()):
+                asyncio.run(run_pipeline(path, stages=("benchmarks",), models=CountingModel()))
+                resumed = CountingModel()  # --resume keeps the recorded answers
                 asyncio.run(run_pipeline(path, stages=("benchmarks",), models=resumed, resume=True))
-                self.assertEqual(resumed.calls, 0)
+                gates = asyncio.run(run_pipeline(path, stages=("gates",), models=CountingModel()))
+            self.assertEqual(resumed.calls, 0)
+            self.assertEqual(len(all_runs(root)), 1)  # neither created a new folder
+            self.assertEqual([r.stage for r in gates], ["gate:gsm8k"])  # gated the latest run's report
+
+    def test_keep_runs_prunes_the_oldest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = plan(Path(raw))
+            path.write_text(path.read_text().replace('output_dir = "out"', 'output_dir = "out"\nkeep_runs = 2'))
+            with redirect_stderr(io.StringIO()):
+                for _ in range(3):
+                    asyncio.run(run_pipeline(path, stages=("benchmarks",), models=Model()))
+            self.assertEqual(len(all_runs(Path(raw) / "out")), 2)
+            path.write_text(path.read_text().replace("keep_runs = 2", "keep_runs = -1"))
+            from agent_harness.bench.core import BenchConfigError
+            with self.assertRaises(BenchConfigError):
+                asyncio.run(run_pipeline(path, stages=("benchmarks",), models=Model()))
+
+    def test_folder_names_are_unique_and_sortable(self) -> None:
+        from datetime import datetime
+
+        from agent_harness.bench.history import run_directory
+
+        with tempfile.TemporaryDirectory() as raw:
+            moment = datetime(2026, 10, 2, 9, 15, 12)
+            names = [run_directory(Path(raw), now=moment).name for _ in range(3)]
+            self.assertEqual(names, ["2026-10-02_09-15-12", "2026-10-02_09-15-12-2", "2026-10-02_09-15-12-3"])
+            self.assertEqual([p.name for p in all_runs(Path(raw))][0], "2026-10-02_09-15-12-3")
 
     def test_cli_resume_flag_and_absolute_report_path(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -88,9 +144,11 @@ class FreshRunTests(unittest.TestCase):
                         redirect_stdout(out), redirect_stderr(err):
                     self.assertEqual(main(["pipeline", str(path), "--stages", "benchmarks", *flags]), 0)
                 self.assertEqual("resuming" in err.getvalue(), bool(flags))
-            report = err.getvalue().split("report: ")[1].strip()
+            report = err.getvalue().split("report: ")[1].splitlines()[0].strip()
             self.assertTrue(Path(report).is_absolute())
             self.assertNotIn("..", report)
+            self.assertIn("/runs/", report)
+            self.assertIn("history: ", err.getvalue())
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -112,7 +170,7 @@ class ObservabilityTests(unittest.TestCase):
             self.assertEqual(progress[:2], ["== benchmarks", "   benchmark gsm8k (gsm8k on ollama) ..."])
             self.assertIn("[3/3]", items.getvalue())
 
-            out = directory / "out" / "gsm8k"
+            out = latest_benchmark(raw)
             transcripts = sorted(p.name for p in (out / "transcripts").iterdir())
             self.assertEqual(transcripts, ["gsm8k-2.json"])  # only the failed item is kept
             saved = json.loads((out / "transcripts" / "gsm8k-2.json").read_text())
@@ -123,7 +181,7 @@ class ObservabilityTests(unittest.TestCase):
             calls = [json.loads(line) for line in telemetry.read_text().splitlines()]
             self.assertEqual(sum(c["kind"] == "model_call" for c in calls), 3)
 
-            html = (directory / "out" / "index.html").read_text()
+            html = (out.parent / "index.html").read_text()
             self.assertIn("Validation report", html)
             self.assertIn("gsm8k &middot; 1 failed", html)
             self.assertIn('href="gsm8k/transcripts/gsm8k-2.json"', html)
@@ -147,12 +205,12 @@ class ObservabilityTests(unittest.TestCase):
             directory = Path(raw)
             with redirect_stderr(io.StringIO()):
                 self.run_plan(directory, transcripts="all")
-            self.assertEqual(len(list((directory / "out" / "gsm8k" / "transcripts").iterdir())), 3)
+            self.assertEqual(len(list((latest_benchmark(raw) / "transcripts").iterdir())), 3)
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             with redirect_stderr(io.StringIO()):
                 self.run_plan(directory, transcripts="none")
-            self.assertFalse((directory / "out" / "gsm8k" / "transcripts").exists())
+            self.assertFalse((latest_benchmark(raw) / "transcripts").exists())
         with tempfile.TemporaryDirectory() as raw:
             bad = plan(Path(raw), transcripts="sometimes")
             from agent_harness.bench.core import BenchConfigError
@@ -170,8 +228,11 @@ class ObservabilityTests(unittest.TestCase):
             self.assertIn("[PASS] benchmark:gsm8k: accuracy 0.667", out.getvalue())
             self.assertNotIn("== benchmarks", err.getvalue())  # --quiet: no progress lines
             self.assertNotIn("[1/3]", err.getvalue())
-            self.assertIn(f"report: {(Path(raw) / 'out' / 'index.html').resolve()}", err.getvalue())
-            self.assertTrue((Path(raw) / "out" / "index.html").exists())
+            run = latest_run(Path(raw) / "out")
+            assert run is not None
+            self.assertIn(f"report: {run / 'index.html'}", err.getvalue())
+            self.assertIn(f"history: {(Path(raw) / 'out').resolve() / 'index.html'}", err.getvalue())
+            self.assertTrue((run / "index.html").exists())
 
 
 if __name__ == "__main__":
