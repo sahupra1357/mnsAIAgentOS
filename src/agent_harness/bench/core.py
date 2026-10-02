@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import json
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -13,14 +14,18 @@ from typing import Any
 from agent_harness.coding.execution import ExecutionRuntime
 from agent_harness.domain import (
     ContextBuilder,
+    ModelRequest,
+    ModelResponse,
     EventType,
     Message,
     ModelResolver,
     Role,
     RunBudget,
     RunRecord,
+    TelemetryRecord,
     TelemetrySink,
     ToolExecutor,
+    utc_now,
 )
 from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
@@ -139,6 +144,70 @@ class BenchContext:
             e.type is EventType.TOOL_RESPONDED and e.payload.get("status") != "success" for e in events
         )
         return AgentOutcome(finished, output, calls, errors)
+
+    async def call_model(self, request: ModelRequest) -> ModelResponse:
+        """One direct model call (suites that test raw model behaviour, such as BFCL).
+
+        Recorded like an agent run: a ``model_call`` telemetry record, and a transcript
+        of the request and the reply (or the error) for the current item.
+        """
+
+        started = time.monotonic()
+        response: ModelResponse | None = None
+        error: BaseException | None = None
+        try:
+            response = await self.models.resolve(self.profile).complete(request)
+            return response
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            duration = time.monotonic() - started
+            self._record_call(request, response, error, duration)
+
+    def _record_call(self, request: ModelRequest, response: ModelResponse | None,
+                     error: BaseException | None, duration: float) -> None:
+        item_id = CURRENT_ITEM.get()
+        if self.telemetry is not None:
+            attributes: dict[str, Any] = {"model_profile": self.profile, "attempt": 1,
+                                          "ok": response is not None, "streamed": False}
+            if response is not None:
+                attributes.update(finish_reason=response.finish_reason.value,
+                                  tool_call_count=len(response.tool_calls),
+                                  input_tokens=response.usage.input_tokens,
+                                  output_tokens=response.usage.output_tokens,
+                                  cached_input_tokens=response.usage.cached_input_tokens,
+                                  cost_usd=response.usage.cost_usd)
+            if error is not None:
+                attributes["error_category"] = str(getattr(error, "category", type(error).__name__))
+            self.telemetry.record(TelemetryRecord(
+                kind="model_call", name="model.complete", run_id=f"bench-{item_id or 'call'}", step=1,
+                timestamp=utc_now(), duration_seconds=duration, attributes=attributes))
+        if self.transcripts is None or item_id is None:
+            return
+        self.transcripts.mkdir(parents=True, exist_ok=True)
+        transcript = {
+            "item_id": item_id,
+            "kind": "single_model_call",
+            "model_profile": self.profile,
+            "status": "completed" if response is not None else "error",
+            "error": None if error is None else f"{type(error).__name__}: {error}",
+            "duration_seconds": round(duration, 3),
+            "request": {
+                "messages": [{"role": m.role.value, "content": m.content} for m in request.messages],
+                "tools": [{"name": t.name, "description": t.description, "input_schema": t.input_schema}
+                          for t in request.tools],
+            },
+            "response": None if response is None else {
+                "content": response.content,
+                "reasoning": response.reasoning,
+                "tool_calls": [asdict(c) for c in response.tool_calls],
+                "finish_reason": response.finish_reason.value,
+                "usage": asdict(response.usage),
+            },
+        }
+        transcript_path(self.transcripts, item_id).write_text(
+            json.dumps(transcript, indent=2, default=str), encoding="utf-8")
 
     def _write_transcript(self, item_id: str, run: RunRecord, events: Sequence[Any]) -> None:
         assert self.transcripts is not None

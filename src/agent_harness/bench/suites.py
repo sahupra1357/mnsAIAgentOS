@@ -276,9 +276,9 @@ class BfclSuite:
             Message(Role(m["role"]) if m["role"] in {"user", "system"} else Role.USER, str(m["content"]))
             for m in item.input["messages"]
         )
-        client = context.models.resolve(context.profile)
         try:
-            response = await client.complete(
+            # One direct call: BFCL scores raw function calling, not the agent loop.
+            response = await context.call_model(
                 ModelRequest(messages=messages, tools=tuple(specs), max_output_tokens=1024)
             )
         except HarnessError as exc:
