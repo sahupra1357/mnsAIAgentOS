@@ -52,6 +52,47 @@ profile = "ollama"
     return path
 
 
+class CountingModel(Model):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.calls += 1
+        return await super().complete(request)
+
+
+class FreshRunTests(unittest.TestCase):
+    def test_each_pipeline_run_answers_again_unless_resuming(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = plan(Path(raw), transcripts="failed")
+            out = Path(raw) / "out" / "gsm8k"
+            with redirect_stderr(io.StringIO()):
+                first = CountingModel()
+                asyncio.run(run_pipeline(path, stages=("benchmarks",), models=first))
+                self.assertEqual(first.calls, 3)
+                self.assertTrue((out / "transcripts" / "gsm8k-2.json").exists())
+                second = CountingModel()  # a later run must test the model again...
+                asyncio.run(run_pipeline(path, stages=("benchmarks",), models=second))
+                self.assertEqual(second.calls, 3)
+                self.assertEqual(len((out / "results.jsonl").read_text().splitlines()), 3)  # not appended
+                resumed = CountingModel()  # ...while --resume keeps recorded answers
+                asyncio.run(run_pipeline(path, stages=("benchmarks",), models=resumed, resume=True))
+                self.assertEqual(resumed.calls, 0)
+
+    def test_cli_resume_flag_and_absolute_report_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = plan(Path(raw))
+            for flags in ([], ["--resume"]):
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch("agent_harness.bench.cli.ModelGateway", return_value=Model()), \
+                        redirect_stdout(out), redirect_stderr(err):
+                    self.assertEqual(main(["pipeline", str(path), "--stages", "benchmarks", *flags]), 0)
+                self.assertEqual("resuming" in err.getvalue(), bool(flags))
+            report = err.getvalue().split("report: ")[1].strip()
+            self.assertTrue(Path(report).is_absolute())
+            self.assertNotIn("..", report)
+
+
 class ObservabilityTests(unittest.TestCase):
     def run_plan(self, directory: Path, **kwargs: Any) -> tuple[list[Any], list[str], list[Any]]:
         shown: list[Any] = []
@@ -129,7 +170,7 @@ class ObservabilityTests(unittest.TestCase):
             self.assertIn("[PASS] benchmark:gsm8k: accuracy 0.667", out.getvalue())
             self.assertNotIn("== benchmarks", err.getvalue())  # --quiet: no progress lines
             self.assertNotIn("[1/3]", err.getvalue())
-            self.assertIn(f"report: {Path(raw) / 'out' / 'index.html'}", err.getvalue())
+            self.assertIn(f"report: {(Path(raw) / 'out' / 'index.html').resolve()}", err.getvalue())
             self.assertTrue((Path(raw) / "out" / "index.html").exists())
 
 

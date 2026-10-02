@@ -203,7 +203,11 @@ async def run_pipeline(
     on_result: Callable[[StageResult], None] | None = None,
     on_progress: Callable[[str], None] | None = None,
     telemetry_path: Path | None = None,
+    resume: bool = False,
 ) -> list[StageResult]:
+    """Run the plan's stages. Benchmarks start fresh each run, so the gates judge new
+    answers, not ones recorded by an earlier run; ``resume`` continues an interrupted
+    run instead (items recorded as error/failed are still re-run)."""
     base = plan_path.parent
     try:
         plan = tomllib.loads(plan_path.read_text(encoding="utf-8"))
@@ -321,6 +325,8 @@ async def run_pipeline(
                 spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
                 make_room(spec.profile)
                 announce(f"   benchmark {spec.name} ({spec.suite} on {spec.profile or 'default'}) ...")
+                if not resume:
+                    _clear_benchmark_output(spec.out or output_dir)
                 try:
                     report, _ = await execute_benchmark(spec, models=models, quiet=on_progress is None,
                                                         telemetry=telemetry_sink)
@@ -429,12 +435,22 @@ def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, outpu
     )
 
 
+def _clear_benchmark_output(directory: Path) -> None:
+    """Remove a previous run's answers (baselines live elsewhere and are kept)."""
+
+    (directory / "results.jsonl").unlink(missing_ok=True)
+    (directory / "report.json").unlink(missing_ok=True)
+    transcripts = directory / "transcripts"
+    if transcripts.is_dir():
+        shutil.rmtree(transcripts)
+
+
 def _pipeline_output_dir(plan_path: Path) -> Path:
     try:
         settings = tomllib.loads(plan_path.read_text(encoding="utf-8")).get("pipeline", {})
     except (OSError, tomllib.TOMLDecodeError):
         settings = {}
-    return plan_path.parent / settings.get("output_dir", "validation-results")
+    return (plan_path.parent / settings.get("output_dir", "validation-results")).resolve()
 
 
 def _transcripts_mode(value: Any) -> str:
@@ -487,6 +503,8 @@ def _parser() -> argparse.ArgumentParser:
 
     pipeline = commands.add_parser("pipeline", help="run the validation stages in a plan file")
     pipeline.add_argument("plan", type=Path)
+    pipeline.add_argument("--resume", action="store_true",
+                          help="continue an interrupted run: keep recorded benchmark answers (default: start fresh)")
     pipeline.add_argument("--quiet", action="store_true",
                           help="print only stage results (no progress or per-item lines)")
     pipeline.add_argument("--telemetry-file", type=Path,
@@ -554,6 +572,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             results = asyncio.run(run_pipeline(
                 args.plan, stages=stages, update_baselines=args.update_baselines, on_result=show,
                 on_progress=None if args.quiet else progress, telemetry_path=args.telemetry_file,
+                resume=args.resume,
             ))
             failed = [r for r in results if r.status == "fail"]
             print(f"stages: {len(results) - len(failed)} ok, {len(failed)} failed", file=sys.stderr)

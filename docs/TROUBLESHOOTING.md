@@ -135,8 +135,10 @@ agent-harness run --config examples/models.toml --model-profile llamacpp --datab
 agent-harness status --config examples/models.toml --database /tmp/debug.sqlite3 RUN_ID
 ```
 
-Resume reruns items that ended in `error` or `failed`. To start a benchmark from
-scratch, delete its `validation-results/<name>/` directory.
+Each pipeline run starts benchmarks fresh. `pipeline --resume` continues an interrupted
+run instead, re-running only items that ended in `error` or `failed`.
+`agent-harness-bench run` always resumes from its `--out` directory; delete that
+directory to start over.
 
 ## Gates
 
@@ -164,6 +166,7 @@ none exists. A baseline recorded from a broken run must be deleted by hand.
 | Results ignore a TOML edit | An `AGENT_HARNESS_MODEL__*` variable overrides it | Environment wins over the file: comment it out in `.env` |
 | Context errors or silent truncation on llama.cpp | `context_window` is larger than the server's `ctx-size` | Keep them equal |
 | Benchmark fails at 100% errors, and resume "fixes nothing" | Older versions reused errored items | Current versions rerun them; delete the bad baseline |
+| Benchmarks print `resuming: … already has results` and finish instantly; telemetry is empty | Older versions of the pipeline reused earlier answers | Current versions start fresh unless `--resume` is given |
 
 ## Reporting a harness bug
 
