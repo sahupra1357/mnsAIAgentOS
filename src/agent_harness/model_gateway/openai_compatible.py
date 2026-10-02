@@ -12,7 +12,7 @@ import time
 from agent_harness.secrets import resolve_secret
 
 from dataclasses import replace
-from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Mapping
+from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Mapping, Sequence
 
 from agent_harness.config import ModelProfile
 from agent_harness.domain import (
@@ -107,6 +107,7 @@ class OpenAICompatibleClient:
         timeout = self._effective_timeout(request)
         attempts = self._profile.max_retries + 1
         started = self._monotonic()
+        retried: list[str] = []
         for attempt in range(attempts):
             cause: BaseException | None = None
             try:
@@ -116,7 +117,10 @@ class OpenAICompatibleClient:
                 self._raise_for_status(response)
                 normalized = self._normalize(response)
                 self._warm = True
-                return self._with_cost(normalized, self._monotonic() - started)
+                normalized = self._with_cost(normalized, self._monotonic() - started)
+                if retried:
+                    normalized = _with_retries(normalized, retried, timeout)
+                return normalized
             except (ThrottlingError, RetryableProviderError, ModelTimeoutError) as exc:
                 error: RetryableModelError = exc
             except (HttpTransportTimeout, TimeoutError) as exc:
@@ -129,6 +133,7 @@ class OpenAICompatibleClient:
                 if cause is None:
                     raise error
                 raise error from cause
+            retried.append(str(getattr(error, "category", type(error).__name__)))
             delay = self.retry_delay(attempt, error)
             if delay:
                 await self._sleep(delay)
@@ -720,3 +725,16 @@ def _describe_ref(ref: str) -> str:
     if ref.startswith("file:"):
         return f"secret file {ref[5:]!r}"
     return f"environment variable {ref[4:] if ref.startswith('env:') else ref!r}"
+
+
+def _with_retries(
+    response: ModelResponse, retried: Sequence[str], timeout_seconds: float | None
+) -> ModelResponse:
+    """Record adapter retries, so a slow success shows the attempts that failed first."""
+
+    metadata = dict(response.metadata)
+    metadata["provider_attempts"] = len(retried) + 1
+    metadata["retried_errors"] = list(retried)
+    if timeout_seconds is not None:
+        metadata["attempt_timeout_seconds"] = timeout_seconds
+    return replace(response, metadata=metadata)

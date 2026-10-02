@@ -150,6 +150,9 @@ def _telemetry_section(records: Iterable[Mapping[str, Any]]) -> str:
             row["calls"] += 1
             if not attributes.get("ok", True):
                 row["errors"][str(attributes.get("error_category", "error"))] += 1
+            for category in attributes.get("retried_errors") or ():
+                # Adapter retries behind a success: the call's latency includes them.
+                row["errors"][f"retried {category}"] += 1
             if record.get("duration_seconds") is not None:
                 row["latency"].append(float(record["duration_seconds"]))
             row["input"] += int(attributes.get("input_tokens") or 0)

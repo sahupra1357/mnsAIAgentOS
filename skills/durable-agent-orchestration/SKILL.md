@@ -16,6 +16,10 @@ Build the orchestration loop as a resumable state machine over persisted state.
 - Treat `awaiting-input` as a durable pause. Store an approval request event, expose the pending call, and resume the same call only after an explicit allow/deny decision.
 - Reject transitions that are invalid for the current state.
 - Enforce step and wall-clock limits inside the loop rather than relying on callers.
+- Refuse a reply with more than `max_tool_calls_per_turn` tool calls as a whole, before
+  prefetch: every call gets a refusal result, so the transcript stays valid, and the count
+  of such replies (derived from messages, so resume is deterministic) fails the run after
+  `max_refused_repeats`.
 - Record an append-only event for each transition and external request/result boundary.
 
 ## Boundary Design

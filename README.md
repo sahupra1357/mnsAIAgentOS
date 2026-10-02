@@ -256,6 +256,19 @@ agent-harness run --config models.toml --model-profile llamacpp --image photo.pn
   model. After 2 refusals the run fails. Tune this with
   `OrchestratorSettings(max_identical_tool_calls=..., max_refused_repeats=...)`, or
   disable it with `None`.
+- **Tool calls per reply:** a reply with more than 32 tool calls is refused as a whole
+  (none of them run) and the model is asked again. After `max_refused_repeats` such
+  replies the run fails. Tune it with `OrchestratorSettings(max_tool_calls_per_turn=...)`,
+  or disable it with `None`.
+- **Output cap:** every example profile sets `max_tokens = 1024` in its `parameters`, so a
+  runaway reply stops with `finish_reason=length` instead of generating until the context
+  fills or the request times out. Ollama's native mode sends it as `num_predict`. An
+  `AGENT_HARNESS_MODEL__X__PARAMETERS` variable replaces the whole table, so include
+  `max_tokens` there too.
+- **Visible retries:** when the adapter retried before succeeding, the response, the
+  `model_responded` event, and the `model_call` telemetry record carry
+  `provider_attempts`, `retried_errors` (e.g. `["timeout"]`), and `attempt_timeout_seconds`.
+  The report's telemetry table counts them as `retried timeout: N`.
 - **Routes:** name capabilities instead of profiles. A route can be used anywhere a
   profile name is accepted, including `default_model_profile` and `--model-profile`.
   The run stores the resolved profile and records the route. Environment override:

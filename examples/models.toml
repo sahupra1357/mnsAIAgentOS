@@ -19,6 +19,9 @@ retry_backoff_seconds = 0.25
 
 [models.local.parameters]
 temperature = 0.2
+# Output cap: a runaway reply stops with finish_reason=length instead of
+# generating until the context fills or the request times out.
+max_tokens = 1024
 
 [models.hosted]
 adapter = "openai_compatible"
@@ -31,6 +34,7 @@ retry_backoff_seconds = 0.25
 
 [models.hosted.parameters]
 temperature = 0.2
+max_tokens = 1024
 
 # --- Ollama -----------------------------------------------------------------
 # `ollama serve`, then `ollama pull qwen2.5-coder:7b`. The OpenAI-compatible
@@ -48,6 +52,7 @@ max_retries = 1
 
 [models.ollama.parameters]
 temperature = 0.2
+max_tokens = 1024
 
 # --- llama.cpp ----------------------------------------------------------------
 # Configured for a llama.cpp router (`llama serve --models-preset ... --port 9931 --jinja`),
@@ -74,6 +79,7 @@ max_retries = 1
 
 [models.llamacpp.parameters]
 temperature = 0.2
+max_tokens = 1024
 
 # --- Modal (vLLM or SGLang) ----------------------------------------------------
 # Deploy with examples/modal/vllm_server.py or examples/modal/sglang_server.py.
@@ -99,6 +105,7 @@ Modal-Secret = "MODAL_PROXY_TOKEN_SECRET"
 
 [models.modal.parameters]
 temperature = 0.2
+max_tokens = 1024
 
 # Estimated cost per request, so --max-cost-usd works. Use your GPU's actual rate.
 # [models.modal.pricing]

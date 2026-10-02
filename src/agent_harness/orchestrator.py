@@ -134,12 +134,17 @@ class OrchestratorSettings:
     arguments, since the last non-read-only call) run normally; later ones are
     refused with a warning, and the run fails after ``max_refused_repeats``
     refusals. Either may be ``None`` to disable repeated-call detection.
+    A reply with more than ``max_tool_calls_per_turn`` tool calls is refused as a
+    whole (none of its calls run) and the model is asked again; the run fails once
+    more than ``max_refused_repeats`` replies were refused this way. ``None``
+    disables the limit.
     """
 
     max_model_attempts: int = 3
     max_tool_attempts: int = 3
     max_identical_tool_calls: int | None = 5
     max_refused_repeats: int | None = 2
+    max_tool_calls_per_turn: int | None = 32
 
     def __post_init__(self) -> None:
         if self.max_model_attempts < 1:
@@ -150,6 +155,8 @@ class OrchestratorSettings:
             raise ValueError("max_identical_tool_calls must be at least 1")
         if self.max_refused_repeats is not None and self.max_refused_repeats < 0:
             raise ValueError("max_refused_repeats must not be negative")
+        if self.max_tool_calls_per_turn is not None and self.max_tool_calls_per_turn < 1:
+            raise ValueError("max_tool_calls_per_turn must be at least 1")
 
 
 FallbackLookup = Callable[[str], Sequence[str]]
@@ -619,6 +626,8 @@ class AgentOrchestrator:
             return True
 
         if pending:
+            if await self._refuse_oversized_turn(run, events, pending):
+                return run.status.is_terminal
             await self._prefetch_parallel(run, events, pending)
             for call in pending:
                 if self._wall_limit_reached(run):
@@ -1475,6 +1484,7 @@ class AgentOrchestrator:
             payload["reasoning_chars"] = len(response.reasoning)
         if response.metadata.get("cost_estimated") is True:
             payload["cost_estimated"] = True
+        payload.update(_retry_details(response))
         if view is not None and view.modified:
             payload["context"] = {
                 "messages_sent": len(view.messages),
@@ -1623,6 +1633,44 @@ class AgentOrchestrator:
             if event.type is EventType.MODEL_FALLBACK and isinstance(event.payload.get("to"), str)
         )
         return next((name for name in chain if name not in tried), None)
+
+    async def _refuse_oversized_turn(
+        self, run: RunRecord, events: list[RunEvent], pending: Sequence[ToolCall]
+    ) -> bool:
+        """Refuse every call of a reply with too many tool calls; return True if handled."""
+
+        limit = self._settings.max_tool_calls_per_turn
+        if limit is None:
+            return False
+        reply = next((m for m in reversed(run.messages) if m.role is Role.ASSISTANT), None)
+        if reply is None or len(reply.tool_calls) <= limit:
+            return False
+        oversized = sum(
+            1 for m in run.messages if m.role is Role.ASSISTANT and len(m.tool_calls) > limit
+        )
+        max_refusals = self._settings.max_refused_repeats
+        if max_refusals is not None and oversized > max_refusals:
+            await self._fail(
+                run,
+                events,
+                f"too many tool calls in one reply: {len(reply.tool_calls)} (limit {limit})",
+            )
+            return True
+        for call in pending:
+            result = ToolResult(
+                call_id=call.id,
+                name=call.name,
+                status=ToolResultStatus.POLICY_DENIED,
+                output={"error": "too_many_tool_calls", "tool_calls": len(reply.tool_calls), "limit": limit},
+                model_message=(
+                    f"Refused: your reply made {len(reply.tool_calls)} tool calls and at most "
+                    f"{limit} are allowed per reply, so none of them ran. Make only the calls "
+                    "you need, without repeating identical ones."
+                ),
+            )
+            self._append_tool_message(run, result)
+            await self._record_tool_result(run, events, result, attempt=0)
+        return True
 
     async def _refuse_repeated_call(
         self,
@@ -3169,6 +3217,7 @@ class AgentOrchestrator:
                 cost_usd=response.usage.cost_usd,
                 provider_request_id=response.provider_request_id,
             )
+            attributes.update(_retry_details(response))
         if error is not None:
             attributes["error_category"] = str(
                 getattr(error, "category", type(error).__name__)
@@ -3220,6 +3269,22 @@ class AgentOrchestrator:
         if final is None:
             raise ValueError("model stream ended without a final response")
         return final
+
+
+def _retry_details(response: ModelResponse) -> dict[str, Any]:
+    """Adapter retries behind a successful response (empty when there were none)."""
+
+    attempts = response.metadata.get("provider_attempts")
+    if not isinstance(attempts, int) or attempts <= 1:
+        return {}
+    details: dict[str, Any] = {"provider_attempts": attempts}
+    retried = response.metadata.get("retried_errors")
+    if isinstance(retried, list):
+        details["retried_errors"] = [str(item) for item in retried]
+    timeout = response.metadata.get("attempt_timeout_seconds")
+    if isinstance(timeout, (int, float)):
+        details["attempt_timeout_seconds"] = timeout
+    return details
 
 
 def _pending_tool_calls(messages: Sequence[Message]) -> tuple[ToolCall, ...]:

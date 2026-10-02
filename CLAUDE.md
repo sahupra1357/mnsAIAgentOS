@@ -104,6 +104,13 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   identical calls since the last non-read-only call are refused, and the run fails
   after `max_refused_repeats` (2) refusals. Polling tools may need these raised, or set
   to `None`.
+- **Runaway guards.** A reply with more than `max_tool_calls_per_turn` (32) tool calls is
+  refused whole, and counts toward `max_refused_repeats`. Example profiles cap output with
+  `parameters.max_tokens = 1024` (Ollama native: `num_predict`); an
+  `AGENT_HARNESS_MODEL__X__PARAMETERS` variable replaces that table. Without a cap, vLLM on
+  Modal keeps generating after the harness times out, because the proxy does not cancel
+  abandoned requests. Adapter retries behind a success are recorded as
+  `provider_attempts` / `retried_errors` in the event and telemetry.
 - **Context window (added in Phase 2).** Only profiles with `context_window` are trimmed;
   others still send the full history. For Ollama's OpenAI-compatible mode, the server's
   own context (`OLLAMA_CONTEXT_LENGTH`) must also be at least that large, or the server
