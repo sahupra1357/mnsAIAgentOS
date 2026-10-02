@@ -46,8 +46,14 @@ class McpConnection(Protocol):
     def set_protocol_version(self, version: str) -> None: ...
 
 
+NotificationHandler = Callable[[str, Mapping[str, Any]], None]
+
+
 class StdioConnection:
     """Run the server as a subprocess; one JSON-RPC message per line on stdin/stdout."""
+
+    # Called with (method, params) for notifications the server sends (e.g. list_changed).
+    on_notification: NotificationHandler | None = None
 
     def __init__(
         self,
@@ -184,6 +190,9 @@ class StdioConnection:
                 else:
                     future.set_result(message.get("result"))
             return
+        if "method" in message and "id" not in message:
+            _notify(self.on_notification, message)
+            return
         if "method" in message and "id" in message:
             # A request from the server (ping, sampling, roots...). Answer ping; decline the rest.
             if message["method"] == "ping":
@@ -214,6 +223,8 @@ class StdioConnection:
 
 class HttpConnection:
     """Streamable HTTP: POST each JSON-RPC message; the answer is JSON or an SSE stream."""
+
+    on_notification: NotificationHandler | None = None
 
     def __init__(
         self,
@@ -250,6 +261,9 @@ class HttpConnection:
         if response.status >= 400:
             raise McpError(f"MCP server answered HTTP {response.status} to {method!r}")
         for candidate in _messages(response):
+            if "method" in candidate and "id" not in candidate:
+                _notify(self.on_notification, candidate)  # sent alongside the answer (SSE)
+                continue
             if candidate.get("id") == identifier:
                 if "error" in candidate:
                     error = candidate.get("error") or {}
@@ -284,6 +298,16 @@ class HttpConnection:
             return await self._transport.post_json(self._url, message, headers, timeout)
         except HttpTransportError as exc:
             raise McpError(f"MCP HTTP request failed: {exc}") from exc
+
+
+def _notify(handler: NotificationHandler | None, message: Mapping[str, Any]) -> None:
+    if handler is None or not isinstance(message.get("method"), str):
+        return
+    params = message.get("params")
+    try:
+        handler(message["method"], params if isinstance(params, Mapping) else {})
+    except Exception:  # noqa: BLE001 - a notification handler must never break the connection
+        pass
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:

@@ -128,3 +128,17 @@ window fails cleanly, and resume produces the same view.
   same view and later turns stay append-only between trims.
 - Messages omitted by the cap are not summarized (the summarizer only sees the
   builder's own omitted range).
+
+## Configuration and server counts (Phase 14)
+
+- `[context]` (`ContextConfig`) maps to `ContextPolicy` through
+  `context_policy_from_config`. The application, the orchestrator's overflow cap
+  (`fit_to_tokens`, `estimate_tokens`), the summarizer's input size, and benchmarks all use
+  it. An explicit `build_application(context_policy=...)` still wins.
+- `token_counting = "server"` on a profile with `context_window`: before sending, if the
+  estimate is at least half the limit, the orchestrator asks the client
+  (`count_input_tokens`, `input_token_limit`). A count over the limit records a
+  `CONTEXT_CAPPED` annotation event, whose cap `_overflow_cap` reads alongside overflow
+  recoveries, and the view is rebuilt once.
+- `_fitting_cap` raises any new cap until the minimum view fits; when no smaller cap fits,
+  no cap is recorded.

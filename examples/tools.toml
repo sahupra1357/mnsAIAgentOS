@@ -47,6 +47,13 @@ description = "Fetch public metadata of the example GitHub repository."
 input_schema = { type = "object", properties = {} }
 headers_env = { Authorization = "GITHUB_AUTH_HEADER" }   # e.g. "Bearer <token>" in the env var
 
+# Built-in page fetch: text, title, and final URL of one http(s) page. Private and
+# loopback addresses are refused (allow_private = true to allow them); every redirect
+# hop is checked against [network] allowed_hosts.
+[web_fetch]
+enabled = true
+max_chars = 20000
+
 # An open-source MCP server over stdio. Its tools are named filesystem__<tool>, ask for
 # approval unless listed in read_only, and their output is treated as untrusted data.
 [[mcp_servers]]
@@ -54,6 +61,10 @@ name = "filesystem"
 command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "./docs"]
 read_only = ["read_file", "read_text_file", "list_directory", "search_files", "get_file_info"]
 sync_on_start = true
+# Also offer the server's resources and prompts as read-only tools (if it has them):
+# filesystem__mcp_list_resources, __mcp_read_resource, __mcp_list_prompts, __mcp_get_prompt.
+resources = true
+prompts = true
 
 # A remote MCP server over streamable HTTP (disabled example).
 [[mcp_servers]]

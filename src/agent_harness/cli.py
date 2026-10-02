@@ -240,6 +240,9 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--to", dest="target",
                          help="default: the backend configured in [memory] (same syntax as --from)")
     _common_runtime_arguments(migrate)
+    reindex = memory_sub.add_parser(
+        "reindex", help="embed notes that have no vector yet ([memory] search = semantic or hybrid)")
+    _common_runtime_arguments(reindex)
 
     gc = subcommands.add_parser("gc", help="retention: delete finished runs older than N days, and artifacts no run references (dry run by default)")
     gc.add_argument("--older-than-days", type=int, required=True)
@@ -780,6 +783,17 @@ def _open_memory_spec(spec: str, config_path: Path) -> Any:
 
 
 async def _memory_command(args: argparse.Namespace) -> int:
+    if args.memory_command == "reindex":
+        config = load_config(args.config, layered=True)
+        if not config.memory.enabled or config.memory.search == "keyword":
+            raise ValueError("reindex needs [memory] enabled = true and search = \"semantic\" or \"hybrid\"")
+        store = open_memory_store(config, args.config.parent, args.database)
+        try:
+            embedded = await store.reindex()
+        finally:
+            await store.close()
+        print(f"embedded {embedded} notes")
+        return 0
     source = _open_memory_spec(args.source, args.config)
     try:
         if args.target:

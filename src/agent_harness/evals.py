@@ -13,6 +13,12 @@ A scenario is a TOML file::
     type = "object"
     [guardrails]                      # optional: a [guardrails] table (docs/GUARDRAILS.md)
     enabled = true
+    [orchestrator]                    # optional: loop limits, as in the config file
+    max_tool_calls_per_turn = 2
+    ask_user = true                   # optional: offer ask_user without scripted answers
+    wait_seconds = 120                # optional: time that passes while the run is paused
+    [interaction]                     # optional: deadlines checked after wait_seconds
+    question_timeout_seconds = 60
     [budget]                          # optional RunBudget fields
     max_steps = 5
 
@@ -30,6 +36,10 @@ A scenario is a TOML file::
     events_include = ["tool_responded"]
     error_contains = "..."            # for scenarios expected to fail
     result = { city = "Paris" }       # the validated structured result (with output_schema)
+    event_payloads = [{ type = "approval_resolved", actor = "timeout" }]  # an event with these values
+
+A scripted ``[[model]]`` entry may also be ``error = "context_overflow"`` (the server
+rejects the request as too long).
 
 Scenarios with ``[[model]]`` entries run scripted (network-free) unless live
 mode is requested; scenarios without them run only in live mode.
@@ -39,6 +49,7 @@ from __future__ import annotations
 
 import time
 import tomllib
+from datetime import timedelta
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +57,7 @@ from typing import Any
 
 from agent_harness.domain import (
     ContextBuilder,
+    ContextOverflowError,
     EventType,
     FinishReason,
     Message,
@@ -59,6 +71,7 @@ from agent_harness.domain import (
     RunStatus,
     ToolCall,
     ToolExecutor,
+    utc_now,
 )
 from agent_harness.guardrails import Guardrails, GuardrailsConfig, GuardrailsConfigError
 from agent_harness.model_gateway import ScriptedModelClient
@@ -66,10 +79,11 @@ from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
 
 _TOP_LEVEL = {"name", "prompt", "system", "model_profile", "approve", "budget", "model", "expect",
-              "output_schema", "answers", "guardrails"}
+              "output_schema", "answers", "guardrails", "orchestrator", "interaction", "ask_user",
+              "wait_seconds"}
 _EXPECT = {
     "status", "tool_calls", "output_contains", "output_not_contains",
-    "max_steps", "events_include", "error_contains", "result",
+    "max_steps", "events_include", "error_contains", "result", "event_payloads",
 }
 _UNSET: Any = object()
 _MAX_APPROVAL_ROUNDS = 10
@@ -89,6 +103,7 @@ class Expectations:
     events_include: tuple[str, ...] = ()
     error_contains: str | None = None
     result: Any = _UNSET
+    event_payloads: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +120,10 @@ class Scenario:
     output_schema: dict[str, Any] | None = None
     answers: tuple[str, ...] = ()
     guardrails: GuardrailsConfig | None = None
+    settings: OrchestratorSettings | None = None
+    interaction: dict[str, Any] = field(default_factory=dict)
+    ask_user: bool = False
+    wait_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -178,6 +197,12 @@ def _load_scenario(file: Path) -> Scenario:
         guardrails = GuardrailsConfig.from_mapping(raw["guardrails"]) if "guardrails" in raw else None
     except GuardrailsConfigError as exc:
         raise ScenarioError(f"{file}: {exc}") from exc
+    ask_user = raw.get("ask_user", False)
+    if not isinstance(ask_user, bool):
+        raise ScenarioError(f"{file}: ask_user must be true or false")
+    wait = raw.get("wait_seconds", 0)
+    if isinstance(wait, bool) or not isinstance(wait, (int, float)) or wait < 0:
+        raise ScenarioError(f"{file}: wait_seconds must be a non-negative number")
     return Scenario(
         name=str(raw.get("name") or file.stem),
         prompt=prompt,
@@ -191,7 +216,43 @@ def _load_scenario(file: Path) -> Scenario:
         output_schema=schema,
         answers=tuple(answers),
         guardrails=guardrails,
+        settings=_settings(file, raw.get("orchestrator")),
+        interaction=_interaction(file, raw.get("interaction")),
+        ask_user=ask_user,
+        wait_seconds=float(wait),
     )
+
+
+def _settings(file: Path, raw: Any) -> OrchestratorSettings | None:
+    """A scenario's ``[orchestrator]`` table, read like the config file's."""
+
+    if raw is None:
+        return None
+    from agent_harness.application import orchestrator_settings
+    from agent_harness.config import ConfigError, OrchestratorConfig, _parse_section
+
+    try:
+        return orchestrator_settings(_parse_section({"orchestrator": raw}, "orchestrator", OrchestratorConfig))
+    except (ConfigError, ValueError) as exc:
+        raise ScenarioError(f"{file}: {exc}") from exc
+
+
+def _interaction(file: Path, raw: Any) -> dict[str, Any]:
+    """A scenario's ``[interaction]`` deadlines, as orchestrator keyword arguments."""
+
+    if raw is None:
+        return {}
+    from agent_harness.config import ConfigError, InteractionConfig, _parse_section
+
+    try:
+        section = _parse_section({"interaction": raw}, "interaction", InteractionConfig)
+    except (ConfigError, ValueError) as exc:
+        raise ScenarioError(f"{file}: {exc}") from exc
+    return {
+        "approval_timeout_seconds": section.approval_timeout_seconds,
+        "question_timeout_seconds": section.question_timeout_seconds,
+        "on_input_timeout": section.on_timeout,
+    }
 
 
 def _scripted_response(file: Path, index: int, entry: Any) -> ModelResponse | Exception:
@@ -206,7 +267,11 @@ def _scripted_response(file: Path, index: int, entry: Any) -> ModelResponse | Ex
             return RetryableModelError("scripted transient failure")
         if error == "permanent":
             return PermanentModelError("scripted permanent failure")
-        raise ScenarioError(f'{file}: model[{index}].error must be "retryable" or "permanent"')
+        if error == "context_overflow":
+            return ContextOverflowError("scripted context overflow: the request is too long")
+        raise ScenarioError(
+            f'{file}: model[{index}].error must be "retryable", "permanent", or "context_overflow"'
+        )
     calls = []
     for position, call in enumerate(entry.get("tool_calls", [])):
         if not isinstance(call, dict) or not isinstance(call.get("name"), str):
@@ -233,6 +298,11 @@ def _expectations(file: Path, raw: Any) -> Expectations:
     for event in raw.get("events_include", []):
         if event not in {e.value for e in EventType}:
             raise ScenarioError(f"{file}: unknown event type {event!r}")
+    payloads = raw.get("event_payloads", [])
+    if not isinstance(payloads, list) or not all(
+        isinstance(p, dict) and p.get("type") in {e.value for e in EventType} for p in payloads
+    ):
+        raise ScenarioError(f"{file}: event_payloads must be tables with a known event 'type'")
     return Expectations(
         status=status,
         tool_calls=tuple(raw.get("tool_calls", ())),
@@ -242,6 +312,7 @@ def _expectations(file: Path, raw: Any) -> Expectations:
         events_include=tuple(raw.get("events_include", ())),
         error_contains=raw.get("error_contains"),
         result=raw.get("result", _UNSET),
+        event_payloads=tuple(dict(p) for p in payloads),
     )
 
 
@@ -277,9 +348,12 @@ async def run_scenario(
     store = InMemoryRunStore()
     guardrails = (Guardrails(scenario.guardrails, models=models)
                   if scenario.guardrails is not None and scenario.guardrails.enabled else None)
+    now = [utc_now()]  # scenario time: wait_seconds moves it forward while a run is paused
     orchestrator = AgentOrchestrator(
-        models=models, tools=tools, store=store, context=context, settings=settings,
-        ask_user=bool(scenario.answers), guardrails=guardrails,
+        models=models, tools=tools, store=store, context=context,
+        settings=scenario.settings or settings, clock=lambda: now[0],
+        ask_user=bool(scenario.answers) or scenario.ask_user, guardrails=guardrails,
+        **scenario.interaction,
     )
     messages = [Message(role=Role.USER, content=scenario.prompt)]
     if scenario.system:
@@ -294,10 +368,18 @@ async def run_scenario(
         run = await orchestrator.run(run.id)
         rounds = 0
         answers = list(scenario.answers)
+        waited = False
         while run.status is RunStatus.AWAITING_INPUT and rounds < _MAX_APPROVAL_ROUNDS:
             pending = await orchestrator.pending_approval(run.id)
             if pending is None:
                 break
+            if scenario.wait_seconds and not waited:
+                waited = True
+                now[0] += timedelta(seconds=scenario.wait_seconds)
+                if await orchestrator.expire_pending_input():
+                    run = await orchestrator.run(run.id)
+                    rounds += 1
+                    continue
             if pending.kind == "question":
                 if not answers:
                     break  # stays awaiting_input: more questions than scripted answers
@@ -322,6 +404,11 @@ async def run_scenario(
     result.tokens = run.consumed_tokens
     result.cost_usd = run.consumed_cost_usd
     result.failures = _check(scenario.expect, run, [e.type.value for e in events])
+    for wanted in scenario.expect.event_payloads:
+        expected = {k: v for k, v in wanted.items() if k != "type"}
+        if not any(e.type.value == wanted["type"] and all(e.payload.get(k) == v for k, v in expected.items())
+                   for e in events):
+            result.failures.append(f"no {wanted['type']!r} event with {expected}")
     result.outcome = "fail" if result.failures else "pass"
     return result
 

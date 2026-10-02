@@ -118,3 +118,20 @@ in the orchestrator, where the tool message is built, so every source is covered
 - **Testing:** use a fake docker invoker that runs the inner command locally (see
   `tests/test_sandbox_containers.py`).
 
+## Phase 14: MCP resources, prompts, list_changed; web_fetch
+
+- **Config:** `McpServerConfig.resources` / `.prompts` (default off).
+- **Tools:** when the server announces the capability, `extra_specs` adds read-only, untrusted
+  `NAME__mcp_list_resources`, `NAME__mcp_read_resource`, `NAME__mcp_list_prompts`, and
+  `NAME__mcp_get_prompt`.
+- **Discovery:** skips `tools/list` for servers without the tools capability.
+- **Notifications:** connections deliver them through `on_notification` (stdio read loop; HTTP
+  messages without an id in a response). `*/list_changed` sets `source.stale` and calls
+  `on_tools_changed`, which the application sets to `sync_source`.
+- **`web_fetch`** (`WebFetchSource`):
+  - follows redirects itself, re-checking `_enforce_host` and the private-address rule per
+    hop;
+  - reads at most `max_bytes`, accepts only text, HTML, JSON, or XML, and extracts HTML text
+    with `html.parser`;
+  - tests inject `fetch` and `resolve`. The DNS check runs before connecting, so DNS
+    rebinding is not covered.

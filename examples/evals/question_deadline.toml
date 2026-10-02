@@ -1,0 +1,19 @@
+# Nobody answers the ask_user question; after question_timeout_seconds the
+# question is declined (actor "timeout") and the model continues.
+name = "question_deadline"
+prompt = "Book a table for dinner."
+ask_user = true
+wait_seconds = 120
+
+[interaction]
+question_timeout_seconds = 60
+
+[[model]]
+tool_calls = [{ name = "ask_user", arguments = { question = "Which city and time?" } }]
+[[model]]
+content = "No answer, so I booked the usual place at 8pm."
+
+[expect]
+status = "completed"
+output_contains = ["8pm"]
+event_payloads = [{ type = "approval_resolved", actor = "timeout", approved = false }]

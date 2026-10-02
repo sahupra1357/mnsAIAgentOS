@@ -79,6 +79,11 @@ class OpenAICompatibleClient:
             raise ModelConfigurationError(
                 f"adapter {profile.adapter!r} does not support api_mode {profile.api_mode!r}"
             )
+        if profile.token_counting == "server" and not self._counts_tokens(profile):
+            raise ModelConfigurationError(
+                f"adapter {profile.adapter!r} cannot count tokens on the server; "
+                "use token_counting = \"estimate\""
+            )
         self._profile = profile
         self._transport = transport or StdlibHttpTransport()
         self._environ = os.environ if environ is None else environ
@@ -270,6 +275,79 @@ class OpenAICompatibleClient:
         """A GET returning an OpenAI-style ``{"data": [{"id": ...}]}`` list."""
 
         return f"{self.api_base_url()}/models"
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embeddings from the OpenAI-compatible ``/embeddings`` endpoint, in input order."""
+
+        if not texts:
+            return []
+        response = await self._transport.post_json(
+            f"{self.api_base_url()}/embeddings",
+            {"model": self._profile.model, "input": list(texts)},
+            self.request_headers(),
+            self._profile.timeout_seconds,
+        )
+        self._raise_for_status(response)
+        try:
+            raw = json.loads(response.body)
+            rows = sorted(raw["data"], key=lambda row: int(row.get("index", 0)))
+            vectors = [[float(x) for x in row["embedding"]] for row in rows]
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise MalformedResponseError(f"malformed embeddings response: {exc}") from exc
+        if len(vectors) != len(texts):
+            raise MalformedResponseError("embeddings response has the wrong number of vectors")
+        return vectors
+
+    # -- token counting (profile token_counting = "server") ---------------------
+
+    supports_token_counting: ClassVar[bool] = True
+
+    @classmethod
+    def _counts_tokens(cls, profile: ModelProfile) -> bool:
+        return cls.supports_token_counting
+
+    def tokenize_url(self) -> str:
+        base = self.api_base_url()
+        return f"{base[: -len('/v1')] if base.endswith('/v1') else base}/tokenize"
+
+    def input_token_limit(self, request: ModelRequest) -> int | None:
+        """The profile's context window less the output reserve (None without a window)."""
+
+        window = self._profile.context_window
+        if window is None:
+            return None
+        reserve = request.max_output_tokens or self._profile.parameters.get("max_tokens") or 0
+        return window - int(reserve) if isinstance(reserve, int) else window
+
+    async def count_input_tokens(self, request: ModelRequest) -> int | None:
+        """The server's token count for this request, or None (estimate mode, or any failure)."""
+
+        if self._profile.token_counting != "server" or not self.supports_token_counting:
+            return None
+        try:
+            return await self._count_tokens(request, min(30.0, self._profile.timeout_seconds))
+        except (HttpTransportError, ValueError, TypeError, KeyError, UnicodeDecodeError):
+            return None  # counting is advisory: the estimate and overflow recovery still apply
+
+    async def _count_tokens(self, request: ModelRequest, timeout: float) -> int | None:
+        """vLLM: ``POST /tokenize`` with the chat messages (and tools) returns ``count``."""
+
+        payload: dict[str, object] = {
+            "model": self._profile.model,
+            "messages": [self._message_payload(message) for message in request.messages],
+            "add_generation_prompt": True,
+        }
+        if request.tools:
+            payload["tools"] = [self._tool_payload(tool) for tool in request.tools]
+        response = await self._transport.post_json(self.tokenize_url(), payload, self.request_headers(), timeout)
+        if not 200 <= response.status < 300:
+            return None
+        raw = json.loads(response.body)
+        count = raw.get("count") if isinstance(raw, dict) else None
+        if isinstance(count, int):
+            return count
+        tokens = raw.get("tokens") if isinstance(raw, dict) else None
+        return len(tokens) if isinstance(tokens, list) else None
 
     def _effective_timeout(self, request: ModelRequest) -> float:
         timeout = self._profile.timeout_seconds

@@ -162,6 +162,15 @@ max_tokens = 1024
 # question_timeout_seconds = 3600
 # on_timeout = "deny"               # deny | cancel | fail
 
+# How views are estimated and trimmed. For code, JSON, or non-English work, a lower
+# chars_per_token (about 2.5) keeps the estimate above the real count.
+# [context]
+# chars_per_token = 3.5
+# max_tool_output_chars = 16000
+#
+# Exact sizes from the server's tokenizer (llama.cpp, vLLM): add to a profile with
+# context_window:   token_counting = "server"
+
 # Loop limits (shown with their defaults; 0 turns an optional check off). Any table value
 # can also be set from the environment: AGENT_HARNESS_SET__ORCHESTRATOR__MAX_TOOL_CALLS_PER_TURN=16
 # [orchestrator]

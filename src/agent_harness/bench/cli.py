@@ -31,7 +31,7 @@ from agent_harness.coding.execution import (
     LocalProcessRuntime,
 )
 from agent_harness.config import ConfigError, load_config
-from agent_harness.context import BudgetedContextBuilder, limits_from_profiles
+from agent_harness.context import BudgetedContextBuilder, context_policy_from_config, limits_from_profiles
 from agent_harness.domain import ModelResolver, RunBudget, TelemetrySink
 from agent_harness.telemetry import JsonLinesTelemetry
 from agent_harness.model_gateway import ModelGateway
@@ -104,7 +104,8 @@ async def execute_benchmark(
     context = BenchContext(
         models=models or ModelGateway(config),
         profile=profile,
-        context=BudgetedContextBuilder(limits_from_profiles(config.models)),
+        context=BudgetedContextBuilder(limits_from_profiles(config.models),
+                                       policy=context_policy_from_config(config)),
         budget=RunBudget(max_steps=spec.max_steps, max_wall_seconds=spec.max_wall_seconds),
         execution=execution,
         options=spec.options,

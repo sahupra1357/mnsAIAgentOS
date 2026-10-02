@@ -1,0 +1,19 @@
+# After two tool turns, the server rejects a request as longer than its context;
+# the step is retried with a smaller, persisted cap (the older turn is left out)
+# and the run completes.
+name = "context_overflow_recovery"
+prompt = "Echo the words alpha and beta, then give the project status in one line."
+
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "alpha" } }]
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "beta" } }]
+[[model]]
+error = "context_overflow"
+[[model]]
+content = "Status: on track."
+
+[expect]
+status = "completed"
+output_contains = ["on track"]
+event_payloads = [{ type = "model_responded", context_overflow = true }]

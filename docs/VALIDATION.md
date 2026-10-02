@@ -8,7 +8,7 @@ download yourself.
 |---|-------|----------------|----------------|---------------|
 | 1 | **static** | Code is well-formed: lint (`ruff`), types (`mypy`), compile | no | CI + pipeline |
 | 2 | **unit** | Every component and failure path behaves (fakes only) | no | CI + pipeline |
-| 3 | **scenarios** | The real orchestrator handles scripted situations: tool use, unknown tools, transient errors | no | CI + pipeline |
+| 3 | **scenarios** | The real orchestrator handles scripted situations: tool use, unknown tools, transient errors, context overflow, tool calls per reply, repeated calls, question deadlines, guardrails, structured output | no | CI + pipeline |
 | 4 | **smoke** | Each profile's server is reachable, serves the model, completes, and returns structured tool calls (`doctor`) | yes | pipeline |
 | 5 | **benchmarks** | Capability on public datasets, per profile | yes | pipeline / manual |
 | 6 | **gates** | No regression against saved baselines; absolute floors | reports only | pipeline |
@@ -31,7 +31,14 @@ Each suite exercises a different layer of the harness:
 | `gsm8k` | Full agent loop: model ↔ calculator tool, argument validation and recovery, step budgets, retries | GSM8K test split (1,319 problems) | `{"question", "answer": "... #### 42"}` |
 | `bfcl` | Model gateway and adapters: does each provider return correct **structured** tool calls (simple, multiple, parallel, irrelevance)? | Berkeley Function Calling Leaderboard | question file + possible-answer file, joined on `id` |
 | `humaneval` | Coding path: generation, then execution in the Docker sandbox (no network) | HumanEval (164 problems) | `{"task_id", "prompt", "test", "entry_point"}` |
-| `qa` | Plain answering, with or without tools; field names are configurable | NQ-open, TriviaQA, or any Q&A JSONL | `{"question", "answer" \| "answers"}` |
+| `qa` | Plain answering, with or without tools; field names are configurable. `match = "judge"` lets a model grade open-ended answers | NQ-open, TriviaQA, or any Q&A JSONL | `{"question", "answer" \| "answers"}`, optional `"rubric"` |
+
+**Model-graded answers.** In `[benchmark.options]`, `match = "judge"` sends the question,
+the references, the optional `rubric`, and the answer to `judge_profile` (default: the
+profile under test). It expects `{"correct": true|false, "reason": "..."}` back. Use a
+different, stronger profile as the judge where you can: a model grading its own answers
+is lenient. `judge_max_tokens` (default 1024) leaves room for thinking models. The verdict
+is stored in each item's `details.judge`.
 
 List the suites with `agent-harness-bench suites`.
 

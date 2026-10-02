@@ -193,3 +193,13 @@ the feature is not configured.
   follows a waiting subagent through `pending_approval`, and applies `on_input_timeout`.
   `deny` goes through `resolve_approval(actor="timeout")`; `Worker.expire_input()` runs
   after each reconcile and enqueues the runs that continue. CLI: `agent-harness expire`.
+
+## Phase 14: semantic memory
+
+- **Wrapper:** `SemanticMemoryStore` wraps the configured note store when
+  `[memory] search = "semantic" | "hybrid"`. Vectors live in `VectorIndex` (SQLite, keyed
+  by namespace, note id, and embedding model).
+- **Writes:** `put` saves the note first, then embeds it. A failed embedding is logged and
+  fixed by `memory reindex`.
+- **Search:** `semantic` uses cosine similarity; `hybrid` uses reciprocal rank fusion with
+  the keyword results. An embedding outage falls back to keyword search.

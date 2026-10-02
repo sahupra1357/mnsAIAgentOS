@@ -26,6 +26,7 @@ class OllamaClient(OpenAICompatibleClient):
     """Normalize Ollama responses, including its tool-call quirks."""
 
     supports_native_api = True
+    supports_token_counting = False  # Ollama has no tokenize endpoint
 
     def api_root_url(self) -> str:
         base = self.api_base_url()

@@ -36,6 +36,10 @@ class ModalClient(OpenAICompatibleClient):
             )
         super().__init__(profile, **options)
 
+    @classmethod
+    def _counts_tokens(cls, profile: ModelProfile) -> bool:
+        return (profile.server or "vllm") == "vllm"  # vLLM serves /tokenize; SGLang differs by version
+
     @property
     def server(self) -> str:
         return self._profile.server or "vllm"

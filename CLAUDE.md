@@ -139,6 +139,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 - **Context overflow (Phase 13).** A provider "context too long" error is retried with a
   smaller view (2 retries by default, counted in `max_model_attempts`). The cap is persisted in
   `model_responded` events and applies for the rest of the run on that profile.
+- **Overflow caps (Phase 13–14).** A cap is raised until the pinned messages, tools, and
+  newest turn fit (`_fitting_cap`); if nothing can be removed, the provider's error ends
+  the step instead of a pointless retry. Server counting is skipped while the estimate is
+  under half the limit.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A
@@ -394,6 +398,19 @@ All of Phase 12 is implemented. The `/ui` chat page is deferred.
 4. Per-user quotas: `[user_quotas]` (+ `[user_quotas.users.NAME]`), reserved with the tenant quota;
    stores gain `user_usage` and `reserve(..., end_user=)` (SQLite migration 7, Postgres 4).
 Also `[orchestrator]` (all `OrchestratorSettings`) and `AGENT_HARNESS_SET__SECTION__KEY` overrides.
+
+**Phase 14 – Context, evals, memory, tools** [context-management, model-gateway, harness-verification, harness-operations, tool-platform] — on `phase-14-context-evals-tools`
+1. `[context]` section → `ContextPolicy` (`context_policy_from_config`), used by the app, the
+   orchestrator's overflow cap, the summarizer, and benchmarks.
+2. Profile `token_counting = "estimate" | "server"`: llama.cpp `/apply-template` + `/tokenize`,
+   vLLM `/tokenize`; over the window → `CONTEXT_CAPPED` event (annotation) and a rebuilt view.
+3. Scenario options `[orchestrator]`, `[interaction]`, `ask_user`, `wait_seconds`,
+   `error = "context_overflow"`, `expect.event_payloads`; new examples in `examples/evals/`.
+4. `qa` suite `match = "judge"` (`judge_profile`, `judge_max_tokens`, per-record `rubric`).
+5. `[memory] search = keyword|semantic|hybrid`, `embedding_profile`, `vectors`;
+   `semantic_memory.py`, client `embed()`, CLI `memory reindex`.
+6. MCP `resources` / `prompts` (read-only `server__mcp_*` tools) and `list_changed` re-sync.
+7. `[web_fetch]`: text of one page; private addresses refused; redirects re-checked per hop.
 
 ## Validation
 
