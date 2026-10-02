@@ -113,3 +113,18 @@ prefix, so the context view must keep its prefix stable:
 Use scripted models and assert what was sent (`ScriptedModelClient.requests`): pairing
 is preserved, the system prompt is kept, oversized tool output is trimmed, the too-small
 window fails cleanly, and resume produces the same view.
+
+## Provider overflow recovery (Phase 13)
+
+- The builder's estimate (3.5 characters per token) can still undershoot, and profiles
+  without `context_window` are never trimmed. When the server answers "context too
+  long", adapters raise `ContextOverflowError` with `limit_tokens` / `requested_tokens`
+  when the message states them (`model_gateway/errors.py`).
+- The orchestrator records a retryable `model_responded` event with `context_overflow`,
+  `estimated_tokens`, and `max_input_tokens`, then retries the step. `_build_view` applies
+  the smallest cap recorded for the run's current profile through `fit_to_tokens`, which
+  replays the same unit-wise hysteresis against that fixed cap (and limits each tool
+  output to a quarter of it). Because the cap is fixed and persisted, resume rebuilds the
+  same view and later turns stay append-only between trims.
+- Messages omitted by the cap are not summarized (the summarizer only sees the
+  builder's own omitted range).

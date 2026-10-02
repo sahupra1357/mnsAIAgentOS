@@ -34,6 +34,8 @@ SUPPORTED_API_MODES = frozenset({"openai", "native"})
 ENDPOINT_OPTIONAL_ADAPTERS = frozenset({"litellm"})
 _ENV_PREFIX = "AGENT_HARNESS_MODEL__"
 _ROUTE_ENV_PREFIX = "AGENT_HARNESS_ROUTE__"
+# AGENT_HARNESS_SET__SECTION__KEY=value sets any table value (e.g. orchestrator.max_model_attempts).
+_SET_ENV_PREFIX = "AGENT_HARNESS_SET__"
 _PROFILE_FIELDS = {
     "ADAPTER": "adapter",
     "MODEL": "model",
@@ -367,6 +369,18 @@ class InteractionConfig:
     """
 
     ask_user: bool = False
+    # Seconds a run may wait for an approval / an ask_user answer; 0 waits forever.
+    # Expired pauses are resolved by workers (or `agent-harness expire`) per on_timeout:
+    # "deny" (deny the tool / answer "no answer"), "cancel", or "fail".
+    approval_timeout_seconds: float = 0.0
+    question_timeout_seconds: float = 0.0
+    on_timeout: str = "deny"
+
+    def __post_init__(self) -> None:
+        if self.approval_timeout_seconds < 0 or self.question_timeout_seconds < 0:
+            raise ConfigError("interaction timeouts must not be negative (0 waits forever)")
+        if self.on_timeout not in {"deny", "cancel", "fail"}:
+            raise ConfigError("interaction.on_timeout must be deny, cancel, or fail")
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +423,91 @@ class QuotaConfig:
     max_tokens_per_day: int | None = None
     max_cost_usd_per_day: float | None = None
     max_concurrent_runs: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UserQuotaLimits:
+    """Daily limits for one end user (``RunRecord.end_user``); 0 means no limit."""
+
+    max_runs_per_day: int = 0
+    max_tokens_per_day: int = 0
+    max_cost_usd_per_day: float = 0.0
+    max_concurrent_runs: int = 0
+
+    def __post_init__(self) -> None:
+        if min(self.max_runs_per_day, self.max_tokens_per_day, self.max_concurrent_runs) < 0:
+            raise ConfigError("user quota limits must not be negative (0 = no limit)")
+        if self.max_cost_usd_per_day < 0:
+            raise ConfigError("user_quotas.max_cost_usd_per_day must not be negative")
+
+    @property
+    def limited(self) -> bool:
+        return bool(self.max_runs_per_day or self.max_tokens_per_day or self.max_cost_usd_per_day
+                    or self.max_concurrent_runs)
+
+
+@dataclass(frozen=True, slots=True)
+class UserQuotaConfig:
+    """``[user_quotas]``: limits for every end user, within their tenant.
+
+    The top-level values apply to every user; ``[user_quotas.users.NAME]`` tables
+    replace them for one user. Runs without ``end_user`` are not limited here.
+    """
+
+    default: UserQuotaLimits = field(default_factory=UserQuotaLimits)
+    users: Mapping[str, UserQuotaLimits] = field(default_factory=dict)
+
+    def for_user(self, end_user: str) -> UserQuotaLimits:
+        return self.users.get(end_user, self.default)
+
+    @property
+    def enabled(self) -> bool:
+        return self.default.limited or any(limits.limited for limits in self.users.values())
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitConfig:
+    """HTTP API request rate limit per caller (API key, or client address without keys).
+
+    ``requests_per_minute = 0`` turns it off; ``burst`` (0 = requests_per_minute)
+    is how many requests may arrive at once. Health checks are never limited.
+    """
+
+    requests_per_minute: float = 0.0
+    burst: int = 0
+
+    def __post_init__(self) -> None:
+        if self.requests_per_minute < 0 or self.burst < 0:
+            raise ConfigError("api rate limits must not be negative (0 = off)")
+
+
+@dataclass(frozen=True, slots=True)
+class OrchestratorConfig:
+    """``[orchestrator]``: loop limits (see ``OrchestratorSettings``).
+
+    For the optional limits, 0 turns the check off (``max_refused_repeats``: -1
+    never stops the run).
+    """
+
+    max_model_attempts: int = 3
+    max_tool_attempts: int = 3
+    max_identical_tool_calls: int = 5
+    max_refused_repeats: int = 2
+    max_tool_calls_per_turn: int = 32
+    context_overflow_retries: int = 2
+    context_overflow_shrink: float = 0.5
+    context_overflow_patterns: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.max_model_attempts < 1 or self.max_tool_attempts < 1:
+            raise ConfigError("orchestrator.max_model_attempts and max_tool_attempts must be at least 1")
+        if min(self.max_identical_tool_calls, self.max_tool_calls_per_turn,
+               self.context_overflow_retries) < 0:
+            raise ConfigError("orchestrator limits must not be negative (0 = off)")
+        if self.max_refused_repeats < -1:
+            raise ConfigError("orchestrator.max_refused_repeats must be -1 (never stop) or more")
+        if not 0 < self.context_overflow_shrink < 1:
+            raise ConfigError("orchestrator.context_overflow_shrink must be between 0 and 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,6 +648,9 @@ class HarnessConfig:
     api_cors_origins: tuple[str, ...] = ()
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     quotas: tuple[QuotaConfig, ...] = ()
+    user_quotas: UserQuotaConfig = field(default_factory=UserQuotaConfig)
+    api_rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     redaction: RedactionConfig = field(default_factory=RedactionConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
@@ -643,6 +745,7 @@ def load_config(
         if not isinstance(parsed, dict):
             raise ConfigError("configuration root must be a table")
         raw = parsed
+    raw = _apply_set_overrides(raw, env)
 
     raw_models = raw.get("models", {})
     if not isinstance(raw_models, dict):
@@ -705,6 +808,9 @@ def load_config(
         api_cors_origins=_parse_cors_origins(raw.get("api")),
         notifications=_parse_notifications(raw.get("notifications")),
         quotas=_parse_quotas(raw.get("quotas")),
+        user_quotas=_parse_user_quotas(raw.get("user_quotas")),
+        api_rate_limit=_parse_rate_limit(raw.get("api")),
+        orchestrator=_parse_section(raw, "orchestrator", OrchestratorConfig),
         network=_parse_section(raw, "network", NetworkConfig),
         redaction=_parse_redaction(raw.get("redaction")),
         skills=_parse_section(raw, "skills", SkillsConfig),
@@ -843,8 +949,9 @@ def _parse_mcp_servers(raw: Any) -> tuple[McpServerConfig, ...]:
 def _parse_api_keys(raw: Any) -> tuple[Mapping[str, str], ...]:
     if raw is None:
         return ()
-    if not isinstance(raw, dict) or set(raw) - {"keys", "cors_origins"}:
-        raise ConfigError("[api] may only contain [[api.keys]] tables and cors_origins")
+    if not isinstance(raw, dict) or set(raw) - {"keys", "cors_origins", *_RATE_LIMIT_KEYS}:
+        raise ConfigError("[api] may only contain [[api.keys]] tables, cors_origins, and "
+                          + ", ".join(sorted(_RATE_LIMIT_KEYS)))
     keys = raw.get("keys", [])
     if not isinstance(keys, list) or not all(isinstance(item, dict) for item in keys):
         raise ConfigError("api.keys must be an array of tables ([[api.keys]])")
@@ -862,6 +969,81 @@ def _parse_api_keys(raw: Any) -> tuple[Mapping[str, str], ...]:
             raise ConfigError("api.keys.role must be viewer, operator, or admin")
         parsed.append(MappingProxyType(dict(item)))
     return tuple(parsed)
+
+
+_RATE_LIMIT_KEYS = {"rate_limit_per_minute": "requests_per_minute", "rate_limit_burst": "burst"}
+
+
+def _parse_rate_limit(raw: Any) -> RateLimitConfig:
+    if not isinstance(raw, dict):
+        return RateLimitConfig()
+    values = {_RATE_LIMIT_KEYS[k]: v for k, v in raw.items() if k in _RATE_LIMIT_KEYS}
+    return _parse_section({"api": values}, "api", RateLimitConfig)
+
+
+def _parse_user_quotas(raw: Any) -> UserQuotaConfig:
+    if raw is None:
+        return UserQuotaConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("user_quotas must be a TOML table")
+    users_raw = raw.get("users", {})
+    if not isinstance(users_raw, dict) or not all(isinstance(v, dict) for v in users_raw.values()):
+        raise ConfigError("user_quotas.users must be tables ([user_quotas.users.NAME])")
+    defaults = {k: v for k, v in raw.items() if k != "users"}
+    default = _parse_section({"user_quotas": defaults}, "user_quotas", UserQuotaLimits)
+    users = {
+        str(name): _parse_section({f"user_quotas.users.{name}": {**defaults, **values}},
+                                  f"user_quotas.users.{name}", UserQuotaLimits)
+        for name, values in users_raw.items()
+    }
+    return UserQuotaConfig(default=default, users=MappingProxyType(users))
+
+
+def set_override_keys(env: Mapping[str, str]) -> dict[str, str]:
+    """Dotted setting names changed by ``AGENT_HARNESS_SET__`` variables -> variable name."""
+
+    return {
+        ".".join(part.lower() for part in key[len(_SET_ENV_PREFIX):].split("__")): key
+        for key in env
+        if key.startswith(_SET_ENV_PREFIX)
+    }
+
+
+def apply_set_overrides(raw: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
+    """Public form of ``_apply_set_overrides`` (used by ``config show``)."""
+
+    return _apply_set_overrides(raw, env)
+
+
+def _apply_set_overrides(raw: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
+    """Apply ``AGENT_HARNESS_SET__SECTION__KEY=value`` (nested tables: more ``__`` parts).
+
+    Values are read as TOML (``60``, ``1.5``, ``true``, ``["a"]``, ``"text"``); anything
+    that is not valid TOML is taken as a plain string. Names are lower-cased.
+    """
+
+    overrides = sorted((k, v) for k, v in env.items() if k.startswith(_SET_ENV_PREFIX))
+    if not overrides:
+        return raw
+    result = dict(raw)
+    for key, value in overrides:
+        path = [part.lower() for part in key[len(_SET_ENV_PREFIX):].split("__")]
+        if len(path) < 2 or not all(path):
+            raise ConfigError(f"{key}: expected {_SET_ENV_PREFIX}SECTION__KEY")
+        table = result
+        for part in path[:-1]:
+            existing = table.get(part)
+            if existing is None:
+                existing = {}
+            elif not isinstance(existing, dict):
+                raise ConfigError(f"{key}: {part!r} is not a table")
+            table[part] = existing = dict(existing)
+            table = existing
+        try:
+            table[path[-1]] = tomllib.loads(f"value = {value}")["value"]
+        except tomllib.TOMLDecodeError:
+            table[path[-1]] = value
+    return result
 
 
 def _parse_cors_origins(raw: Any) -> tuple[str, ...]:

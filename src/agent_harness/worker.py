@@ -14,7 +14,10 @@ Reliability (Phase 12c), when the queue supports it:
 - ``run_forever`` reconciles: queue-dispatched runs that are unfinished, idle for
   ``stale_seconds``, and missing from the queue are put back on it;
 - the heartbeat polls for cancellation, so a cancelled run's in-flight model or
-  tool call is stopped within ``cancel_poll_seconds``.
+  tool call is stopped within ``cancel_poll_seconds``;
+- reconciliation also expires approvals and questions past their deadline
+  (``[interaction] approval_timeout_seconds`` / ``question_timeout_seconds``) and
+  enqueues the runs that continue.
 """
 
 from __future__ import annotations
@@ -145,6 +148,7 @@ class Worker:
         while not stop.is_set():
             if loop.time() >= next_reconcile:
                 await self.reconcile()
+                await self.expire_input()
                 next_reconcile = loop.time() + self._reconcile_every
             processed = await self.run_once()
             if processed is None:
@@ -167,6 +171,24 @@ class Worker:
         if orphans:
             logger.warning("requeued %d orphaned run(s): %s", len(orphans), ", ".join(orphans))
         return orphans
+
+    async def expire_input(self) -> list[str]:
+        """Resolve overdue approvals and questions; enqueue the runs that continue."""
+
+        expire = getattr(self._orchestrator, "expire_pending_input", None)
+        if expire is None:
+            return []
+        try:
+            expired: list[str] = await expire()
+            if expired and self._orchestrator.expired_input_resumes:
+                for run_id in expired:
+                    await self._queue.enqueue(run_id)
+        except Exception:  # noqa: BLE001 - expiry must never stop the worker
+            logger.exception("expiring overdue approvals failed")
+            return []
+        if expired:
+            logger.warning("expired pending input on %d run(s): %s", len(expired), ", ".join(expired))
+        return expired
 
     async def _dead_letter(self, run_id: str, attempts: int, reason: str) -> None:
         dead_letter = getattr(self._orchestrator, "dead_letter", None)

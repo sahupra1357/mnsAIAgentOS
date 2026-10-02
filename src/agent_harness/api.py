@@ -45,6 +45,7 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import math
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -75,6 +76,7 @@ from agent_harness.domain import (
 )
 from agent_harness.orchestrator import AgentOrchestrator, validate_image_url
 from agent_harness.planning import plan_payload
+from agent_harness.ratelimit import RateLimiter
 from agent_harness.templates import Template, TemplateError, expand_prompt
 from agent_harness.worker import Worker, run_is_settled
 
@@ -92,6 +94,8 @@ _BUDGET_FIELDS = {"max_steps", "max_wall_seconds", "max_tokens", "max_cost_usd"}
 
 
 class ApiError(Exception):
+    retry_after: float | None = None
+
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
@@ -119,6 +123,7 @@ class HarnessAPI:
         quotas: Mapping[str, Quota] | None = None,
         stream_hub: StreamHub | None = None,
         cors_origins: Sequence[str] = (),
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         if auth_token is not None and len(auth_token) < 16:
             raise ValueError("API auth token must be at least 16 characters")
@@ -143,6 +148,7 @@ class HarnessAPI:
         self._worker_tasks: list[asyncio.Task[None]] = []
         self._hub = stream_hub
         self._cors = frozenset(cors_origins)
+        self._limiter = rate_limiter
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -165,7 +171,8 @@ class HarnessAPI:
         try:
             await self._dispatch(scope, receive, send)
         except ApiError as exc:
-            await _json(send, exc.status, {"error": exc.message})
+            headers = ((b"retry-after", str(math.ceil(exc.retry_after)).encode()),) if exc.retry_after else ()
+            await _json(send, exc.status, {"error": exc.message}, headers=headers)
         except QuotaExceeded as exc:  # admission is reserved atomically by the orchestrator
             await _json(send, 429, {"error": str(exc)})
         except KeyError as exc:
@@ -216,7 +223,12 @@ class HarnessAPI:
         if path == "/readyz" and method == "GET":
             await self._ready(send)
             return
-        principal = self._authorize(scope)
+        try:
+            principal = self._authorize(scope)
+        except ApiError:
+            self._limit(f"addr:{_client(scope)}")  # failed authentication is limited by address
+            raise
+        self._limit(f"key:{principal.name}" if self._principals.enabled else f"addr:{_client(scope)}")
         query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
 
         if path == "/profiles" and method == "GET":
@@ -280,6 +292,15 @@ class HarnessAPI:
         if handler is None:
             raise ApiError(404 if not any(r == rest for _, r in routes) else 405, "not found")
         await handler()
+
+    def _limit(self, key: str) -> None:
+        if self._limiter is None:
+            return
+        wait = self._limiter.check(key)
+        if wait is not None:
+            error = ApiError(429, "rate limit exceeded; retry later")
+            error.retry_after = wait
+            raise error
 
     def _authorize(self, scope: Scope) -> Principal:
         if not self._principals.enabled:
@@ -949,7 +970,14 @@ def _summary_payload(summary: RunSummary) -> dict[str, Any]:
     }
 
 
-async def _json(send: Send, status: int, payload: Any) -> None:
+def _client(scope: Scope) -> str:
+    client = scope.get("client")
+    return str(client[0]) if client else "unknown"
+
+
+async def _json(
+    send: Send, status: int, payload: Any, *, headers: Sequence[tuple[bytes, bytes]] = ()
+) -> None:
     body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     await send(
         {
@@ -959,6 +987,7 @@ async def _json(send: Send, status: int, payload: Any) -> None:
                 (b"content-type", b"application/json"),
                 (b"cache-control", b"no-store"),
                 (b"content-length", str(len(body)).encode()),
+                *headers,
             ],
         }
     )
@@ -1005,4 +1034,9 @@ def create_api(
         principals=PrincipalDirectory(api_keys_from_config(app.config.api_keys), legacy_token=auth_token),
         stream_hub=stream_hub,
         cors_origins=app.config.api_cors_origins,
+        rate_limiter=(
+            RateLimiter(app.config.api_rate_limit.requests_per_minute, burst=app.config.api_rate_limit.burst)
+            if app.config.api_rate_limit.requests_per_minute > 0
+            else None
+        ),
     )

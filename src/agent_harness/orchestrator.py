@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import re
 import time
 from dataclasses import field, replace
@@ -26,7 +27,12 @@ from agent_harness.agents import (
 )
 from agent_harness.runcontext import CURRENT_RUN_ID
 from agent_harness.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
-from agent_harness.context import ContextSummarizer, FullHistoryContextBuilder
+from agent_harness.context import (
+    ContextSummarizer,
+    FullHistoryContextBuilder,
+    estimate_tokens,
+    fit_to_tokens,
+)
 from agent_harness.planning import (
     CREATE_PLAN,
     CREATE_PLAN_SPEC,
@@ -87,7 +93,9 @@ from agent_harness.domain import (
     SteerStore,
     ContextBuilder,
     ContextSummary,
+    ContextOverflowError,
     ContextView,
+    ContextWindowExceededError,
     ModelClient,
     ModelStreamEvent,
     PermissionMode,
@@ -108,6 +116,7 @@ from agent_harness.domain import (
     PermanentModelError,
     RetryableModelError,
     Role,
+    RunQuery,
     RunBudget,
     RunEvent,
     RunRecord,
@@ -138,6 +147,13 @@ class OrchestratorSettings:
     whole (none of its calls run) and the model is asked again; the run fails once
     more than ``max_refused_repeats`` replies were refused this way. ``None``
     disables the limit.
+
+    When the provider rejects a request as too large for its context, the
+    request is retried up to ``context_overflow_retries`` times per step with a
+    smaller view: the estimate times ``context_overflow_shrink`` (or the ratio
+    the server states, less 10%). The cap is persisted and applies to the rest
+    of the run on that profile. ``context_overflow_patterns`` are extra regular
+    expressions that mark a provider error message as an overflow.
     """
 
     max_model_attempts: int = 3
@@ -145,6 +161,9 @@ class OrchestratorSettings:
     max_identical_tool_calls: int | None = 5
     max_refused_repeats: int | None = 2
     max_tool_calls_per_turn: int | None = 32
+    context_overflow_retries: int = 2
+    context_overflow_shrink: float = 0.5
+    context_overflow_patterns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.max_model_attempts < 1:
@@ -157,6 +176,15 @@ class OrchestratorSettings:
             raise ValueError("max_refused_repeats must not be negative")
         if self.max_tool_calls_per_turn is not None and self.max_tool_calls_per_turn < 1:
             raise ValueError("max_tool_calls_per_turn must be at least 1")
+        if self.context_overflow_retries < 0:
+            raise ValueError("context_overflow_retries must not be negative")
+        if not 0 < self.context_overflow_shrink < 1:
+            raise ValueError("context_overflow_shrink must be between 0 and 1")
+        for pattern in self.context_overflow_patterns:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"invalid context_overflow_patterns entry {pattern!r}: {exc}") from exc
 
 
 FallbackLookup = Callable[[str], Sequence[str]]
@@ -217,6 +245,10 @@ class AgentOrchestrator:
         planning: PlanningPolicy | None = None,
         quotas: Mapping[str, Quota] | None = None,
         quota_check_seconds: float = 5.0,
+        approval_timeout_seconds: float = 0.0,
+        question_timeout_seconds: float = 0.0,
+        on_input_timeout: str = "deny",
+        user_quotas: Callable[[str], Quota | None] | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -246,6 +278,14 @@ class AgentOrchestrator:
         self._agent_spec = agent_spec(tuple(self._agents.values())) if self._agents else None
         self._task_tracking = task_tracking
         self._ask_user = ask_user
+        if approval_timeout_seconds < 0 or question_timeout_seconds < 0:
+            raise ValueError("input timeouts must not be negative (0 waits forever)")
+        if on_input_timeout not in {"deny", "cancel", "fail"}:
+            raise ValueError("on_input_timeout must be deny, cancel, or fail")
+        self._approval_timeout = approval_timeout_seconds
+        self._question_timeout = question_timeout_seconds
+        self._on_input_timeout = on_input_timeout
+        self._user_quotas = user_quotas
         self._guardrails = guardrails
         # Guardrail events from tool-output checks, recorded with the tool's result.
         self._tool_guard_events: dict[tuple[str, str], list[RunEvent]] = {}
@@ -309,7 +349,8 @@ class AgentOrchestrator:
             # Atomic admission: reserve budget against the tenant's quota and cap
             # this run's budget to what was granted (subagents share the parent's).
             selected_budget, reserved = await self._admit(
-                tenant, identifier, selected_budget, consumed_tokens=0, consumed_cost=0.0, new_run=True
+                tenant, identifier, selected_budget, consumed_tokens=0, consumed_cost=0.0, new_run=True,
+                end_user=end_user,
             )
         selected_mode = PermissionMode(mode) if mode is not None else self._default_mode
         initial_messages = list(messages)
@@ -422,38 +463,64 @@ class AgentOrchestrator:
         consumed_tokens: int,
         consumed_cost: float,
         new_run: bool,
+        end_user: str | None = None,
     ) -> tuple[RunBudget, bool]:
-        """Reserve quota for new work; return the (capped) budget and whether it reserved."""
+        """Reserve quota for new work; return the (capped) budget and whether it reserved.
+
+        The tenant's ``[[quotas]]`` and, for runs with an ``end_user``, that user's
+        ``[user_quotas]`` are both checked in the same atomic reservation.
+        """
 
         quota = quota_for(self._quotas, tenant)
+        user_quota = self._user_quota(end_user)
         reserve = getattr(self._store, "reserve", None)
-        if quota is None or reserve is None:
+        if (quota is None and user_quota is None) or reserve is None:
             return budget, False
+        tenant_quota = quota if quota is not None else Quota(tenant)
         want_tokens = None if budget.max_tokens is None else max(0, budget.max_tokens - consumed_tokens)
         want_cost = None if budget.max_cost_usd is None else max(0.0, budget.max_cost_usd - consumed_cost)
 
-        def decide(usage: Any) -> Any:
-            decision = decide_admission(quota, usage, tenant=tenant, tokens=want_tokens,
+        def decide(usage: Any, user_usage: Any = None) -> Any:
+            decision = decide_admission(tenant_quota, usage, tenant=tenant, tokens=want_tokens,
                                         cost_usd=want_cost, new_run=new_run)
             if isinstance(decision, str):
                 return decision
+            if user_quota is not None and user_usage is not None:
+                decision = decide_admission(user_quota, user_usage, tenant=tenant,
+                                            tokens=decision.tokens, cost_usd=decision.cost_usd,
+                                            new_run=new_run, subject=f"user {end_user!r}")
+                if isinstance(decision, str):
+                    return decision
             # Store ceilings as absolute consumption, so outstanding = ceiling - consumed.
             return Grant(
                 tokens=None if decision.tokens is None else consumed_tokens + decision.tokens,
                 cost_usd=None if decision.cost_usd is None else consumed_cost + decision.cost_usd,
             )
 
-        decision = await reserve(tenant, run_id, self._clock() - _QUOTA_WINDOW, decide)
+        since = self._clock() - _QUOTA_WINDOW
+        if user_quota is not None:
+            decision = await reserve(tenant, run_id, since, decide, end_user=end_user)
+        else:
+            decision = await reserve(tenant, run_id, since, decide)
         if isinstance(decision, str):
             raise QuotaExceededError(decision)
         self._usage_cache.pop(tenant, None)
+        self._usage_cache.pop(f"{tenant}\x00{end_user}", None)
         return replace(budget, max_tokens=decision.tokens, max_cost_usd=decision.cost_usd), True
 
+    def _user_quota(self, end_user: str | None) -> Quota | None:
+        if end_user is None or self._user_quotas is None:
+            return None
+        return self._user_quotas(end_user)
+
     async def _quota_reason(self, run: RunRecord) -> str | None:
-        """Step-boundary check of the tenant's consumption (cached briefly per tenant)."""
+        """Step-boundary check of the tenant's (and end user's) consumption, cached briefly."""
 
         if run.parent_run_id is not None:
             return None  # a subagent is bounded by its parent's budget
+        reason = await self._user_quota_reason(run)
+        if reason is not None:
+            return reason
         quota = quota_for(self._quotas, run.tenant)
         usage_of = getattr(self._store, "tenant_usage", None)
         if quota is None or usage_of is None:
@@ -466,6 +533,21 @@ class AgentOrchestrator:
             cached = (now, await usage_of(run.tenant, self._clock() - _QUOTA_WINDOW))
             self._usage_cache[run.tenant] = cached
         return usage_over_limit(quota, cached[1], run.tenant)
+
+    async def _user_quota_reason(self, run: RunRecord) -> str | None:
+        quota = self._user_quota(run.end_user)
+        usage_of = getattr(self._store, "user_usage", None)
+        if quota is None or usage_of is None or run.end_user is None:
+            return None
+        if quota.max_tokens_per_day is None and quota.max_cost_usd_per_day is None:
+            return None
+        key = f"{run.tenant}\x00{run.end_user}"
+        now = self._monotonic()
+        cached = self._usage_cache.get(key)
+        if cached is None or now - cached[0] >= self._quota_check_seconds:
+            cached = (now, await usage_of(run.tenant, run.end_user, self._clock() - _QUOTA_WINDOW))
+            self._usage_cache[key] = cached
+        return usage_over_limit(quota, cached[1], run.end_user, kind="user")
 
     async def _on_terminal(self, run: RunRecord) -> None:
         """Release what a finished run held: its quota reservation and run-scoped resources."""
@@ -722,6 +804,72 @@ class AgentOrchestrator:
             kind=str(pending.payload.get("kind", "tool")),
         )
 
+    async def expire_pending_input(self, *, now: datetime | None = None, limit: int = 200) -> list[str]:
+        """Resolve paused top-level runs whose approval or question is past its deadline.
+
+        Returns the IDs of runs that changed. A denied run is ``running`` again and
+        must be resumed (workers enqueue it); cancelled and failed runs are final.
+        Needs a store that lists runs.
+        """
+
+        if not (self._approval_timeout or self._question_timeout):
+            return []
+        list_runs = getattr(self._store, "list_runs", None)
+        if list_runs is None:
+            return []
+        changed: list[str] = []
+        cursor: str | None = None
+        while True:
+            page = await list_runs(
+                RunQuery(statuses=(RunStatus.AWAITING_INPUT,), limit=limit, cursor=cursor)
+            )
+            for run in page.runs:
+                if await self.expire_run_input(run.id, now=now):
+                    changed.append(run.id)
+            cursor = page.next_cursor
+            if cursor is None:
+                return changed
+
+    @property
+    def expired_input_resumes(self) -> bool:
+        """Whether runs changed by ``expire_pending_input`` continue (on_input_timeout = deny)."""
+
+        return self._on_input_timeout == "deny"
+
+    async def expire_run_input(self, run_id: str, *, now: datetime | None = None) -> bool:
+        """Apply ``on_input_timeout`` if the run's pending input is overdue; True if applied."""
+
+        pending = await self.pending_approval(run_id)
+        if pending is None:
+            return False
+        question = pending.kind == "question"
+        timeout = self._question_timeout if question else self._approval_timeout
+        if not timeout:
+            return False
+        if (now or self._clock()) < pending.requested_at + timedelta(seconds=timeout):
+            return False
+        what = "question" if question else "approval"
+        if self._on_input_timeout == "deny":
+            await self.resolve_approval(
+                run_id,
+                call_id=pending.call_id,
+                approved=False,
+                actor="timeout",
+                feedback=f"no response within {timeout:g} seconds",
+            )
+        elif self._on_input_timeout == "cancel":
+            await self.cancel(run_id)
+        else:
+            run = await self._store.get_run(run_id)
+            if run is None or run.status.is_terminal:
+                return False
+            events = list(await self._store.list_events(run_id))
+            waiting = _waiting_child(events)
+            if waiting is not None:
+                await self.cancel(str(waiting.payload["child_run_id"]))
+            await self._fail(run, events, f"{what} timed out after {timeout:g} seconds")
+        return True
+
     async def resolve_approval(
         self,
         run_id: str,
@@ -952,7 +1100,7 @@ class AgentOrchestrator:
         if run.parent_run_id is None:
             run.budget, _ = await self._admit(
                 run.tenant, run.id, run.budget, consumed_tokens=run.consumed_tokens,
-                consumed_cost=run.consumed_cost_usd, new_run=False,
+                consumed_cost=run.consumed_cost_usd, new_run=False, end_user=run.end_user,
             )
         parts = tuple(ContentPart(image_url=url) for url in images)
         added = [Message(role=Role.USER, content=content, parts=parts)]
@@ -1224,10 +1372,10 @@ class AgentOrchestrator:
         try:
             client = self._models.resolve(run.model_profile)
             specs = self._specs_for(run)
-            view = self._build_view(run, specs)
+            view = self._build_view(run, specs, events)
             if self._summarizer is not None and view.omitted_through is not None:
                 if await self._summarize(run, events, view):
-                    view = self._build_view(run, specs)
+                    view = self._build_view(run, specs, events)
             request_messages = view.messages
             if pre_model is not None and pre_model.context:
                 # Ephemeral: appended to this request only, so history (and the
@@ -1293,16 +1441,87 @@ class AgentOrchestrator:
             ),
         )
 
-    def _build_view(self, run: RunRecord, specs: Sequence[ToolSpec]) -> ContextView:
+    def _build_view(
+        self, run: RunRecord, specs: Sequence[ToolSpec], events: Sequence[RunEvent] = ()
+    ) -> ContextView:
         if run.context_summary is None:
             # Builders without summary support never see the keyword.
-            return self._context.build(run.messages, specs, model_profile=run.model_profile)
-        # ``summary`` is an optional extension of the ContextBuilder protocol.
-        build: Any = self._context.build
-        view: ContextView = build(
-            run.messages, specs, model_profile=run.model_profile, summary=run.context_summary
-        )
+            view = self._context.build(run.messages, specs, model_profile=run.model_profile)
+        else:
+            # ``summary`` is an optional extension of the ContextBuilder protocol.
+            build: Any = self._context.build
+            view = build(
+                run.messages, specs, model_profile=run.model_profile, summary=run.context_summary
+            )
+        cap = _overflow_cap(events, run.model_profile)
+        if cap is not None:
+            view = fit_to_tokens(view, specs, max_input_tokens=cap, model_profile=run.model_profile)
         return view
+
+    def _is_context_overflow(self, exc: Exception) -> bool:
+        if self._settings.context_overflow_retries == 0:
+            return False
+        if isinstance(exc, ContextOverflowError):
+            return True
+        if not isinstance(exc, PermanentModelError) or isinstance(exc, ContextWindowExceededError):
+            return False
+        message = str(exc)
+        return any(
+            re.search(pattern, message, re.IGNORECASE)
+            for pattern in self._settings.context_overflow_patterns
+        )
+
+    async def _recover_context_overflow(
+        self, run: RunRecord, events: list[RunEvent], exc: Exception, attempt: int
+    ) -> bool:
+        """Record an overflow with a smaller input cap, so the turn is retried; False if out of retries."""
+
+        used = sum(
+            1
+            for event in events
+            if event.type is EventType.MODEL_RESPONDED
+            and event.step == run.step_count
+            and event.payload.get("context_overflow") is True
+        )
+        if used >= self._settings.context_overflow_retries:
+            return False
+        specs = self._specs_for(run)
+        try:
+            view = self._build_view(run, specs, events)
+        except ContextWindowExceededError:
+            return False
+        estimated = estimate_tokens(view.messages, specs)
+        factor = self._settings.context_overflow_shrink
+        limit = getattr(exc, "limit_tokens", None)
+        requested = getattr(exc, "requested_tokens", None)
+        if isinstance(limit, int) and isinstance(requested, int) and 0 < limit < requested:
+            # The server said by how much: shrink by that ratio, with a 10% margin.
+            factor = min(0.95, max(0.1, limit / requested * 0.9))
+        cap = max(1, math.floor(estimated * factor))
+        payload: dict[str, Any] = {
+            "ok": False,
+            "retryable": True,
+            "attempt": attempt,
+            "error": _safe_error(exc),
+            "context_overflow": True,
+            "model_profile": run.model_profile,
+            "estimated_tokens": estimated,
+            "max_input_tokens": cap,
+        }
+        await self._checkpoint(
+            run,
+            events,
+            RunEvent(
+                run_id=run.id,
+                type=EventType.MODEL_RESPONDED,
+                payload=payload,
+                step=run.step_count,
+                created_at=self._clock(),
+            ),
+        )
+        if self._model_attempts_exhausted(events, run.step_count):
+            await self._fallback_or_fail(run, events)
+        return True
 
     async def _summarize(
         self, run: RunRecord, events: list[RunEvent], view: ContextView
@@ -1436,6 +1655,10 @@ class AgentOrchestrator:
             await self._record_model_error(run, events, exc, retryable=True, attempt=attempt)
             if self._model_attempts_exhausted(events, run.step_count):
                 await self._fallback_or_fail(run, events)
+            return
+        if self._is_context_overflow(exc) and await self._recover_context_overflow(
+            run, events, exc, attempt
+        ):
             return
         await self._record_model_error(run, events, exc, retryable=False, attempt=attempt)
         if isinstance(exc, PermanentModelError):
@@ -3269,6 +3492,20 @@ class AgentOrchestrator:
         if final is None:
             raise ValueError("model stream ended without a final response")
         return final
+
+
+def _overflow_cap(events: Sequence[RunEvent], profile: str) -> int | None:
+    """The smallest input cap recorded by context-overflow recoveries on ``profile``."""
+
+    caps = [
+        event.payload["max_input_tokens"]
+        for event in events
+        if event.type is EventType.MODEL_RESPONDED
+        and event.payload.get("context_overflow") is True
+        and event.payload.get("model_profile") == profile
+        and isinstance(event.payload.get("max_input_tokens"), int)
+    ]
+    return min(caps) if caps else None
 
 
 def _retry_details(response: ModelResponse) -> dict[str, Any]:

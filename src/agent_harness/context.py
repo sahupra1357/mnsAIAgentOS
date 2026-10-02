@@ -235,6 +235,49 @@ class BudgetedContextBuilder:
         return self._text_tokens(serialized)
 
 
+def estimate_tokens(
+    messages: Sequence[Message], tools: Sequence[ToolSpec], policy: ContextPolicy | None = None
+) -> int:
+    """The builder's token estimate for a request: messages plus tool definitions."""
+
+    builder = BudgetedContextBuilder({}, policy=policy)
+    return sum(builder._message_tokens(m, True) for m in messages) + builder._tools_tokens(tools)
+
+
+def fit_to_tokens(
+    view: ContextView,
+    tools: Sequence[ToolSpec],
+    *,
+    max_input_tokens: int,
+    model_profile: str,
+    policy: ContextPolicy | None = None,
+) -> ContextView:
+    """Shrink a view to ``max_input_tokens`` (after a provider reported an overflow).
+
+    The same unit-wise trimming applies, against a fixed cap, so later views stay
+    append-only between trims. Tool outputs are also capped at a quarter of the cap.
+    """
+
+    selected = policy or ContextPolicy()
+    quarter = math.floor(max_input_tokens * selected.chars_per_token / 4)
+    current = selected.max_tool_output_chars
+    tight = replace(
+        selected, max_tool_output_chars=max(200, quarter if current is None else min(current, quarter))
+    )
+    limits = ContextLimits(context_window=max_input_tokens, output_reserve_tokens=0)
+    fitted = BudgetedContextBuilder(lambda _: limits, policy=tight).build(
+        view.messages, tools, model_profile=model_profile
+    )
+    return replace(
+        fitted,
+        omitted_messages=view.omitted_messages + fitted.omitted_messages,
+        trimmed_tool_outputs=view.trimmed_tool_outputs + fitted.trimmed_tool_outputs,
+        summarized_messages=view.summarized_messages,
+        omitted_from=view.omitted_from,
+        omitted_through=view.omitted_through,
+    )
+
+
 def _summary_applies(summary: ContextSummary, messages: Sequence[Message], head_end: int) -> bool:
     """A summary must end inside the history and at a unit boundary."""
 

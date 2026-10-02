@@ -347,38 +347,46 @@ class SQLiteRunStore:
         async with self._lock:
             return self._tenant_usage(tenant, since)
 
-    def _tenant_usage(self, tenant: str, since: datetime) -> TenantUsage:
+    async def user_usage(self, tenant: str, end_user: str, since: datetime) -> TenantUsage:
+        """Like ``tenant_usage``, for one end user's top-level runs in that tenant."""
+
+        async with self._lock:
+            return self._tenant_usage(tenant, since, end_user)
+
+    def _tenant_usage(self, tenant: str, since: datetime, end_user: str | None = None) -> TenantUsage:
         """Top-level runs only (a parent's consumption includes its subagents').
 
         Tokens and cost count runs *updated* in the window, which is
         conservative: a long run's whole consumption counts while it is active.
         Reservations whose run does not exist yet (being created) count as runs.
+        With ``end_user``, only that user's runs and reservations count.
         """
 
-        window = since.isoformat()
+        runs_user = "" if end_user is None else " AND json_extract(snapshot_json, '$.end_user') = :u"
+        held_user = "" if end_user is None else " AND q.end_user = :u"
         row = self._connection.execute(
-            """
+            f"""
             SELECT
-              (SELECT COUNT(*) FROM runs WHERE tenant = ? AND parent_run_id IS NULL
-                                            AND created_at >= ?) AS runs,
-              (SELECT COALESCE(SUM(consumed_tokens), 0) FROM runs WHERE tenant = ?
-                 AND parent_run_id IS NULL AND updated_at >= ?) AS tokens,
-              (SELECT COALESCE(SUM(consumed_cost_usd), 0) FROM runs WHERE tenant = ?
-                 AND parent_run_id IS NULL AND updated_at >= ?) AS cost,
-              (SELECT COUNT(*) FROM runs WHERE tenant = ? AND parent_run_id IS NULL
-                 AND status IN ('queued', 'running', 'awaiting_input')) AS active,
+              (SELECT COUNT(*) FROM runs WHERE tenant = :t AND parent_run_id IS NULL
+                                            AND created_at >= :s{runs_user}) AS runs,
+              (SELECT COALESCE(SUM(consumed_tokens), 0) FROM runs WHERE tenant = :t
+                 AND parent_run_id IS NULL AND updated_at >= :s{runs_user}) AS tokens,
+              (SELECT COALESCE(SUM(consumed_cost_usd), 0) FROM runs WHERE tenant = :t
+                 AND parent_run_id IS NULL AND updated_at >= :s{runs_user}) AS cost,
+              (SELECT COUNT(*) FROM runs WHERE tenant = :t AND parent_run_id IS NULL
+                 AND status IN ('queued', 'running', 'awaiting_input'){runs_user}) AS active,
               (SELECT COUNT(*) FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
-                 WHERE q.tenant = ? AND r.id IS NULL AND q.created_at >= ?) AS pending,
+                 WHERE q.tenant = :t AND r.id IS NULL AND q.created_at >= :s{held_user}) AS pending,
               (SELECT COALESCE(SUM(MAX(0, q.tokens - COALESCE(r.consumed_tokens, 0))), 0)
                  FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
-                 WHERE q.tenant = ? AND q.tokens IS NOT NULL
+                 WHERE q.tenant = :t AND q.tokens IS NOT NULL{held_user}
                    AND (r.id IS NULL OR r.status IN ('queued', 'running', 'awaiting_input'))) AS rtokens,
               (SELECT COALESCE(SUM(MAX(0, q.cost_usd - COALESCE(r.consumed_cost_usd, 0))), 0)
                  FROM quota_reservations q LEFT JOIN runs r ON r.id = q.run_id
-                 WHERE q.tenant = ? AND q.cost_usd IS NOT NULL
+                 WHERE q.tenant = :t AND q.cost_usd IS NOT NULL{held_user}
                    AND (r.id IS NULL OR r.status IN ('queued', 'running', 'awaiting_input'))) AS rcost
             """,
-            (tenant, window, tenant, window, tenant, window, tenant, tenant, window, tenant, tenant),
+            {"t": tenant, "s": since.isoformat(), "u": end_user},
         ).fetchone()
         pending = int(row["pending"])
         return TenantUsage(
@@ -388,28 +396,40 @@ class SQLiteRunStore:
         )
 
     async def reserve(
-        self, tenant: str, run_id: str, since: datetime, decide: Callable[[TenantUsage], Any]
+        self,
+        tenant: str,
+        run_id: str,
+        since: datetime,
+        decide: Callable[..., Any],
+        *,
+        end_user: str | None = None,
     ) -> Any:
         """Atomically read usage, ask ``decide``, and store the grant it returns.
 
         ``decide`` returns a grant (with ``tokens``/``cost_usd`` ceilings) or a
         refusal string; only a grant is stored. ``BEGIN IMMEDIATE`` serializes
-        concurrent admissions, so two runs cannot take the same budget.
+        concurrent admissions, so two runs cannot take the same budget. With
+        ``end_user``, ``decide`` also receives that user's usage.
         """
 
         async with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
-                decision = decide(self._tenant_usage(tenant, since))
+                usage = self._tenant_usage(tenant, since)
+                if end_user is None:
+                    decision = decide(usage)
+                else:
+                    decision = decide(usage, self._tenant_usage(tenant, since, end_user))
                 if not isinstance(decision, str):
                     self._connection.execute(
                         """
-                        INSERT INTO quota_reservations(run_id, tenant, tokens, cost_usd, created_at)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO quota_reservations(run_id, tenant, tokens, cost_usd, created_at, end_user)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         ON CONFLICT(run_id) DO UPDATE SET tokens = excluded.tokens,
-                            cost_usd = excluded.cost_usd, created_at = excluded.created_at
+                            cost_usd = excluded.cost_usd, created_at = excluded.created_at,
+                            end_user = excluded.end_user
                         """,
-                        (run_id, tenant, decision.tokens, decision.cost_usd, utc_now().isoformat()),
+                        (run_id, tenant, decision.tokens, decision.cost_usd, utc_now().isoformat(), end_user),
                     )
                 self._connection.execute("COMMIT")
             except BaseException:

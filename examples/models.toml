@@ -158,6 +158,24 @@ max_tokens = 1024
 # `agent-harness answer RUN_ID "..."` or POST /runs/{id}/answer). Off by default.
 # [interaction]
 # ask_user = true
+# approval_timeout_seconds = 3600   # resolve approvals left waiting this long (0 = wait forever)
+# question_timeout_seconds = 3600
+# on_timeout = "deny"               # deny | cancel | fail
+
+# Loop limits (shown with their defaults; 0 turns an optional check off). Any table value
+# can also be set from the environment: AGENT_HARNESS_SET__ORCHESTRATOR__MAX_TOOL_CALLS_PER_TURN=16
+# [orchestrator]
+# max_model_attempts = 3
+# max_tool_calls_per_turn = 32
+# context_overflow_retries = 2
+# context_overflow_shrink = 0.5
+
+# HTTP API rate limit per key, and per-end-user quotas (0 = off / no limit)
+# [api]
+# rate_limit_per_minute = 120
+# [user_quotas]
+# max_runs_per_day = 50
+# max_tokens_per_day = 2000000
 
 [coding]
 enabled = false
