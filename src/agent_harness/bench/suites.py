@@ -17,6 +17,13 @@ bfcl       tool-calling accuracy of the model  BFCL question file + possible-ans
            gateway per provider/adapter        file joined by "id"
 humaneval  coding: generated code executed     {"task_id", "prompt", "test",
            in the sandbox (Docker by default)   "entry_point"}
+context    long conversations past the         {"needle", "question", "answer",
+           profile's context window: trimming, "filler": prose|json|code}
+           server token counts, overflow       (synthetic; no download)
+           recovery
+memory     long-term memory: notes saved, then {"notes": [...], "question",
+           found with memory_search (keyword,  "answer"}
+           semantic, or hybrid search)
 =========  ==================================  ===================================
 
 Scores are the harness's own approximations; for leaderboard-comparable numbers
@@ -558,7 +565,146 @@ def _truthy(value: Any) -> bool:
     return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+# --- Context: conversations longer than the window -------------------------------------
+
+
+def filler_text(kind: str, seed: str, chars: int) -> str:
+    """Deterministic filler. JSON and code use more tokens per character than prose,
+    which is where a character-based estimate undercounts."""
+
+    import random
+
+    rng = random.Random(seed)
+    words = ("alpha", "river", "stone", "market", "signal", "garden", "copper", "window", "harbor",
+             "lantern", "meadow", "engine", "silver", "orbit", "canvas", "timber", "valley", "ember")
+    lines: list[str] = []
+    while sum(len(line) + 1 for line in lines) < chars:
+        if kind == "json":
+            lines.append(json.dumps({"id": rng.randint(1000, 99999), "sku": f"{rng.choice('ABCDEFGH')}"
+                                     f"{rng.randint(10, 99)}-{rng.randint(100, 999)}", "qty": rng.randint(1, 40),
+                                     "price": round(rng.uniform(1, 500), 2), "tag": rng.choice(words)}))
+        elif kind == "code":
+            name = f"{rng.choice(words)}_{rng.randint(1, 99)}"
+            lines.append(f"def {name}(x, y={rng.randint(0, 9)}):  return [v * {rng.randint(2, 9)} for v in "
+                         f"range(x) if v % {rng.randint(2, 7)} == y]")
+        else:
+            lines.append(" ".join(rng.choice(words) for _ in range(14)).capitalize() + ".")
+    return "\n".join(lines)[:chars]
+
+
+class ContextSuite:
+    name = "context"
+    description = "Long conversations past the context window: trimming, server token counts, overflow recovery."
+    system_prompt = ("Answer the user's question from the conversation. "
+                     "End your reply with a line of the form 'Final answer: <answer>'.")
+
+    def load(self, path: str | Path, options: Mapping[str, Any]) -> list[BenchItem]:
+        items = []
+        for index, record in enumerate(load_records(path)):
+            fields = [record.get(key) for key in ("needle", "question", "answer")]
+            if not all(isinstance(value, str) and value for value in fields):
+                raise DatasetError(f"context record {index} needs 'needle', 'question', and 'answer'")
+            filler = str(record.get("filler", "prose"))
+            if filler not in {"prose", "json", "code"}:
+                raise DatasetError(f"context record {index}: filler must be prose, json, or code")
+            items.append(BenchItem(str(record.get("id", f"context-{index}")),
+                                   {"needle": fields[0], "question": fields[1], "filler": filler},
+                                   fields[2], category=filler))
+        return items
+
+    async def run(self, item: BenchItem, context: BenchContext) -> ItemResult:
+        started = time.monotonic()
+        turns = int(context.options.get("turns", 14))
+        chars = int(context.options.get("chars_per_turn", 1_500))
+        messages = [Message(Role.SYSTEM, self.system_prompt),
+                    Message(Role.USER, "I will send records in parts. Reply 'noted.' to each; then I will ask a question.")]
+        for turn in range(turns):
+            text = filler_text(item.input["filler"], f"{item.id}-{turn}", chars)
+            if turn == turns - 1:  # the newest part holds the fact, so a correct trim keeps it
+                text = f"{text}\nNote: {item.input['needle']}"
+            messages += [Message(Role.USER, f"Part {turn + 1}:\n{text}"), Message(Role.ASSISTANT, "noted.")]
+        messages.append(Message(Role.USER, item.input["question"]))
+        outcome = await context.run_agent(messages, ToolRuntime(ToolRegistry()))
+        answer = outcome.output
+        match = re.search(r"final answer\s*[:：]\s*(.+)", answer, re.IGNORECASE | re.DOTALL)
+        predicted = match.group(1).strip().splitlines()[0] if match else answer.strip()[-200:]
+        correct = normalize_answer(str(item.expected)) in normalize_answer(answer)
+        responded = [e.payload for e in outcome.events if e.type.value == "model_responded"]
+        details = {
+            "messages_in": len(messages),
+            "omitted_messages": max((p.get("context", {}).get("omitted_messages", 0) for p in responded), default=0),
+            "context_capped": sum(e.type.value == "context_capped" for e in outcome.events),
+            "context_overflows": sum(p.get("context_overflow") is True for p in responded),
+        }
+        return _result_from_outcome(item, outcome, started, correct=correct, expected=str(item.expected),
+                                    predicted=predicted[:200], details=details)
+
+
+# --- Memory: save notes, then find them with memory_search ------------------------------
+
+
+class MemorySuite:
+    name = "memory"
+    description = "Long-term memory: notes are saved, then found with memory_search (keyword, semantic, hybrid)."
+    system_prompt = ("You have a memory_search tool over saved notes. Search the notes before answering; "
+                     "the question may use different words than the notes. "
+                     "End your reply with a line of the form 'Final answer: <answer>'.")
+
+    def load(self, path: str | Path, options: Mapping[str, Any]) -> list[BenchItem]:
+        items = []
+        for index, record in enumerate(load_records(path)):
+            notes, question, answer = record.get("notes"), record.get("question"), record.get("answer")
+            if (not isinstance(notes, list) or not all(isinstance(n, str) and n for n in notes)
+                    or not isinstance(question, str) or not isinstance(answer, str)):
+                raise DatasetError(f"memory record {index} needs 'notes' (strings), 'question', and 'answer'")
+            items.append(BenchItem(str(record.get("id", f"memory-{index}")),
+                                   {"notes": notes, "question": question}, answer))
+        return items
+
+    async def run(self, item: BenchItem, context: BenchContext) -> ItemResult:
+        from agent_harness.memory import MEMORY_SEARCH_SPEC, SQLiteMemoryStore, memory_tool_handlers
+        from agent_harness.semantic_memory import SemanticMemoryStore, VectorIndex
+
+        started = time.monotonic()
+        mode = str(context.options.get("search", "hybrid"))
+        if mode not in {"keyword", "semantic", "hybrid"}:
+            raise BenchConfigError("memory: options.search must be keyword, semantic, or hybrid")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store: Any = SQLiteMemoryStore(path, namespace="bench")
+            try:
+                if mode != "keyword":
+                    profile = context.options.get("embedding_profile")
+                    if not profile:
+                        raise BenchConfigError("memory: options.embedding_profile is required for "
+                                               f"search = {mode!r}")
+                    embed = getattr(context.models.resolve(str(profile)), "embed", None)
+                    if not callable(embed):
+                        raise BenchConfigError(f"memory: profile {profile!r} has no embeddings endpoint")
+                    store = SemanticMemoryStore(store, embed, VectorIndex(path), model=str(profile), mode=mode)
+                for note in item.input["notes"]:
+                    await store.put(note)
+                if mode != "keyword":
+                    await store.reindex()  # raises if the embedding endpoint does not work
+                runtime = ToolRuntime(ToolRegistry())
+                search, _ = memory_tool_handlers(store)
+                runtime.register(MEMORY_SEARCH_SPEC, search)
+                outcome = await context.run_agent(
+                    [Message(Role.SYSTEM, self.system_prompt), Message(Role.USER, item.input["question"])], runtime
+                )
+            finally:
+                await store.close()
+        correct = normalize_answer(str(item.expected)) in normalize_answer(outcome.output)
+        match = re.search(r"final answer\s*[:：]\s*(.+)", outcome.output, re.IGNORECASE | re.DOTALL)
+        predicted = match.group(1).strip().splitlines()[0] if match else outcome.output.strip()[-200:]
+        return _result_from_outcome(item, outcome, started, correct=correct, expected=str(item.expected),
+                                    predicted=predicted[:200],
+                                    details={"search": mode, "tool_calls": outcome.tool_calls,
+                                             "searched": "memory_search" in outcome.tool_calls})
+
+
 SUITES: dict[str, Suite] = {
     suite.name: suite
-    for suite in (Gsm8kSuite(), QaSuite(), BfclSuite(), HumanEvalSuite(), GuardrailsSuite())
+    for suite in (Gsm8kSuite(), QaSuite(), BfclSuite(), HumanEvalSuite(), GuardrailsSuite(), ContextSuite(),
+                  MemorySuite())
 }

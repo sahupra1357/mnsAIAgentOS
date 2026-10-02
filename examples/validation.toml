@@ -62,3 +62,39 @@ max_accuracy_drop = 0.05
 # data = "bench/humaneval_sample.jsonl"     # e.g. datasets/HumanEval.jsonl.gz
 # profile = "modal"
 # baseline = "../baselines/humaneval-modal.json"
+
+# Live checks of context handling and long-term memory (Phase 13-14 features).
+# [[benchmark]]
+# # Live check of context handling: 14 parts of filler (JSON, code, prose) overflow the
+# # 4096-token window. Exercises trimming, token_counting = "server" (context_capped
+# # events), and overflow recovery; the fact to recall is in the newest part.
+# name = "context-llamacpp"
+# suite = "context"
+# data = "bench/context_sample.jsonl"
+# profile = "llamacpp"
+# limit = 3
+# concurrency = 1
+# max_steps = 3
+# [benchmark.options]
+# turns = 14
+# chars_per_turn = 1500
+# [benchmark.thresholds]
+# min_accuracy = 0.66
+# max_error_rate = 0.34
+
+# [[benchmark]]
+# # Live check of long-term memory: notes are saved, embedded with the `embed` profile
+# # (ollama pull nomic-embed-text), and found by memory_search with different wording.
+# name = "memory-ollama"
+# suite = "memory"
+# data = "bench/memory_sample.jsonl"
+# profile = "ollama"
+# limit = 3
+# concurrency = 1
+# max_steps = 6
+# [benchmark.options]
+# search = "hybrid"
+# embedding_profile = "embed"
+# [benchmark.thresholds]
+# min_accuracy = 0.66
+# max_error_rate = 0.34
