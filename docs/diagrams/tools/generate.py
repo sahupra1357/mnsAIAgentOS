@@ -381,13 +381,13 @@ def end_to_end() -> Diagram:
     d.text(545, 8, "agent_harness: end-to-end flow", 32)
     d.zone(10, 55, 310, 1110, "1. Entry and setup", "blue")
     d.box(25, 105, 280, 105, "CLI\nrun, continue, approve,\nresume, rewind, cancel", "blue", id="cli")
-    d.box(25, 230, 280, 80, "HTTP API: keys, roles,\ntenants, quotas, SSE", "blue", id="api")
-    d.box(25, 330, 280, 80, "Queue workers (leases;\nPostgres SKIP LOCKED)", "blue", id="workers")
+    d.box(25, 230, 280, 80, "HTTP API: keys, roles,\nrate limit, quotas, SSE", "blue", id="api")
+    d.box(25, 330, 280, 80, "Queue workers: leases,\nexpire overdue input", "blue", id="workers")
     d.arrow([(165, 410), (165, 470)], id="to_comp")
     d.box(25, 470, 280, 250, "build_application\n\nlayered settings, profiles\ntool sources + MCP\n"
           "tool catalog sync\nplugins, hooks, subagents\nAGENTS.md, skills, planning", "purple", id="comp")
     d.arrow([(165, 720), (165, 770)], id="to_create")
-    d.box(25, 770, 280, 140, "quota reservation,\ncreate_run (hashes,\ntenant, planning)\nRUN_CREATED (queued)",
+    d.box(25, 770, 280, 140, "tenant + user quota,\ncreate_run (hashes,\ntenant, planning)\nRUN_CREATED (queued)",
           "blue", id="create")
     d.box(25, 1000, 280, 120, "Follow-ups re-enter:\ncontinue, approve,\nresume, rewind", "yellow", id="follow")
 
@@ -397,7 +397,7 @@ def end_to_end() -> Diagram:
     d.arrow([(510, 190), (510, 220)], id="g_pm")
     d.box(370, 220, 280, 60, "pre_model hook", "purple", id="pre_model")
     d.arrow([(510, 280), (510, 310)], id="pm_ctx")
-    d.box(370, 310, 280, 110, "ContextBuilder\nbounded view + summary\n(pre_compact hook)", "purple", id="ctx")
+    d.box(370, 310, 280, 110, "ContextBuilder\nbounded view + summary\n+ overflow cap\n(pre_compact hook)", "purple", id="ctx", size=16)
     d.arrow([(510, 420), (510, 450)], id="ctx_model")
     d.box(370, 450, 280, 80, "Model call\nModelRequest", "purple", id="model")
     d.arrow([(510, 530), (510, 565)], id="model_dec")
@@ -417,7 +417,7 @@ def end_to_end() -> Diagram:
     d.arrow([(690, 148), (650, 148)], color="#8b5cf6", width=3, id="loop")
     d.box(690, 720, 280, 130, "Orchestrator tools:\nagent, todo_write, exit_plan,\nsearch/load_tools,\ncreate/update/revise_plan",
           "yellow", id="builtins", size=16)
-    d.box(690, 900, 280, 90, "AWAITING_INPUT\napproval / plan review", "orange", id="awaiting")
+    d.box(690, 900, 280, 90, "AWAITING_INPUT: approval,\nquestion, plan review\n(optional deadline)", "orange", id="awaiting", size=16)
     d.arrow([(970, 492), (990, 492), (990, 945), (970, 945)], color="#f59e0b", dashed=True, id="pause")
     d.box(370, 900, 280, 90, "FAILED / CANCELLED /\nBUDGET_EXHAUSTED", "red", id="failed")
     d.text(400, 1000, "any step can end here", 16, "#b91c1c")
@@ -443,7 +443,7 @@ def end_to_end() -> Diagram:
     d.box(1040, 615, 260, 215, "Adapters\nOllama\nllama.cpp\nModal (vLLM / SGLang)\n"
           "OpenAI-compatible\nLiteLLM (optional)", "orange", id="adapters")
     d.arrow([(1170, 830), (1170, 860)], id="ad_retry")
-    d.box(1040, 860, 260, 120, "One retry budget\nfallback chain\ncost + cached tokens", "orange", id="retry")
+    d.box(1040, 860, 260, 120, "One retry budget (logged)\nfallback chain\ncontext-overflow retry\ncost + cached tokens", "orange", id="retry", size=16)
     d.arrow([(1170, 980), (1170, 1010)], id="retry_stream")
     d.box(1040, 1010, 260, 100, "Streaming (SSE)\nonly final response\nis checkpointed", "orange", id="stream")
     d.zone(1340, 480, 255, 685, "6. Model servers", "blue")
@@ -462,14 +462,14 @@ def end_to_end() -> Diagram:
     d.step("comp", "to_comp", "Compose the application",
            "Settings, profiles, tool sources and MCP servers, catalog sync, hooks, subagents, planning.")
     d.step("create", "to_create", "Create the run",
-           "Tenant quota checked; system prompt, tool hashes, tenant and planning recorded; queued.",
+           "Tenant and end-user quotas reserved; prompt, tool hashes, tenant and planning recorded.",
            ["RUN_CREATED"])
     d.step("guard", "run", "Step guard",
-           "Budgets and cancel checked, steering applied; in plan mode the next step or delegation.",
+           "Budgets, quotas, and cancel checked, steering applied; in plan mode the next step.",
            ["RUN_STARTED", "STEER_APPLIED", "PLAN_STEP_UPDATED"])
     d.step("pre_model", "g_pm", "pre_model hook", "A hook can deny the call or add context for this request.")
     d.step("ctx", "pm_ctx", "Build the context view",
-           "Bounded view of the history; older turns are summarized or omitted when it gets too long.",
+           "Bounded view; older turns summarized or omitted; a cap from an earlier overflow applies.",
            ["CONTEXT_SUMMARIZED"])
     d.step("model", "ctx_model", "Call the model", "The request is checkpointed before the provider is contacted.",
            ["MODEL_REQUESTED"])
@@ -478,15 +478,16 @@ def end_to_end() -> Diagram:
            "The adapter handles the provider's quirks, headers, and health checks.")
     d.step("modal", "s_modal", "Model server", "For example Modal running vLLM, with a bearer key and proxy headers.")
     d.step("retry", ["-s_modal", "ad_retry"], "Retries, fallback, cost",
-           "One retry budget per step; after it runs out the next fallback profile is tried. Cost is estimated.",
+           "One retry budget (retries logged); too-long requests retry with less context; then fallback.",
            ["MODEL_FALLBACK"])
     d.step("model", ["-ad_retry", "-route_ad", "-req"], "Response returns",
            "Only the final response is saved, even when tokens were streamed.", ["MODEL_RESPONDED"])
-    d.step("dec", "model_dec", "Did the model ask for tools?", "This time it did, so the tool path runs.")
+    d.step("dec", "model_dec", "Did the model ask for tools?",
+           "Yes. A reply with more than max_tool_calls_per_turn calls would be refused whole.")
     d.step("pre_tool", "yes", "Check permissions",
            "pre_tool hook, then deny, mode, ask, and allow rules, then the tool's risk policy.", ["HOOK_DECIDED"])
     d.step("approval", "pt_appr", "Approval if needed",
-           "Risky calls pause the run as AWAITING_INPUT until a person approves or denies.",
+           "Risky calls pause the run until a person decides, or the optional deadline expires it.",
            ["APPROVAL_REQUESTED", "APPROVAL_RESOLVED"])
     d.step("runtime", "appr_rt", "Run the tool",
            "Validation, timeout, idempotency; commands and sandboxed tools use the run's warm container.",
@@ -840,7 +841,9 @@ def api_access() -> Diagram:
     d.diamond(1100, 75, 240, 130, "run in my\ntenant?", id="tenant")
     d.box(1360, 105, 120, 70, "404", "red", id="e404")
     d.arrow([(1340, 140), (1360, 140)], color="#ef4444", id="n404")
-    d.diamond(1100, 400, 240, 130, "reserve quota\n(atomic)?", size=16, id="quota")
+    d.box(560, 290, 240, 70, "429 rate limit\n+ Retry-After", "red", 16, id="e429r")
+    d.arrow([(680, 180), (680, 290)], "over rate", "#ef4444", id="nrate")
+    d.diamond(1100, 400, 240, 130, "reserve tenant\n+ user quota?", size=16, id="quota")
     d.arrow([(1220, 205), (1220, 400)], "yes", id="b5")
     d.box(1360, 430, 120, 70, "429", "red", id="e429")
     d.arrow([(1340, 465), (1360, 465)], color="#ef4444", id="n429")
@@ -855,21 +858,26 @@ def api_access() -> Diagram:
     d.arrow([(270, 505), (270, 600)], id="b9")
     d.box(780, 600, 260, 90, "Approve / mode change\nactor recorded", "orange", id="actor")
     d.box(1100, 600, 380, 90, "/healthz  /readyz\n(no key; store + schema version)", "yellow", id="ready")
-    d.text(40, 750, "Keys come from [[api.keys]] by SHA-256 or env var; tenant '*' sees every tenant. "
-                    "Quotas: runs, tokens, cost per 24h, and concurrent runs.", 16, "#555555")
+    d.text(40, 750, "Keys come from [[api.keys]] by SHA-256 or env var; tenant '*' sees every tenant.",
+           16, "#555555")
+    d.text(40, 805, "Quotas ([[quotas]] per tenant, [user_quotas] per end user): runs, tokens, cost per 24h, "
+                    "concurrent runs.", 16, "#555555")
+    d.text(40, 778, "[api] rate_limit_per_minute: a token bucket per key (per address without keys or on "
+                    "failed authentication).", 16, "#555555")
 
     d.step("req", None, "A request arrives", "Every route except /healthz and /readyz needs a bearer key.")
     d.step("auth", "b1", "Authenticate", "The key's SHA-256 is compared in constant time; unknown -> 401.")
-    d.step("principal", "b2", "Principal", "The key names a principal with a tenant and a role.")
+    d.step("principal", "b2", "Principal and rate limit",
+           "The key names a principal (tenant, role). Over [api] rate_limit_per_minute -> 429 + Retry-After.")
     d.step("role", "b3", "Authorize", "viewer reads; operator acts on runs; admin changes modes and rewinds.")
     d.step("tenant", "b4", "Tenant isolation", "Runs of other tenants answer 404, so their existence is not leaked.")
     d.step("quota", "b5", "Reserve quota",
-           "One transaction reads usage + other reservations and reserves budget; nothing left -> 429.")
+           "One transaction checks the tenant's and the end user's usage + reservations; nothing left -> 429.")
     d.step("create", "b6", "Create the run",
            "Budget capped to the reservation; stamped with the tenant and the key's name.", ["RUN_CREATED"])
     d.step("queue", "b7", "Enqueue", "Workers on any host claim runs with leases.")
     d.step("worker", "b8", "Execute",
-           "A worker leases the run; the tenant's quota is re-checked before every model call.")
+           "A worker leases the run; tenant and user quotas are re-checked before every model call.")
     d.step("store", "b9", "Durable and masked",
            "Secrets masked in events; the reservation is released when the run finishes.")
     d.step("actor", "jump", "Accountable decisions", "Approvals and mode changes record which key acted.",
@@ -878,7 +886,124 @@ def api_access() -> Diagram:
     return d
 
 
-DIAGRAMS = (end_to_end, permissions, subagents, summarization, tool_platform, plan_execute, api_access)
+def context_overflow() -> Diagram:
+    d = Diagram("08-context-overflow", "Context overflow recovery", 1500, 900)
+    d.text(40, 20, "Context overflow: when the server says the request is too long", 30)
+    d.box(40, 100, 260, 90, "Build view\n(trim / summary)", "purple", id="build")
+    d.arrow([(300, 145), (360, 145)], id="c1")
+    d.box(360, 100, 280, 90, "Apply overflow cap\n(smallest recorded\nfor this profile)", "purple", 16, id="cap")
+    d.arrow([(640, 145), (700, 145)], id="c2")
+    d.box(700, 100, 240, 90, "Model request", "blue", id="send")
+    d.arrow([(940, 145), (1000, 145)], id="c3")
+    d.diamond(1000, 75, 260, 140, "server: context\ntoo long?", size=16, id="over")
+    d.arrow([(1260, 145), (1300, 145)], "no", id="c_no")
+    d.box(1300, 100, 180, 90, "Reply\naccepted", "green", id="accept")
+    d.arrow([(1130, 215), (1130, 330)], "yes", "#ef4444", id="c_yes")
+    d.diamond(1000, 330, 260, 140, "retries left?\ncontext_overflow_\nretries", size=16, id="left")
+    d.arrow([(1130, 470), (1130, 560)], "no", "#ef4444", id="c_none")
+    d.box(1000, 560, 260, 90, "Run fails with the\nprovider's message", "red", 16, id="fail")
+    d.arrow([(1000, 400), (940, 400)], "yes", id="c_more")
+    d.box(640, 350, 300, 100, "Estimate the request;\ncap = estimate x shrink\n(or stated ratio - 10%)", "orange",
+          16, id="estimate")
+    d.arrow([(640, 400), (580, 400)], id="c4")
+    d.box(280, 350, 300, 100, "MODEL_RESPONDED\ncontext_overflow: true\nmax_input_tokens", "teal", 16,
+          id="persist")
+    d.arrow([(430, 350), (430, 190)], "retry the step", "#8b5cf6", id="c_retry")
+    d.box(1290, 330, 200, 320, "Recognised:\nvLLM / OpenAI\n(maximum context\nlength), SGLang,\nllama.cpp\n"
+          "(exceed_context_\nsize, n_ctx),\nplus your\ncontext_overflow_\npatterns", "yellow", 14, id="detect")
+    d.arrow([(1290, 360), (1200, 185)], color="#f59e0b", dashed=True, id="c_detect")
+    d.text(40, 720, "The cap is persisted, so resume rebuilds the same view. It stays for the rest of the run",
+           16, "#555555")
+    d.text(40, 745, "on that profile, and later turns stay append-only between trims.", 16, "#555555")
+    d.text(40, 780, "Retries count against max_model_attempts. Profiles without context_window are covered too.",
+           16, "#555555")
+    d.text(40, 805, "Each tool output is shortened to at most a quarter of the cap.", 16, "#555555")
+
+    d.step("build", None, "Build the view", "The usual bounded view: trimming and, if enabled, a summary.")
+    d.step("cap", "c1", "Apply a recorded cap", "No cap yet on the first try; after an overflow, the smallest one.")
+    d.step("send", "c2", "Call the model", "The request goes to the server as usual.", ["MODEL_REQUESTED"])
+    d.step("over", "c3", "Too long?",
+           "The server rejects it: the harness's 3.5-chars-per-token estimate was too low, or no window was set.")
+    d.step("detect", "jump", "How it is recognised",
+           "Known server messages, plus your patterns; stated sizes (limit, requested) are parsed.")
+    d.step("left", "c_yes", "Retries left?", "Up to [orchestrator] context_overflow_retries per step (default 2).")
+    d.step("estimate", "c_more", "Pick a smaller cap",
+           "The estimate times context_overflow_shrink, or the server's stated ratio less 10%.")
+    d.step("persist", "c4", "Record it durably", "The cap is stored in the event, keyed by profile.",
+           ["MODEL_RESPONDED"])
+    d.step("cap", "c_retry", "Retry with less context",
+           "Older turns are omitted (with a notice) and large tool outputs shortened to fit the cap.")
+    d.step("send", "c2", "Call again", "The same step, now within the cap.", ["MODEL_REQUESTED"])
+    d.step("accept", ["c3", "c_no"], "Accepted", "The run continues; later steps keep the cap.", ["MODEL_RESPONDED"])
+    d.step("fail", "jump", "Out of retries", "The run fails with the server's message, as before Phase 13.",
+           ["RUN_FAILED"])
+    return d
+
+
+def limits() -> Diagram:
+    d = Diagram("09-limits", "Limits and deadlines", 1500, 1060)
+    d.text(40, 20, "Limits and deadlines: where each one applies", 30)
+    d.box(40, 100, 200, 80, "HTTP request", "blue", id="req")
+    d.arrow([(240, 140), (290, 140)], id="l1")
+    d.diamond(290, 75, 220, 130, "within rate\nlimit?", size=16, id="rate")
+    d.arrow([(400, 205), (400, 260)], "no", "#ef4444", id="l_rate")
+    d.box(290, 260, 220, 70, "429 + Retry-After", "red", 16, id="e_rate")
+    d.arrow([(510, 140), (570, 140)], "yes", id="l2")
+    d.diamond(570, 75, 240, 130, "tenant + user\nquota left?", size=16, id="quota")
+    d.arrow([(690, 205), (690, 260)], "no", "#ef4444", id="l_quota")
+    d.box(570, 260, 240, 70, "429 quota", "red", 16, id="e_quota")
+    d.arrow([(810, 140), (870, 140)], "yes", id="l3")
+    d.box(870, 100, 240, 80, "Run created;\nbudget capped", "green", 16, id="run")
+    d.arrow([(990, 180), (990, 330)], id="l4")
+    d.box(870, 330, 240, 90, "Step boundary:\nbudgets, tenant and\nuser consumption", "purple", 16, id="step")
+    d.arrow([(1110, 375), (1170, 375)], "over", "#ef4444", id="l_budget")
+    d.box(1170, 340, 280, 70, "BUDGET_EXHAUSTED", "red", 16, id="exhausted")
+    d.arrow([(990, 420), (990, 480)], id="l5")
+    d.box(870, 480, 240, 90, "Model call: max_tokens\ncap; adapter retries\nrecorded", "blue", 16, id="model")
+    d.arrow([(990, 570), (990, 620)], id="l6")
+    d.diamond(870, 620, 240, 130, "more than\nmax_tool_calls_\nper_turn?", size=15, id="calls")
+    d.arrow([(1110, 685), (1170, 685)], "yes", "#ef4444", id="l_calls")
+    d.box(1170, 640, 280, 90, "Refuse the whole reply;\nfail after\nmax_refused_repeats", "orange", 16, id="refuse")
+    d.arrow([(990, 750), (990, 820)], "no", id="l7")
+    d.box(870, 820, 240, 90, "Run tools; identical\nrepeats refused", "green", 16, id="tools")
+    d.arrow([(870, 865), (760, 865)], "approval /\nask_user", id="l8")
+    d.box(500, 820, 260, 90, "AWAITING_INPUT", "yellow", 16, id="paused")
+    d.arrow([(630, 820), (630, 760)], id="l9")
+    d.diamond(500, 630, 260, 130, "deadline\npassed?", size=16, id="deadline")
+    d.arrow([(500, 695), (400, 695)], "yes", id="l10")
+    d.box(100, 640, 300, 110, "on_timeout:\ndeny -> continue\ncancel / fail -> end", "orange", 16, id="action")
+    d.arrow([(250, 640), (250, 375), (870, 375)], "deny: resume", "#8b5cf6", id="l_resume")
+    d.text(40, 960, "Settings: [api] rate_limit_*, [[quotas]], [user_quotas], [orchestrator],"
+                    " [interaction] *_timeout_seconds / on_timeout.", 16, "#555555")
+    d.text(40, 985, "Override any value: AGENT_HARNESS_SET__SECTION__KEY=value.  Workers check deadlines"
+                    " at every reconcile; without workers run `agent-harness expire`.", 16, "#555555")
+
+    d.step("req", None, "A request arrives", "From a chat front end or any API client.")
+    d.step("rate", "l1", "Rate limit", "A token bucket per API key; over it -> 429 with Retry-After.")
+    d.step("quota", "l2", "Admission",
+           "The tenant's and the end user's daily runs, tokens, cost, and concurrency, in one transaction.")
+    d.step("run", "l3", "Run created", "Its budget is capped to what the quotas granted.", ["RUN_CREATED"])
+    d.step("step", "l4", "Every step",
+           "Budgets and the tenant's and user's consumption are re-checked before each model call.")
+    d.step("exhausted", "l_budget", "Over a limit", "The run stops cleanly.", ["RUN_BUDGET_EXHAUSTED"])
+    d.step("model", ["-l_budget", "l5"], "Model call",
+           "Replies are capped by max_tokens; adapter retries show up as provider_attempts.",
+           ["MODEL_REQUESTED", "MODEL_RESPONDED"])
+    d.step("calls", "l6", "Too many tool calls?", "A runaway reply with too many calls is refused before any runs.")
+    d.step("refuse", "l_calls", "Refused", "Each call gets a refusal; the model is asked again.", ["TOOL_RESPONDED"])
+    d.step("tools", ["-l_calls", "l7"], "Run the tools", "Identical repeated calls are refused too.",
+           ["TOOL_REQUESTED", "TOOL_RESPONDED"])
+    d.step("paused", "l8", "Waiting for a person", "An approval or an ask_user question pauses the run.",
+           ["APPROVAL_REQUESTED"])
+    d.step("deadline", "l9", "Deadline passed?",
+           "approval_timeout_seconds / question_timeout_seconds; 0 waits forever.")
+    d.step("action", "l10", "Resolve it", "deny (actor = timeout), cancel, or fail.", ["APPROVAL_RESOLVED"])
+    d.step("step", "l_resume", "Continue", "After a deny, a worker resumes the run at the next step.")
+    return d
+
+
+DIAGRAMS = (end_to_end, permissions, subagents, summarization, tool_platform, plan_execute, api_access,
+            context_overflow, limits)
 
 if __name__ == "__main__":
     target = Path(sys.argv[1])

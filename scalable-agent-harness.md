@@ -138,6 +138,8 @@ Do not continually append everything to the prompt. Maintain different kinds of 
 
 Use summarization and retrieval to construct a bounded prompt for each model call. The database—not the model’s prompt—should be the source of truth.
 
+Token estimates are approximate, so also plan for the server rejecting a prompt as too long: retry with a smaller, recorded limit instead of failing the run. (In this harness: `BudgetedContextBuilder`, optional summarization, and context-overflow recovery; see `docs/diagrams/08-context-overflow.svg`.)
+
 ## 8. Enforce Budgets and Stopping Conditions
 
 Every run needs limits:
@@ -151,6 +153,8 @@ Every run needs limits:
 - Maximum parallel branches
 
 Without these controls, agents can loop, duplicate actions, or consume unlimited resources.
+
+Limits outside a single run matter too: request rate limits at the API, quotas per tenant and per end user, an output-token cap on every model call, a cap on tool calls per reply, and deadlines for runs waiting on a person. (In this harness: `[orchestrator]`, `[api] rate_limit_*`, `[[quotas]]`, `[user_quotas]`, and `[interaction] *_timeout_seconds`; see `docs/diagrams/09-limits.svg`.)
 
 ## 9. Scale Different Components Independently
 

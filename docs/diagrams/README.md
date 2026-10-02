@@ -16,11 +16,13 @@ Each diagram comes in three formats:
 | Context summarization | [svg](04-summarization.svg) | [animated](04-summarization.animated.svg) (13 steps) | Context trimming and persisted summarization, the `pre_compact` hook, failure fallback |
 | Tool platform | [svg](05-tool-platform.svg) | [animated](05-tool-platform.animated.svg) (13 steps) | Tool sources (Python, HTTP, web search, MCP), the persistent catalog, operator switches, dynamic loading, untrusted output |
 | Plan and execute | [svg](06-plan-and-execute.svg) | [animated](06-plan-and-execute.animated.svg) (16 steps) | The orchestrator-owned plan: validation, parallel delegated steps, main-model steps, replanning, finishing |
-| API access and tenancy | [svg](07-api-access.svg) | [animated](07-api-access.animated.svg) (12 steps) | Keys, principals, roles, tenant isolation, quotas, queue and workers, redacted store, health |
+| API access and tenancy | [svg](07-api-access.svg) | [animated](07-api-access.animated.svg) (12 steps) | Keys, principals, roles, rate limit, tenant isolation, tenant and user quotas, queue and workers, redacted store, health |
+| Context overflow | [svg](08-context-overflow.svg) | [animated](08-context-overflow.animated.svg) (12 steps) | When a server rejects a prompt as too long: detection, a smaller persisted cap, retry, or failure |
+| Limits and deadlines | [svg](09-limits.svg) | [animated](09-limits.animated.svg) (14 steps) | Where each limit applies: rate limit, quotas, step checks, output cap, tool calls per reply, approval and question deadlines |
 
 ## Regenerating
 
-All seven diagrams are defined in `tools/generate.py`: boxes, arrows, tour steps, and
+All nine diagrams are defined in `tools/generate.py`: boxes, arrows, tour steps, and
 captions. Edit a diagram function there, then run this from the repository root:
 
 ```bash

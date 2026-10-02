@@ -56,6 +56,8 @@ Relevant file: `src/agent_harness/cli.py`
 ```text
 Layered settings (enterprise → user → project → local)
     ↓
+Environment overrides (AGENT_HARNESS_MODEL__*, AGENT_HARNESS_SET__SECTION__KEY)
+    ↓
 Plugins, templates, skills
     ↓
 ModelGateway (Ollama, llama.cpp, Modal, OpenAI-compatible, LiteLLM)
@@ -69,7 +71,8 @@ Run store: SQLite, or Postgres (migrations run on open)
 Tool catalog sync (persistent; operator switches applied)
     ↓
 AgentOrchestrator (context builder, summarizer, hooks, permissions, subagents,
-                   file snapshots, system context, tool loading, planning;
+                   file snapshots, system context, tool loading, planning,
+                   [orchestrator] limits, quotas, input deadlines;
                    writes through the redacting store)
 ```
 
@@ -79,7 +82,9 @@ It performs these actions:
 
 - **Settings:** loads `models.toml` merged with the layered settings. For hermetic runs,
   point `AGENT_HARNESS_USER_SETTINGS` and `AGENT_HARNESS_ENTERPRISE_SETTINGS` at missing
-  files.
+  files. `AGENT_HARNESS_SET__SECTION__KEY=value` then overrides any table value (for
+  example `AGENT_HARNESS_SET__ORCHESTRATOR__MAX_TOOL_CALLS_PER_TURN=16`); `config show`
+  lists each value with its source.
 - **Summarizer:** validates the `[summarization]` section before opening any store.
 - **Discovery:** finds enabled plugins, prompt templates, and skills.
 - **Models:** builds the model gateway, with each profile's adapter, fallback chain, and
@@ -105,8 +110,9 @@ It performs these actions:
 - **Catalog:** records every registered tool in the persistent `tool_catalog` and hides
   tools an operator disabled.
 - **Orchestrator:** creates it with a `BudgetedContextBuilder` for profiles that set
-  `context_window`, the tool-loading and planning policies, and a store wrapper that
-  masks secrets in events (`[redaction]`).
+  `context_window`, the tool-loading and planning policies, the `[orchestrator]` loop
+  limits, tenant and end-user quotas, the `[interaction]` deadlines, and a store wrapper
+  that masks secrets in events (`[redaction]`).
 
 The orchestration loop does not know whether the model is served by Ollama, llama.cpp,
 Modal, or another provider.
@@ -199,8 +205,9 @@ Relevant file: `src/agent_harness/orchestrator.py`
 At the start of each step the orchestrator:
 
 - **Checks budgets:** steps, wall clock, tokens, and cost (section 13). It also checks the
-  tenant's quota: consumption across the tenant's runs, cached for a few seconds. A tenant
-  over its limit stops the run with `BUDGET_EXHAUSTED`.
+  quotas: the end user's (`[user_quotas]`, for runs with an `end_user`) and the tenant's
+  (`[[quotas]]`), consumption cached for a few seconds. Over a limit, the run stops with
+  `BUDGET_EXHAUSTED`.
 - **Runs pending tool calls first:** any tool calls from the last model response that have
   not run yet, which makes crash recovery exact.
 - **Runs independent work in parallel:** when one response holds several read-only tool
@@ -222,13 +229,16 @@ pre_model hook (may deny, or add context for this request only)
     ↓
 ContextBuilder builds the bounded view (+ summary, see below)
     ↓
+overflow cap applied, if a previous request was rejected as too long
+    ↓
 client = self._models.resolve(run.model_profile)     # synchronous
     ↓
 client.complete(request)  or  client.stream(request)
     ↓
 Normalized ModelResponse
     ↓
-MODEL_RESPONDED event (usage, cost, cached tokens, context stats)
+MODEL_RESPONDED event (usage, cost, cached tokens, context stats,
+                       provider_attempts / retried_errors when the adapter retried)
     ↓
 post_model hook
 ```
@@ -247,8 +257,19 @@ provider-specific format; all supported servers use OpenAI-compatible `/chat/com
   message, and tool-call pairs. With `[summarization] enabled = true`, the omitted turns are
   replaced by a persisted summary (`CONTEXT_SUMMARIZED`) instead of being dropped. If even
   the minimum view does not fit, the run fails with `ContextWindowExceededError`.
+- **Context overflow:** the view is built from an estimate, so a server can still reject
+  it as too long (adapters recognise vLLM, SGLang, llama.cpp, and OpenAI messages, plus
+  `[orchestrator] context_overflow_patterns`). The step is then retried, up to
+  `context_overflow_retries` (default 2), with a smaller cap: the estimate times
+  `context_overflow_shrink`, or the ratio the server stated less 10%. The cap is stored in
+  the `MODEL_RESPONDED` event (`context_overflow: true`, `max_input_tokens`) and applies
+  for the rest of the run on that profile. See `docs/diagrams/08-context-overflow.svg`.
+- **Output cap:** the example profiles set `parameters.max_tokens = 1024`, so a runaway
+  reply ends with `finish_reason = length` (Ollama native: `num_predict`).
 - **Retries:** `max_model_attempts` (default 3) bounds provider requests per step and
-  profile, including the adapter's own retries.
+  profile, including the adapter's own retries. A success after adapter retries records
+  `provider_attempts`, `retried_errors`, and `attempt_timeout_seconds` in the event and
+  telemetry.
 - **Fallback:** when the retries run out, the next profile in the fallback chain is used
   (`MODEL_FALLBACK`).
 - **Streaming:** with `--stream`, text is printed as it arrives, but only the final
@@ -288,9 +309,11 @@ The final answer is printed to stdout.
 If the model requests a tool:
 
 ```text
-Assistant tool call
+Assistant reply with tool calls
     ↓
-Repeated-call check
+More than max_tool_calls_per_turn (32)?  → refuse every call; ask again
+    ↓
+Repeated-call check (per call)
     ↓
 pre_tool hook
     ↓
@@ -299,7 +322,9 @@ Permission rules and mode, then tool risk policy
 Execute, request approval, or refuse
 ```
 
-The tool call is not executed blindly.
+The tool call is not executed blindly. A reply with more tool calls than
+`[orchestrator] max_tool_calls_per_turn` is refused as a whole before any call runs: each
+call gets a refusal result, and the run fails after `max_refused_repeats` such replies.
 
 ## 8. Tool decision and validation
 
@@ -428,6 +453,16 @@ At this point, the run is safely paused in SQLite.
 If a subagent needs approval, its parent is paused too. `agent-harness approve PARENT_ID`
 shows and decides the subagent's pending call.
 
+**Deadlines (optional).** With `[interaction] approval_timeout_seconds` (or
+`question_timeout_seconds` for `ask_user`), a pause that waits longer is resolved by
+`on_timeout`:
+- `deny`: the call is denied (or the question declined) with `actor = "timeout"`, and the
+  run continues;
+- `cancel` or `fail`: the run ends.
+
+Queue workers check at every reconcile and enqueue the runs that continue;
+`agent-harness expire` does the same once (from cron, or without workers).
+
 ## 11. Resume after approval
 
 Approve the action:
@@ -530,7 +565,12 @@ A run also stops on:
 
 - **Retries and repeats:** model retries exhausted with no fallback left
   (`max_model_attempts`); tool retries exhausted (`max_tool_attempts`); repeated identical
-  tool calls (`max_refused_repeats`).
+  tool calls or oversized replies (`max_refused_repeats`); context-overflow retries used up
+  (`context_overflow_retries`). All are set in `[orchestrator]`.
+- **Quotas:** the tenant's or the end user's daily tokens or cost used up
+  (`BUDGET_EXHAUSTED`).
+- **Deadlines:** an approval or question that expired with `on_timeout = "cancel"` or
+  `"fail"`.
 - **Cancellation:** `agent-harness cancel`, the API, or a parent run being cancelled.
 - **Permanent errors:** a permanent model or tool error, including
   `ContextWindowExceededError`.
@@ -568,6 +608,8 @@ A run is not necessarily over when it stops:
 | `status RUN_ID`                   | Shows tokens, cost, cache-hit rate, steps against budget, the task list, subagents, and the plan. |
 | `tools list / sync / enable / disable` | Shows the persistent tool catalog, discovers MCP tools, and switches tools on or off across restarts. |
 | `gc --older-than-days N [--yes]`  | Retention: deletes finished runs older than N days (dry run without `--yes`). |
+| `expire [--no-resume]`            | Resolves approvals and questions past their `[interaction]` deadline, then continues denied runs. |
+| `config show`                     | Effective settings and where each value came from, including `AGENT_HARNESS_SET__*` overrides. |
 
 **Subagents.** When the model calls the `agent` tool, the orchestrator creates a child run
 with its own prompt, tools, profile, and a budget capped by what the parent has left. The
@@ -587,7 +629,9 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
     resumes, and approves; `admin` also changes modes and rewinds.
   - **Tenant isolation:** runs in other tenants return 404.
   - **Audit:** approvals and mode changes record the acting key.
-  - **Health:** `GET /healthz` and `GET /readyz` need no key.
+  - **Rate limit:** `[api] rate_limit_per_minute` per key (per address on failed
+    authentication): over it, `429` with `Retry-After`.
+  - **Health:** `GET /healthz` and `GET /readyz` need no key and are never rate limited.
 
   Endpoints:
   - Create a run with `POST /runs`, and read it with `GET /runs/{id}`.
@@ -600,7 +644,8 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
 - **Queue workers:** `agent-harness worker` claims queued runs with leases, so several
   workers can share one database. On Postgres the claim uses `FOR UPDATE SKIP LOCKED` and
   workers can run on many hosts. An expired lease makes the run available to
-  another worker, which resumes it.
+  another worker, which resumes it. Each reconcile also requeues orphaned runs and expires
+  overdue approvals and questions.
 - **`agent-harness doctor --model-profile X`:** a live reachability and tool-call check
   against a real server.
 - **`agent-harness eval`:** runs scenario evaluations, scripted by default and live with
@@ -754,7 +799,11 @@ All steps finished → "[Plan] … write the final answer" → final answer → 
 
 | Control | Where it acts |
 |---|---|
-| Quotas (`[[quotas]]`) | Atomic reservation at create and continue (API 429, CLI exit 2); re-checked at every step |
+| Quotas (`[[quotas]]`, `[user_quotas]`) | Tenant and end-user limits in one atomic reservation at create and continue (API 429, CLI exit 2); re-checked at every step |
+| API rate limit (`[api] rate_limit_*`) | Every API request except health checks; 429 with `Retry-After` |
+| Input deadlines (`[interaction] *_timeout_seconds`) | Worker reconcile or `agent-harness expire`; `on_timeout` deny / cancel / fail |
+| Loop limits (`[orchestrator]`) | Provider attempts, repeated calls, tool calls per reply, context-overflow retries |
+| Environment overrides (`AGENT_HARNESS_SET__SECTION__KEY`) | At config load; shown by `config show` |
 | Memory backend (`[memory] backend`) | SQLite FTS5 or Postgres full-text search; `memory migrate` copies notes |
 | Warm containers (`mode = "per_run"`, sandboxed tools) | Started on a run's first container call; removed when the run ends |
 | API principals (`[[api.keys]]`) | Every API request: role check, then tenant check on the run |
@@ -777,15 +826,17 @@ Load layered settings, plugins, templates, skills
     ↓
 Create model gateway, tools + tool sources + MCP, store (migrate), tool catalog
     ↓
-Quota check (tenant) → create durable run
+Rate limit (API) → quota reservation (tenant + end user) → create durable run
 (system context, planner instructions, user_prompt hook, version hashes, RUN_CREATED)
     ↓
 Start orchestrator (RUN_STARTED, session_start hook)
     ↓
-Step boundary: budgets, pending tools (parallel prefetch), plan step or delegation, steering
+Step boundary: budgets and quotas, pending tools (parallel prefetch), plan step or
+delegation, steering
     ↓
-pre_model hook → context view (+ summary) → offered tools (all / core + loaded)
-→ call model (retries, fallback, cost)
+pre_model hook → context view (+ summary, + overflow cap) → offered tools (all / core + loaded)
+→ call model (max_tokens cap, retries recorded, fallback, cost;
+  "too long" → smaller cap and retry)
     ↓
 Model returns text or tool call
     ├── Text
@@ -800,6 +851,8 @@ Model returns text or tool call
     │
     └── Tool call
           ↓
+        Too many calls in the reply? → refuse all, ask again
+          ↓
         Repeated-call check → pre_tool hook
           ↓
         Permission rules and mode → risk policy → guardrails
@@ -812,6 +865,7 @@ Model returns text or tool call
           │   Persist paused run
           │     ↓
           │   Exit with code 3 → approve → resume
+          │   (or the deadline expires → deny / cancel / fail)
           │
           └── Allowed
                 ↓

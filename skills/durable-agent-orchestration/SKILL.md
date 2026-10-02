@@ -20,6 +20,14 @@ Build the orchestration loop as a resumable state machine over persisted state.
   prefetch: every call gets a refusal result, so the transcript stays valid, and the count
   of such replies (derived from messages, so resume is deterministic) fails the run after
   `max_refused_repeats`.
+- Treat a provider context overflow as recoverable: record a retryable `model_responded`
+  with `context_overflow` and a fixed `max_input_tokens`, derive the cap from events (never
+  from process memory), and bound the retries (`context_overflow_retries`).
+- Paused runs may expire: `expire_pending_input` resolves overdue approvals and questions
+  through the normal `resolve_approval` path (`actor = "timeout"`), `cancel`, or `_fail`,
+  so the event log looks the same as a human decision.
+- Every loop limit is configurable through `[orchestrator]`; keep `OrchestratorSettings`
+  and `OrchestratorConfig` in step (0 = off, `max_refused_repeats = -1` = never stop).
 - Record an append-only event for each transition and external request/result boundary.
 
 ## Boundary Design
