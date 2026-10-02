@@ -57,3 +57,14 @@ OpenAI-compatible endpoints are the baseline adapter because they cover hosted a
 
 Document how callers select a profile and how another adapter can be registered. Provide tests for text responses, tool calls, malformed responses, timeout classification, and missing credentials.
 
+## Embeddings and token counting (Phase 14)
+
+- `OpenAICompatibleClient.embed(texts)` posts to `{base}/embeddings` and returns vectors in
+  input order (used by semantic memory).
+- `count_input_tokens(request)` is advisory: it returns None on any failure.
+  - **vLLM / OpenAI-compatible:** `POST /tokenize` with messages and tools → `count`.
+  - **llama.cpp:** `/apply-template`, then `/tokenize`; without `/apply-template`, the joined
+    texts plus 8 tokens per message.
+  - **Unsupported:** Ollama, and SGLang on Modal. Setting `token_counting = "server"` there
+    is a configuration error (`_counts_tokens`).
+- `token_counting` is hash-stable at its default (`HASH_OMIT_DEFAULT`).

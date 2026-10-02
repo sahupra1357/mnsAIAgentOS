@@ -77,6 +77,8 @@ class EventType(StrEnum):
     FILE_SNAPSHOT = "file_snapshot"
     REWOUND = "rewound"
     CONTEXT_SUMMARIZED = "context_summarized"
+    # The server's tokenizer counted a request over the window; a smaller cap applies.
+    CONTEXT_CAPPED = "context_capped"
     TOOLS_LOADED = "tools_loaded"
     PLAN_CREATED = "plan_created"
     PLAN_STEP_UPDATED = "plan_step_updated"

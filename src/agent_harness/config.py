@@ -58,11 +58,15 @@ _PROFILE_FIELDS = {
     "RETRY_JITTER": "retry_jitter",
     "MAX_RETRY_AFTER_SECONDS": "max_retry_after_seconds",
     "STRUCTURED_OUTPUT": "structured_output",
+    "TOKEN_COUNTING": "token_counting",
 }
 # Marks dataclass fields that versioning.profile_sha256 skips while they hold their default.
 HASH_OMIT_DEFAULT = MappingProxyType({"hash": "omit_default"})
 REASONING_HISTORY_MODES = ("drop", "keep")
 STRUCTURED_OUTPUT_MODES = ("strict", "non_strict", "prompt")
+# How a request's size is checked against context_window before it is sent:
+# the harness's estimate only, or the server's tokenizer (llama.cpp, vLLM).
+TOKEN_COUNTING_MODES = ("estimate", "server")
 _PRICING_FIELDS = (
     "input_usd_per_million_tokens",
     "output_usd_per_million_tokens",
@@ -131,6 +135,7 @@ class ModelProfile:
     retry_jitter: float = field(default=0.0, metadata=HASH_OMIT_DEFAULT)
     max_retry_after_seconds: float = field(default=60.0, metadata=HASH_OMIT_DEFAULT)
     structured_output: str = field(default="strict", metadata=HASH_OMIT_DEFAULT)
+    token_counting: str = field(default="estimate", metadata=HASH_OMIT_DEFAULT)
 
     def __post_init__(self) -> None:
         if not self.adapter.strip():
@@ -183,6 +188,10 @@ class ModelProfile:
             raise ConfigError("model profile retry_jitter must be between 0 and 1")
         if self.max_retry_after_seconds < 0:
             raise ConfigError("model profile max_retry_after_seconds must not be negative")
+        if self.token_counting not in TOKEN_COUNTING_MODES:
+            raise ConfigError(
+                f"model profile token_counting must be one of: {', '.join(TOKEN_COUNTING_MODES)}"
+            )
         if self.structured_output not in STRUCTURED_OUTPUT_MODES:
             raise ConfigError(
                 f"model profile structured_output must be one of: {', '.join(STRUCTURED_OUTPUT_MODES)}"
@@ -241,12 +250,23 @@ class MemoryConfig:
     # named by url_env, falling back to [storage] url_env.
     backend: str = "sqlite"
     url_env: str = ""
+    # "keyword" (default), "semantic" (embeddings), or "hybrid" (both, fused).
+    # embedding_profile names the profile whose /embeddings endpoint is used;
+    # vectors is the SQLite file for note vectors (default: next to the notes, or
+    # memory-vectors.sqlite3 with the Postgres backend).
+    search: str = "keyword"
+    embedding_profile: str = ""
+    vectors: str = ""
 
     def __post_init__(self) -> None:
         if not _PROFILE_NAME.fullmatch(self.namespace):
             raise ConfigError(f"invalid memory.namespace: {self.namespace!r}")
         if self.backend not in {"sqlite", "postgres"}:
             raise ConfigError("memory.backend must be 'sqlite' or 'postgres'")
+        if self.search not in {"keyword", "semantic", "hybrid"}:
+            raise ConfigError("memory.search must be 'keyword', 'semantic', or 'hybrid'")
+        if self.search != "keyword" and not self.embedding_profile:
+            raise ConfigError("memory.search = semantic/hybrid needs memory.embedding_profile")
 
 
 _PERMISSION_MODES = {"default", "accept_edits", "plan", "bypass"}
@@ -415,6 +435,32 @@ class SummarizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextConfig:
+    """``[context]``: how views are estimated and trimmed (see ``ContextPolicy``).
+
+    Lower ``chars_per_token`` for code, JSON, or non-English text (about 2.5), so the
+    estimate stays above the real count. ``max_tool_output_chars = 0`` never shortens
+    tool outputs in the view.
+    """
+
+    chars_per_token: float = 3.5
+    high_water_ratio: float = 0.85
+    low_water_ratio: float = 0.60
+    message_overhead_tokens: int = 8
+    max_tool_output_chars: int = 16_000
+
+    def __post_init__(self) -> None:
+        if self.chars_per_token <= 0:
+            raise ConfigError("context.chars_per_token must be greater than zero")
+        if not 0 < self.low_water_ratio < self.high_water_ratio <= 1:
+            raise ConfigError("context: require 0 < low_water_ratio < high_water_ratio <= 1")
+        if self.message_overhead_tokens < 0:
+            raise ConfigError("context.message_overhead_tokens must not be negative")
+        if self.max_tool_output_chars and self.max_tool_output_chars < 200:
+            raise ConfigError("context.max_tool_output_chars must be 0 (off) or at least 200")
+
+
+@dataclass(frozen=True, slots=True)
 class QuotaConfig:
     """One ``[[quotas]]`` entry; ``tenant = "*"`` applies to tenants without their own."""
 
@@ -556,6 +602,29 @@ class WebSearchConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WebFetchConfig:
+    """The built-in ``web_fetch`` tool: read one web page as text (read-only, untrusted output).
+
+    Private, loopback, and link-local addresses are refused unless ``allow_private``;
+    ``[network]`` egress rules apply to every redirect hop.
+    """
+
+    enabled: bool = False
+    max_bytes: int = 2_000_000
+    max_chars: int = 20_000
+    timeout_seconds: float = 20.0
+    max_redirects: int = 5
+    allow_private: bool = False
+    user_agent: str = "agent-harness/web_fetch"
+
+    def __post_init__(self) -> None:
+        if self.max_bytes < 1_000 or self.max_chars < 200:
+            raise ConfigError("web_fetch.max_bytes must be >= 1000 and max_chars >= 200")
+        if self.timeout_seconds <= 0 or not 0 <= self.max_redirects <= 10:
+            raise ConfigError("web_fetch.timeout_seconds must be positive and max_redirects 0-10")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolLoadingConfig:
     """``mode = "dynamic"`` offers only ``core`` tools plus search_tools/load_tools."""
 
@@ -637,8 +706,10 @@ class HarnessConfig:
     guardrails: GuardrailsConfig = field(default_factory=GuardrailsConfig)
     instructions: InstructionsConfig = field(default_factory=InstructionsConfig)
     summarization: SummarizationConfig = field(default_factory=SummarizationConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
     tool_sources: tuple[ToolSourceConfig, ...] = ()
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
     mcp_servers: tuple[McpServerConfig, ...] = ()
     tool_loading: ToolLoadingConfig = field(default_factory=ToolLoadingConfig)
     planning: PlanningConfig = field(default_factory=PlanningConfig)
@@ -798,8 +869,10 @@ def load_config(
         guardrails=_parse_guardrails(raw.get("guardrails")),
         instructions=_parse_section(raw, "instructions", InstructionsConfig),
         summarization=_parse_section(raw, "summarization", SummarizationConfig),
+        context=_parse_section(raw, "context", ContextConfig),
         tool_sources=_parse_tool_sources(raw.get("tools")),
         web_search=_parse_section(raw, "web_search", WebSearchConfig),
+        web_fetch=_parse_section(raw, "web_fetch", WebFetchConfig),
         mcp_servers=_parse_mcp_servers(raw.get("mcp_servers")),
         tool_loading=_parse_section(raw, "tool_loading", ToolLoadingConfig),
         planning=_parse_section(raw, "planning", PlanningConfig),
@@ -1222,6 +1295,7 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
         "retry_jitter",
         "max_retry_after_seconds",
         "structured_output",
+        "token_counting",
     }
     unknown = set(raw) - allowed
     if unknown:
@@ -1277,6 +1351,9 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
             max_retry_after_seconds=float(raw.get("max_retry_after_seconds", 60.0)),
             structured_output=_required_string(
                 raw.get("structured_output", "strict"), f"models.{name}.structured_output"
+            ),
+            token_counting=_required_string(
+                raw.get("token_counting", "estimate"), f"models.{name}.token_counting"
             ),
         )
     except (TypeError, ValueError) as exc:

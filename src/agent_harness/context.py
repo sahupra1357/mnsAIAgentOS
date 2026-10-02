@@ -310,6 +310,21 @@ def _group_units(messages: Sequence[Message]) -> list[list[Message]]:
     return units
 
 
+def context_policy_from_config(config: object) -> ContextPolicy:
+    """``[context]`` (``HarnessConfig.context``) as a policy; 0 tool-output characters = never shorten."""
+
+    section = getattr(config, "context", None)
+    if section is None:
+        return ContextPolicy()
+    return ContextPolicy(
+        high_water_ratio=section.high_water_ratio,
+        low_water_ratio=section.low_water_ratio,
+        chars_per_token=section.chars_per_token,
+        message_overhead_tokens=section.message_overhead_tokens,
+        max_tool_output_chars=section.max_tool_output_chars or None,
+    )
+
+
 def limits_from_profiles(
     profiles: Mapping[str, object],
     *,

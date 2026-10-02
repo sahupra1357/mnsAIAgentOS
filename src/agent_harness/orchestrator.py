@@ -28,6 +28,7 @@ from agent_harness.agents import (
 from agent_harness.runcontext import CURRENT_RUN_ID
 from agent_harness.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
 from agent_harness.context import (
+    ContextPolicy,
     ContextSummarizer,
     FullHistoryContextBuilder,
     estimate_tokens,
@@ -249,6 +250,7 @@ class AgentOrchestrator:
         question_timeout_seconds: float = 0.0,
         on_input_timeout: str = "deny",
         user_quotas: Callable[[str], Quota | None] | None = None,
+        context_policy: ContextPolicy | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -286,6 +288,7 @@ class AgentOrchestrator:
         self._question_timeout = question_timeout_seconds
         self._on_input_timeout = on_input_timeout
         self._user_quotas = user_quotas
+        self._context_policy = context_policy or ContextPolicy()
         self._guardrails = guardrails
         # Guardrail events from tool-output checks, recorded with the tool's result.
         self._tool_guard_events: dict[tuple[str, str], list[RunEvent]] = {}
@@ -1376,21 +1379,27 @@ class AgentOrchestrator:
             if self._summarizer is not None and view.omitted_through is not None:
                 if await self._summarize(run, events, view):
                     view = self._build_view(run, specs, events)
-            request_messages = view.messages
-            if pre_model is not None and pre_model.context:
-                # Ephemeral: appended to this request only, so history (and the
-                # cached prompt prefix) is unchanged.
-                request_messages += (
-                    Message(role=Role.USER, content="[Context from hooks]\n" + pre_model.context),
+            def make_request(view: ContextView) -> ModelRequest:
+                request_messages = view.messages
+                if pre_model is not None and pre_model.context:
+                    # Ephemeral: appended to this request only, so history (and the
+                    # cached prompt prefix) is unchanged.
+                    request_messages += (
+                        Message(role=Role.USER, content="[Context from hooks]\n" + pre_model.context),
+                    )
+                return ModelRequest(
+                    messages=request_messages,
+                    tools=specs,
+                    metadata={"run_id": run.id, "step": str(run.step_count)},
+                    # Without tools the server constrains the reply itself.
+                    response_schema=run.output_schema if not specs else None,
+                    tool_choice=SUBMIT_RESULT_TOOL if specs and _submit_forced(events) else None,
                 )
-            request = ModelRequest(
-                messages=request_messages,
-                tools=specs,
-                metadata={"run_id": run.id, "step": str(run.step_count)},
-                # Without tools the server constrains the reply itself.
-                response_schema=run.output_schema if not specs else None,
-                tool_choice=SUBMIT_RESULT_TOOL if specs and _submit_forced(events) else None,
-            )
+
+            request = make_request(view)
+            if await self._cap_by_server_count(run, events, client, request, view, specs):
+                view = self._build_view(run, specs, events)
+                request = make_request(view)
             streamed = parallel_guard is None and self._should_stream(client)
             if parallel_guard is not None:
                 # The guard model checks the new input while the main model answers;
@@ -1455,8 +1464,71 @@ class AgentOrchestrator:
             )
         cap = _overflow_cap(events, run.model_profile)
         if cap is not None:
-            view = fit_to_tokens(view, specs, max_input_tokens=cap, model_profile=run.model_profile)
+            view = fit_to_tokens(view, specs, max_input_tokens=cap, model_profile=run.model_profile,
+                                 policy=self._context_policy)
         return view
+
+    async def _cap_by_server_count(
+        self,
+        run: RunRecord,
+        events: list[RunEvent],
+        client: Any,
+        request: ModelRequest,
+        view: ContextView,
+        specs: Sequence[ToolSpec],
+    ) -> bool:
+        """With token_counting = "server": record a smaller cap if the request will not fit."""
+
+        count = getattr(client, "count_input_tokens", None)
+        limit_of = getattr(client, "input_token_limit", None)
+        if count is None or limit_of is None:
+            return False
+        limit = limit_of(request)
+        if not isinstance(limit, int) or limit <= 0:
+            return False
+        estimated = estimate_tokens(view.messages, specs, self._context_policy)
+        if estimated < limit // 2:
+            return False  # far from the limit: not worth a tokenize request
+        counted = await count(request)
+        if not isinstance(counted, int) or counted <= limit:
+            return False
+        cap = self._fitting_cap(view, specs, run.model_profile,
+                                max(1, math.floor(estimated * limit / counted * 0.95)), estimated)
+        if cap is None:
+            return False  # cannot shrink further; the server decides
+        await self._checkpoint(
+            run,
+            events,
+            RunEvent(
+                run_id=run.id,
+                type=EventType.CONTEXT_CAPPED,
+                payload={
+                    "model_profile": run.model_profile,
+                    "counted_tokens": counted,
+                    "limit_tokens": limit,
+                    "estimated_tokens": estimated,
+                    "max_input_tokens": cap,
+                },
+                step=run.step_count,
+                created_at=self._clock(),
+            ),
+        )
+        return True
+
+    def _fitting_cap(
+        self, view: ContextView, specs: Sequence[ToolSpec], profile: str, cap: int, estimated: int
+    ) -> int | None:
+        """The smallest cap from ``cap`` up that still holds the pinned messages, tools, and
+        newest turn; None when no cap below the current size fits (nothing can be removed)."""
+
+        while cap < estimated:
+            try:
+                fit_to_tokens(view, specs, max_input_tokens=cap, model_profile=profile,
+                              policy=self._context_policy)
+                return cap
+            except ContextWindowExceededError:
+                cap = max(cap + 1, math.ceil(cap * 1.25))
+        return None
 
     def _is_context_overflow(self, exc: Exception) -> bool:
         if self._settings.context_overflow_retries == 0:
@@ -1490,14 +1562,16 @@ class AgentOrchestrator:
             view = self._build_view(run, specs, events)
         except ContextWindowExceededError:
             return False
-        estimated = estimate_tokens(view.messages, specs)
+        estimated = estimate_tokens(view.messages, specs, self._context_policy)
         factor = self._settings.context_overflow_shrink
         limit = getattr(exc, "limit_tokens", None)
         requested = getattr(exc, "requested_tokens", None)
         if isinstance(limit, int) and isinstance(requested, int) and 0 < limit < requested:
             # The server said by how much: shrink by that ratio, with a 10% margin.
             factor = min(0.95, max(0.1, limit / requested * 0.9))
-        cap = max(1, math.floor(estimated * factor))
+        cap = self._fitting_cap(view, specs, run.model_profile, max(1, math.floor(estimated * factor)), estimated)
+        if cap is None:
+            return False  # nothing left to remove: the same request would fail again
         payload: dict[str, Any] = {
             "ok": False,
             "retryable": True,
@@ -3500,8 +3574,10 @@ def _overflow_cap(events: Sequence[RunEvent], profile: str) -> int | None:
     caps = [
         event.payload["max_input_tokens"]
         for event in events
-        if event.type is EventType.MODEL_RESPONDED
-        and event.payload.get("context_overflow") is True
+        if (
+            event.type is EventType.CONTEXT_CAPPED
+            or (event.type is EventType.MODEL_RESPONDED and event.payload.get("context_overflow") is True)
+        )
         and event.payload.get("model_profile") == profile
         and isinstance(event.payload.get("max_input_tokens"), int)
     ]
@@ -3575,6 +3651,7 @@ _ANNOTATION_EVENTS = frozenset(
         EventType.FILE_SNAPSHOT,
         EventType.REWOUND,
         EventType.CONTEXT_SUMMARIZED,
+        EventType.CONTEXT_CAPPED,
         EventType.TOOLS_LOADED,
         EventType.PLAN_CREATED,
         EventType.PLAN_STEP_UPDATED,

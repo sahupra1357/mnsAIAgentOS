@@ -62,3 +62,14 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
     fakes Ollama and a llama.cpp router).
   - The unit and scenario stages run hermetically (no `AGENT_HARNESS_*` overrides,
     no settings layers); smoke and benchmarks keep the caller's environment.
+
+## Phase 14: scenario options and judged benchmarks
+
+- **Scenario options:** `[orchestrator]`, `[interaction]`, `ask_user`, `wait_seconds` (the
+  scenario clock moves forward while paused, then `expire_pending_input` runs),
+  `error = "context_overflow"`, and `expect.event_payloads`.
+- **Coverage:** keep one example scenario per orchestrator safety behaviour, so the pipeline's
+  scenarios stage checks them on every run.
+- **Judged `qa`:** with `match = "judge"`, the judge reply is parsed leniently
+  (`parse_verdict`); an unreadable reply counts as incorrect. Prefer a judge profile
+  different from the profile under test.

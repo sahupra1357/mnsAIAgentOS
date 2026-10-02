@@ -1,0 +1,27 @@
+# The sixth identical read-only call is refused (max_identical_tool_calls = 5),
+# and the model recovers with an answer.
+name = "repeated_call_refusal"
+prompt = "Echo the word ready."
+
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "ready" } }]
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "ready" } }]
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "ready" } }]
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "ready" } }]
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "ready" } }]
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "ready" } }]
+[[model]]
+content = "ready"
+
+[budget]
+max_steps = 10
+
+[expect]
+status = "completed"
+output_contains = ["ready"]
+event_payloads = [{ type = "tool_responded", status = "policy_denied" }]

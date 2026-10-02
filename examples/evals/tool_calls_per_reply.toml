@@ -1,0 +1,28 @@
+# A reply with more tool calls than [orchestrator] max_tool_calls_per_turn is
+# refused whole; the model then makes one call and finishes.
+name = "tool_calls_per_reply"
+prompt = "Echo the word ready."
+
+[orchestrator]
+max_tool_calls_per_turn = 2
+
+[[model]]
+tool_calls = [
+  { name = "echo", arguments = { text = "ready" } },
+  { name = "echo", arguments = { text = "ready" } },
+  { name = "echo", arguments = { text = "ready" } },
+]
+
+[[model]]
+tool_calls = [{ name = "echo", arguments = { text = "ready" } }]
+
+[[model]]
+content = "ready"
+
+[expect]
+status = "completed"
+output_contains = ["ready"]
+event_payloads = [
+  { type = "tool_responded", status = "policy_denied" },
+  { type = "tool_responded", status = "success" },
+]

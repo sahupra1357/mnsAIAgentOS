@@ -25,6 +25,8 @@
 <text x="40" y="761" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">on that profile, and later turns stay append-only between trims.</tspan></text>
 <text x="40" y="796" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">Retries count against max_model_attempts. Profiles without context_window are covered too.</tspan></text>
 <text x="40" y="821" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">Each tool output is shortened to at most a quarter of the cap.</tspan></text>
+<text x="40" y="856" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">With token_counting = &quot;server&quot; (llama.cpp, vLLM) the request is counted before sending;</tspan></text>
+<text x="40" y="881" font-size="16" fill="#555555" font-weight="normal"><tspan x="40" dy="0">over the window, a CONTEXT_CAPPED event records the cap and the view is rebuilt.</tspan></text>
 <rect x="1265.04" y="132.0" width="29.92" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>
 <text font-size="16" text-anchor="middle" fill="#1e1e1e"><tspan x="1280.0" y="150.6">no</tspan></text>
 <rect x="1110.56" y="259.5" width="38.88" height="26" rx="4" fill="#ffffff" fill-opacity="0.92"/>

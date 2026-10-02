@@ -636,6 +636,7 @@ Tools come from **sources** declared in config. `examples/tools.toml` shows all 
 |---|---|---|
 | Built-in tools | always (coding tools when `[coding] enabled`) | `echo`, `read_file`, ... |
 | Web search (Tavily) | `[web_search] enabled = true`, key in `TAVILY_API_KEY` | `web_search` |
+| Web page fetch | `[web_fetch] enabled = true` | `web_fetch` |
 | Your Python code | `[[tools]] kind = "python"`, `module = "pkg.mod:register"` | whatever you register |
 | Your Python code, sandboxed | the same, plus `sandbox = "container"` and `path = "tools"`: runs in the run's warm container, no network by default | whatever you register |
 | HTTP APIs | `[[tools]] kind = "http"` with `url`, `method`, `input_schema` | the entry's `name` |
@@ -669,6 +670,25 @@ agent-harness tools disable web_search --config models.toml
 - **Secrets:** they are passed by environment-variable **name** (`env = ["GITHUB_TOKEN"]`,
   `headers_env = {...}`). A stdio server sees only those variables plus `PATH`, `HOME`,
   and locale variables.
+- **Resources and prompts:** with `resources = true` and/or `prompts = true` on the
+  server entry, a server that offers them gets four read-only tools:
+  `<server>__mcp_list_resources`, `<server>__mcp_read_resource` (by URI),
+  `<server>__mcp_list_prompts`, and `<server>__mcp_get_prompt` (name plus string
+  arguments). Servers that offer only resources or prompts are accepted too.
+- **Changes:** when a server sends `notifications/tools/list_changed` (or the
+  resources/prompts equivalent), the harness re-syncs that server in the background:
+  new tools are registered, and tools it no longer lists are marked unavailable.
+
+**Fetching web pages.** `[web_fetch] enabled = true` adds `web_fetch(url, max_chars?)`.
+It returns the page's text, title, and final URL, and reads HTML, plain text, JSON, and
+XML.
+- **Safety:** private, loopback, and link-local addresses are refused unless
+  `allow_private = true`. Redirects are followed one hop at a time (up to
+  `max_redirects`), and every hop is checked against that rule and against
+  `[network] allowed_hosts`.
+- **Limits:** `max_bytes` (download size, default 2 MB) and `max_chars` (text returned,
+  default 20,000).
+- **Trust:** the result is untrusted output, like web search.
 
 **Sandboxed Python tools.** With `sandbox = "container"`, your module runs in a container
 instead of the harness process:
@@ -814,7 +834,32 @@ The stored run history is never modified.
   [Limits, Deadlines, and Overrides](#limits-deadlines-and-overrides) and
   [the diagram](docs/diagrams/08-context-overflow.svg).
 
-Tune the behavior with `build_application(..., context_policy=ContextPolicy(...))`.
+Tune the behavior in `[context]` (or `AGENT_HARNESS_SET__CONTEXT__CHARS_PER_TOKEN=2.5`):
+
+```toml
+[context]
+chars_per_token = 3.5          # lower it (about 2.5) for code, JSON, or non-English text
+high_water_ratio = 0.85        # trim when the estimate passes this share of the budget
+low_water_ratio = 0.60         # ... down to this share
+message_overhead_tokens = 8
+max_tool_output_chars = 16000  # 0 = never shorten tool outputs in the view
+```
+
+`build_application(..., context_policy=ContextPolicy(...))` still takes precedence.
+
+**Exact counts from the server (optional).** With `token_counting = "server"` on a
+profile that sets `context_window`, the request is counted by the server's tokenizer before
+it is sent, whenever the estimate is above half the limit:
+- **llama.cpp:** the prompt is rendered with `/apply-template` (when available), then
+  counted with `/tokenize`.
+- **vLLM:** `/tokenize` counts the chat messages and tools.
+- **Not available:** Ollama, and SGLang on Modal. Setting it there is a configuration
+  error.
+
+If the count exceeds the window less the output reserve, a `context_capped` event
+records a smaller cap and the request is rebuilt to fit, the same way as after an
+overflow. A failed count is ignored, so the estimate and overflow recovery still apply.
+It costs one or two extra local HTTP calls on large turns.
 
 **Summarization (optional).** Instead of dropping the omitted turns, a model can summarize
 them:
@@ -1045,6 +1090,9 @@ threshold_bytes = 16384      # larger tool results are stored as artifacts
 enabled = true
 namespace = "my-project"     # isolates notes between projects
 # database = "memory.sqlite3"  # defaults to the run database
+# search = "hybrid"            # keyword (default), semantic, or hybrid
+# embedding_profile = "embed"  # a profile whose /embeddings endpoint is used
+# vectors = ""                 # SQLite file for vectors (default: next to the notes)
 ```
 
 **Artifacts.** A tool result larger than the threshold is stored content-addressed.
@@ -1055,6 +1103,31 @@ content at `GET /artifacts/{id}`.
 **Memory.** Adds the `memory_search` (read-only) and `memory_write` (side-effect)
 tools, backed by SQLite full-text search. Search results are labeled as notes, not
 instructions, because anything a model saved earlier is untrusted input.
+
+**Searching memory by meaning (optional).** With `search = "semantic"` or `"hybrid"`, each
+note is also embedded through `embedding_profile`. That works with any OpenAI-compatible
+`/embeddings` endpoint:
+- Ollama, with an embedding model such as `nomic-embed-text`;
+- llama.cpp started with `--embeddings`;
+- vLLM serving an embedding model.
+
+How the modes work:
+- **`semantic`:** ranks notes by cosine similarity.
+- **`hybrid`:** merges the keyword and semantic rankings, which helps when a query names
+  an exact identifier.
+- **Storage:** vectors are kept per embedding model in a small SQLite table.
+- **Existing notes:** `agent-harness memory reindex --config models.toml` embeds notes
+  saved before (or while the embedding server was down).
+- **Outages:** if embedding fails, search falls back to keywords and new notes are still
+  saved.
+- **Scale:** search is a linear scan, which suits thousands of notes, not millions.
+
+```toml
+[models.embed]
+adapter = "ollama"
+model = "nomic-embed-text"
+endpoint = "http://127.0.0.1:11434/v1"
+```
 
 **Evaluations.** Scenario files (TOML) run the real orchestrator, with the same tools
 and context policy, against scripted responses (offline, suitable for CI) or live
@@ -1073,9 +1146,45 @@ Scenarios can assert:
 - required events;
 - expected error text.
 
-They can also auto-approve or auto-deny approval pauses. See `src/agent_harness/evals.py`
-for the file format and `examples/evals/` for samples. The command exits 1 if any
-scenario fails.
+They can also auto-approve or auto-deny approval pauses. Scenarios can also use these
+options:
+- `[orchestrator]` limits;
+- `ask_user = true` without scripted answers;
+- `wait_seconds` (time that passes while a run is paused) with `[interaction]` deadlines;
+- a scripted `error = "context_overflow"`;
+- `expect.event_payloads`, which requires an event with given values, for example
+  `{ type = "approval_resolved", actor = "timeout" }`.
+
+`examples/evals/` covers these behaviours offline:
+- overflow recovery;
+- tool calls per reply;
+- repeated-call refusal;
+- question deadlines;
+- guardrails;
+- structured output;
+- `ask_user`.
+
+The scenarios stage of every pipeline run checks them. See `src/agent_harness/evals.py`
+for the file format. The command exits 1 if any scenario fails.
+
+**Model-graded answers.** For open-ended questions, the `qa` benchmark suite can ask a
+model to grade each answer against the references (and an optional per-record `rubric`)
+instead of matching text:
+
+```toml
+[[benchmark]]
+name = "qa-judged"
+suite = "qa"
+data = "bench/qa_sample.jsonl"
+profile = "ollama"
+[benchmark.options]
+match = "judge"
+judge_profile = "modal"      # default: the profile under test
+judge_max_tokens = 1024      # leave room for thinking models
+```
+
+Each item records the verdict and reason (`details.judge`). An unreadable verdict counts
+as incorrect.
 
 ## Telemetry and Streaming
 
@@ -1202,4 +1311,7 @@ push notification channel yet.
 
 *Update (Phase 12–13):* `[notifications]` webhooks now report runs that pause or finish,
 and paused runs can expire (`[interaction] approval_timeout_seconds`). Phase 13 also added
-context-overflow recovery, API rate limits, and per-user quotas.
+context-overflow recovery, API rate limits, and per-user quotas. Phase 14 added `[context]`
+settings, optional server-side token counting, scenario coverage for the Phase 12–13
+behaviours, model-graded benchmark answers, semantic memory search, MCP resources and
+prompts, and `web_fetch`.

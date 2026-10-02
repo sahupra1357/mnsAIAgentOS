@@ -1,4 +1,5 @@
-"""The MCP methods the harness uses: initialize, tools/list, tools/call."""
+"""The MCP methods the harness uses: initialize, tools/list, tools/call, and (when
+enabled) resources/list, resources/read, prompts/list, prompts/get."""
 
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ class McpClient:
         self._connection = connection
         self._timeout = request_timeout
         self.server_info: Mapping[str, Any] = {}
+        self.capabilities: Mapping[str, Any] = {}
         self.protocol_version: str = PROTOCOL_VERSION
 
     async def initialize(self, client_name: str = "agent-harness", client_version: str = "0") -> None:
@@ -46,8 +48,9 @@ class McpClient:
             self.protocol_version = negotiated
         self._connection.set_protocol_version(self.protocol_version)
         capabilities = result.get("capabilities") or {}
-        if isinstance(capabilities, Mapping) and "tools" not in capabilities:
-            raise McpError("the MCP server does not offer tools")
+        self.capabilities = capabilities if isinstance(capabilities, Mapping) else {}
+        if not any(kind in self.capabilities for kind in ("tools", "resources", "prompts")):
+            raise McpError("the MCP server offers no tools, resources, or prompts")
         await self._connection.notify("notifications/initialized")
 
     async def list_tools(self) -> list[McpTool]:
@@ -75,6 +78,44 @@ class McpClient:
                 return tools
         raise McpError("MCP tools/list paginated too many times")
 
+    def offers(self, kind: str) -> bool:
+        """Whether the server announced ``tools``, ``resources``, or ``prompts``."""
+
+        return kind in self.capabilities
+
+    async def list_resources(self) -> list[Mapping[str, Any]]:
+        return await self._paged("resources/list", "resources")
+
+    async def read_resource(self, uri: str, timeout: float) -> Mapping[str, Any]:
+        result = await self._connection.request("resources/read", {"uri": uri}, timeout)
+        if not isinstance(result, Mapping):
+            raise McpError("MCP resources/read returned no result")
+        return result
+
+    async def list_prompts(self) -> list[Mapping[str, Any]]:
+        return await self._paged("prompts/list", "prompts")
+
+    async def get_prompt(self, name: str, arguments: Mapping[str, str], timeout: float) -> Mapping[str, Any]:
+        result = await self._connection.request(
+            "prompts/get", {"name": name, "arguments": dict(arguments)}, timeout
+        )
+        if not isinstance(result, Mapping):
+            raise McpError("MCP prompts/get returned no result")
+        return result
+
+    async def _paged(self, method: str, key: str) -> list[Mapping[str, Any]]:
+        found: list[Mapping[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(_MAX_PAGES):
+            result = await self._connection.request(method, {"cursor": cursor} if cursor else {}, self._timeout)
+            if not isinstance(result, Mapping):
+                raise McpError(f"MCP {method} returned no result")
+            found.extend(item for item in result.get(key) or [] if isinstance(item, Mapping))
+            cursor = result.get("nextCursor") if isinstance(result.get("nextCursor"), str) else None
+            if not cursor:
+                return found
+        raise McpError(f"MCP {method} paginated too many times")
+
     async def call_tool(self, name: str, arguments: Mapping[str, Any], timeout: float) -> Mapping[str, Any]:
         result = await self._connection.request(
             "tools/call", {"name": name, "arguments": dict(arguments)}, timeout
@@ -85,6 +126,35 @@ class McpClient:
 
     async def close(self) -> None:
         await self._connection.close()
+
+
+def resource_text(result: Mapping[str, Any], *, limit: int = 60_000) -> str:
+    """Flatten ``resources/read`` contents into text (binary blobs are described, not decoded)."""
+
+    parts: list[str] = []
+    for item in result.get("contents") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if isinstance(item.get("text"), str):
+            parts.append(item["text"])
+        else:
+            parts.append(f"[binary resource {item.get('uri', '')} ({item.get('mimeType', 'unknown type')}) omitted]")
+    text = "\n".join(parts)
+    return text[:limit] + ("\n[... truncated]" if len(text) > limit else "")
+
+
+def prompt_text(result: Mapping[str, Any], *, limit: int = 60_000) -> str:
+    """Flatten ``prompts/get`` messages into ``role: text`` lines."""
+
+    lines: list[str] = []
+    for message in result.get("messages") or []:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        text = content_text({"content": [content]}) if isinstance(content, Mapping) else str(content or "")
+        lines.append(f"{message.get('role', 'user')}: {text}")
+    text = "\n\n".join(lines)
+    return text[:limit] + ("\n[... truncated]" if len(text) > limit else "")
 
 
 def content_text(result: Mapping[str, Any], *, limit: int = 60_000) -> str:

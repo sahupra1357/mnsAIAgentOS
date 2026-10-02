@@ -231,6 +231,8 @@ ContextBuilder builds the bounded view (+ summary, see below)
     ↓
 overflow cap applied, if a previous request was rejected as too long
     ↓
+token_counting = "server": the server counts the request; over the window → CONTEXT_CAPPED, rebuild
+    ↓
 client = self._models.resolve(run.model_profile)     # synchronous
     ↓
 client.complete(request)  or  client.stream(request)
@@ -767,7 +769,7 @@ All steps finished → "[Plan] … write the final answer" → final answer → 
 ## 19. Tool sources, the catalog, and MCP
 
 ```text
-[[tools]] python / http    [web_search]    [[mcp_servers]] stdio / http
+[[tools]] python / http    [web_search] [web_fetch]    [[mcp_servers]] stdio / http
           └──────────────┬───────┴───────────────┘
                    ToolRuntime registry (handlers are code)
                          ↓
@@ -794,6 +796,11 @@ All steps finished → "[Plan] … write the final answer" → final answer → 
     `PATH`/`HOME`).
   - Servers start on first use and are synced before runs execute when `sync_on_start`
     is set.
+  - With `resources = true` / `prompts = true`, a server's resources and prompts become
+    read-only `server__mcp_*` tools. A `list_changed` notification re-syncs the server in
+    the background.
+- **`web_fetch`:** one page as text. Private and loopback addresses are refused unless
+  `allow_private`; each redirect hop is re-checked against that rule and `[network]`.
 
 ## 20. Production controls
 

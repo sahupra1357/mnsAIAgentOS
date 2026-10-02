@@ -918,6 +918,10 @@ def context_overflow() -> Diagram:
     d.text(40, 780, "Retries count against max_model_attempts. Profiles without context_window are covered too.",
            16, "#555555")
     d.text(40, 805, "Each tool output is shortened to at most a quarter of the cap.", 16, "#555555")
+    d.text(40, 840, "With token_counting = \"server\" (llama.cpp, vLLM) the request is counted before sending;",
+           16, "#555555")
+    d.text(40, 865, "over the window, a CONTEXT_CAPPED event records the cap and the view is rebuilt.",
+           16, "#555555")
 
     d.step("build", None, "Build the view", "The usual bounded view: trimming and, if enabled, a summary.")
     d.step("cap", "c1", "Apply a recorded cap", "No cap yet on the first try; after an overflow, the smallest one.")

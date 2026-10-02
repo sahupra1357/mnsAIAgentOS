@@ -36,6 +36,7 @@ from .context import (
     BudgetedContextBuilder,
     ContextLimits,
     ContextPolicy,
+    context_policy_from_config,
     ContextSummarizer,
     limits_from_profiles,
     summary_input_chars,
@@ -59,6 +60,7 @@ from .tool_sources import (
     HttpToolSource,
     PythonToolSource,
     ToolSourceError,
+    WebFetchSource,
     WebSearchSource,
     host_policy_from,
 )
@@ -96,24 +98,28 @@ class HarnessApplication:
 
         report: dict[str, str] = {}
         for source in [*self.mcp_sources, *self.sandbox_sources]:
-            try:
-                specs = await source.discover()
-            except Exception as exc:  # a broken server must not stop the others
-                report[source.config.name] = f"error: {exc}"
-                continue
-            known = self.tools.registry.registered()
-            fresh = [spec for spec in specs if spec.name not in known or known[spec.name].spec != spec]
-            source.register(self.tools, fresh, replace=True)
-            if self.catalog is not None:
-                self.catalog.sync(sources=[source.config.source])
-                # Tools the server no longer lists are marked unavailable (and hidden).
-                offered = {spec.name for spec in specs}
-                for name, tool in self.tools.registry.registered().items():
-                    if tool.source == source.config.source and name not in offered:
-                        self.tools.registry.set_hidden(name, True)
-            skipped = f"; skipped {len(source.skipped)} with unsupported schemas" if source.skipped else ""
-            report[source.config.name] = f"{len(specs)} tools{skipped}"
+            report[source.config.name] = await self.sync_source(source)
         return report
+
+    async def sync_source(self, source: Any) -> str:
+        """Re-discover one tool source; also run when an MCP server says its tools changed."""
+
+        try:
+            specs = await source.discover()
+        except Exception as exc:  # a broken server must not stop the others
+            return f"error: {exc}"
+        known = self.tools.registry.registered()
+        fresh = [spec for spec in specs if spec.name not in known or known[spec.name].spec != spec]
+        source.register(self.tools, fresh, replace=True)
+        if self.catalog is not None:
+            self.catalog.sync(sources=[source.config.source])
+            # Tools the server no longer lists are marked unavailable (and hidden).
+            offered = {spec.name for spec in specs}
+            for name, tool in self.tools.registry.registered().items():
+                if tool.source == source.config.source and name not in offered:
+                    self.tools.registry.set_hidden(name, True)
+        skipped = f"; skipped {len(source.skipped)} with unsupported schemas" if source.skipped else ""
+        return f"{len(specs)} tools{skipped}"
 
     async def start_tools(self) -> dict[str, str]:
         """Sync the MCP servers configured with ``sync_on_start`` (used before executing runs)."""
@@ -167,6 +173,7 @@ def build_application(
 
     config = load_config(config_path, layered=True)
     base_path = Path(config_path).parent
+    context_policy = context_policy or context_policy_from_config(config)
     # Validated before any store or file is opened.
     context_limits = limits_from_profiles(config.models)
     summarizer = _summarizer(config, context_limits, context_policy)
@@ -194,7 +201,9 @@ def build_application(
             else None
         )
         memory = (
-            open_memory_store(config, base_path, database_path) if config.memory.enabled else None
+            open_memory_store(config, base_path, database_path, models=models)
+            if config.memory.enabled
+            else None
         )
         tool_runtime = tools
         if tool_runtime is None:
@@ -248,6 +257,7 @@ def build_application(
             store=RedactingRunStore(store, redactor) if redactor is not None else store,
             settings=settings or orchestrator_settings(config.orchestrator),
             context=BudgetedContextBuilder(context_limits, policy=context_policy),
+            context_policy=context_policy,
             fallbacks=models.fallback_profiles,
             telemetry=telemetry,
             stream_listener=stream_listener,
@@ -287,7 +297,7 @@ def build_application(
             on_input_timeout=config.interaction.on_timeout,
             user_quotas=user_quotas_from_config(config),
         )
-        return HarnessApplication(
+        app = HarnessApplication(
             catalog=catalog,
             mcp_sources=mcp_sources,
             sandbox_sources=sandbox_sources,
@@ -303,6 +313,10 @@ def build_application(
             skills=skills,
             plugins=plugins,
         )
+        for mcp_source in mcp_sources:
+            # A server that announces list_changed is re-synced in the background.
+            mcp_source.on_tools_changed = app.sync_source
+        return app
     except BaseException:
         # Composition failed (e.g. a ConfigError): do not leak open database handles.
         store.close_now()
@@ -400,17 +414,44 @@ def memory_postgres_url(config: HarnessConfig, database: str | PathLike[str]) ->
     raise ConfigError("memory.backend = 'postgres' needs a URL: set [memory] url_env (or [storage] url_env)")
 
 
-def open_memory_store(config: HarnessConfig, base_path: Path, database: str | PathLike[str]) -> Any:
-    """The configured long-term memory store (SQLite FTS5 or Postgres full-text search)."""
+def open_memory_store(
+    config: HarnessConfig,
+    base_path: Path,
+    database: str | PathLike[str],
+    *,
+    models: Any = None,
+) -> Any:
+    """The configured long-term memory store (SQLite FTS5 or Postgres full-text search),
+    wrapped for embedding search when ``[memory] search`` is semantic or hybrid."""
 
     if config.memory.backend == "postgres":
         from .persistence.postgres_memory import PostgresMemoryStore
 
         try:
-            return PostgresMemoryStore(memory_postgres_url(config, database), namespace=config.memory.namespace)
+            store: Any = PostgresMemoryStore(memory_postgres_url(config, database),
+                                             namespace=config.memory.namespace)
         except RuntimeError as exc:
             raise ConfigError(str(exc)) from exc
-    return SQLiteMemoryStore(_memory_path(config, base_path, database), namespace=config.memory.namespace)
+        vectors = base_path / (config.memory.vectors or "memory-vectors.sqlite3")
+    else:
+        notes = _memory_path(config, base_path, database)
+        store = SQLiteMemoryStore(notes, namespace=config.memory.namespace)
+        vectors = base_path / config.memory.vectors if config.memory.vectors else notes
+    if config.memory.search == "keyword":
+        return store
+    from .semantic_memory import SemanticMemoryStore, VectorIndex
+
+    try:
+        profile = config.resolve_model_name(config.memory.embedding_profile)
+        client = (models or ModelGateway(config)).resolve(profile)
+        embed = getattr(client, "embed", None)
+        if embed is None:
+            raise ConfigError(f"memory.embedding_profile {profile!r}: its adapter has no embeddings endpoint")
+        return SemanticMemoryStore(store, embed, VectorIndex(vectors), model=config.models[profile].model,
+                                   mode=config.memory.search)
+    except BaseException:
+        store.close_now()
+        raise
 
 
 def _memory_path(config: HarnessConfig, base_path: Path, database: str | PathLike[str]) -> Path:
@@ -461,6 +502,15 @@ def _load_tool_sources(
                 max_results=config.web_search.max_results,
                 search_depth=config.web_search.search_depth,
                 timeout_seconds=config.web_search.timeout_seconds,
+            ).load(runtime, host_policy=host_policy)
+        if config.web_fetch.enabled:
+            WebFetchSource(
+                max_bytes=config.web_fetch.max_bytes,
+                max_chars=config.web_fetch.max_chars,
+                timeout_seconds=config.web_fetch.timeout_seconds,
+                max_redirects=config.web_fetch.max_redirects,
+                allow_private=config.web_fetch.allow_private,
+                user_agent=config.web_fetch.user_agent,
             ).load(runtime, host_policy=host_policy)
     except (ToolSourceError, ValueError, TypeError) as exc:
         raise ConfigError(str(exc)) from exc

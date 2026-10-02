@@ -30,6 +30,10 @@ class McpServerConfig:
     call_timeout_seconds: float = 120.0
     sync_on_start: bool = True
     enabled: bool = True
+    # Offer the server's resources / prompts as read-only tools (when it announces them):
+    # NAME__mcp_list_resources, NAME__mcp_read_resource, NAME__mcp_list_prompts, NAME__mcp_get_prompt.
+    resources: bool = False
+    prompts: bool = False
 
     def __post_init__(self) -> None:
         if not _SERVER_NAME.fullmatch(self.name):

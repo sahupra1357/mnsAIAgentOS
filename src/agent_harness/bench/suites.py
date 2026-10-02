@@ -9,8 +9,10 @@ suite      what it validates                   dataset format (per record)
 gsm8k      full agent loop + tool use          {"question", "answer": "... #### 42"}
            (calculator), budgets, retries
 qa         agent answers without tools or      {"question", "answer" | "answers"}
-           with default tools (TriviaQA,       (field names configurable)
-           NQ-open, HotpotQA-closed...)
+           with default tools (TriviaQA,       (field names configurable; optional
+           NQ-open, HotpotQA-closed...);       "rubric" for the judge)
+           match = "judge" grades open-ended
+           answers with a model
 bfcl       tool-calling accuracy of the model  BFCL question file + possible-answer
            gateway per provider/adapter        file joined by "id"
 humaneval  coding: generated code executed     {"task_id", "prompt", "test",
@@ -23,6 +25,7 @@ use each benchmark's official evaluator on the saved predictions.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import string
@@ -161,7 +164,10 @@ class QaSuite:
             clean = [str(a) for a in answers if isinstance(a, (str, int, float)) and str(a).strip()]
             if not clean:
                 raise DatasetError(f"qa record {index} has no usable answers")
-            items.append(BenchItem(str(record.get(id_field, f"qa-{index}")), {"question": question}, clean))
+            item_input: dict[str, Any] = {"question": question}
+            if isinstance(record.get("rubric"), str):
+                item_input["rubric"] = record["rubric"]
+            items.append(BenchItem(str(record.get(id_field, f"qa-{index}")), item_input, clean))
         return items
 
     async def run(self, item: BenchItem, context: BenchContext) -> ItemResult:
@@ -180,14 +186,82 @@ class QaSuite:
             answer = match.group(1).strip().splitlines()[0]
         predicted = normalize_answer(answer)
         expected = [normalize_answer(a) for a in item.expected]
-        if context.options.get("match", "contains") == "exact":
+        match_mode = context.options.get("match", "contains")
+        details: dict[str, Any] = {}
+        if match_mode == "judge":
+            verdict = await judge_answer(context, item.input["question"], item.expected, outcome.output,
+                                         rubric=item.input.get("rubric"))
+            correct = verdict["correct"] is True
+            details["judge"] = verdict
+        elif match_mode == "exact":
             correct = predicted in expected
         else:
             correct = any(e and e in normalize_answer(outcome.output) for e in expected)
-        return _result_from_outcome(
+        result = _result_from_outcome(
             item, outcome, started, correct=correct, expected=" | ".join(item.expected[:5]),
             predicted=answer[:500],
         )
+        result.details.update(details)
+        return result
+
+
+JUDGE_INSTRUCTIONS = (
+    "You grade an answer to a question against reference answers. The answer is correct when it "
+    "states the same fact or result as a reference, even in other words; extra explanation is fine, "
+    "but a contradiction, a different result, or no answer is incorrect. Follow the rubric if one is "
+    'given. Reply with JSON only: {"correct": true or false, "reason": "<one sentence>"}'
+)
+
+
+async def judge_answer(
+    context: BenchContext,
+    question: str,
+    references: Sequence[str],
+    answer: str,
+    *,
+    rubric: str | None = None,
+) -> dict[str, Any]:
+    """Ask a model (``judge_profile``, default the profile under test) whether ``answer`` is right.
+
+    Returns ``{"correct": bool | None, "reason": str, "profile": str}``; ``None`` means the
+    judge's reply could not be read (counted as incorrect).
+    """
+
+    profile = str(context.options.get("judge_profile") or context.profile)
+    parts = [f"Question:\n{question}", "Reference answers:\n" + "\n".join(f"- {r}" for r in references)]
+    if rubric:
+        parts.append(f"Rubric:\n{rubric}")
+    parts.append(f"Answer to grade:\n{answer[:8_000]}")
+    request = ModelRequest(
+        messages=(Message(Role.SYSTEM, JUDGE_INSTRUCTIONS), Message(Role.USER, "\n\n".join(parts))),
+        temperature=0.0,
+        max_output_tokens=int(context.options.get("judge_max_tokens", 1024)),
+    )
+    try:
+        reply = await context.models.resolve(profile).complete(request)
+    except HarnessError as exc:
+        return {"correct": None, "reason": f"judge call failed: {exc}", "profile": profile}
+    correct, reason = parse_verdict(reply.content)
+    return {"correct": correct, "reason": reason, "profile": profile}
+
+
+def parse_verdict(text: str) -> tuple[bool | None, str]:
+    """Read a judge reply: JSON ``{"correct": ...}``, else a ``correct: true`` / CORRECT word."""
+
+    for candidate in re.findall(r"\{[^{}]*\}", text, re.DOTALL):
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("correct"), bool):
+            return value["correct"], str(value.get("reason", ""))[:500]
+    match = re.search(r'"?correct"?\s*[:=]\s*(true|false)', text, re.IGNORECASE)
+    if match:
+        return match.group(1).lower() == "true", ""
+    words = re.findall(r"\b(incorrect|correct)\b", text, re.IGNORECASE)
+    if len({word.lower() for word in words}) == 1:
+        return words[0].lower() == "correct", ""
+    return None, "the judge's reply could not be read"
 
 
 # --- BFCL (function calling) -----------------------------------------------------

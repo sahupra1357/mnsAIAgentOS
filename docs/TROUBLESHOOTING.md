@@ -181,6 +181,11 @@ none exists. A baseline recorded from a broken run must be deleted by hand.
 | `model_responded` with `context_overflow: true`, then a shorter view | The server said the request was too long; the step was retried under a smaller cap | Expected. If it happens often, set `context_window` to the server's real context, or enable `[summarization]` |
 | A run fails with `model context exceeded` | The overflow retries (`[orchestrator] context_overflow_retries`) were used up, or the pinned head alone is too large | Raise the server's context, shorten the system prompt or first message, or raise the retries |
 | A server's "too long" error fails the run instead of being retried | Its message is not one the adapters recognise | Add a regex to `[orchestrator] context_overflow_patterns` |
+| Frequent `context_overflow` or `context_capped` events on one profile | The estimate undercounts this content (code, JSON, other languages) | Lower `[context] chars_per_token` (about 2.5), or set `token_counting = "server"` on the profile (llama.cpp, vLLM) |
+| `adapter ... cannot count tokens on the server` | `token_counting = "server"` on Ollama or SGLang | Use `"estimate"` there |
+| `memory_search` finds nothing that obviously matches | Keyword search; or notes saved before semantic search was enabled | `[memory] search = "hybrid"` with an `embedding_profile`, then `agent-harness memory reindex` |
+| `web_fetch` refuses a URL as private | The host resolves to a private, loopback, or link-local address | Intended (SSRF protection); set `[web_fetch] allow_private = true` only for trusted internal pages |
+| Judge accuracy looks too high | The model is grading its own answers | Set `judge_profile` to a different, stronger profile |
 | API clients get `429` with `Retry-After` | `[api] rate_limit_per_minute` (per key; per address after failed authentication) | Raise the limit or `rate_limit_burst`; with several API processes each counts separately |
 | `429` naming `user '...'` | That end user's `[user_quotas]` limit for the last 24 hours | Raise it, or add `[user_quotas.users.NAME]` for that user |
 | A paused run was denied or ended by itself; `approval_resolved` has `actor: "timeout"` | `[interaction] approval_timeout_seconds` / `question_timeout_seconds` expired, applied by `on_timeout` | Raise the timeout, or set it to 0 to wait forever |
