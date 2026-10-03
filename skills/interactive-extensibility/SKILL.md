@@ -255,7 +255,7 @@ Use network-free tests with scripted models:
   - `/new`, `/status`, `/exit` are REPL commands; any other `/name` expands a template.
   - Ctrl-C cancels the current run, not the REPL.
   - The run is persisted as usual, so `resume` and `runs` see it.
-- **Full-feature config (15b):** `examples/full.toml` turns features on through config only.
+- **Full-feature config (15b, implemented):** the root `models.toml` turns features on through config only.
   Never flip a dataclass default to "on". Defaults are part of the version hash and the tests.
 - **Profile switches:** `enabled = false` in `[models.X]`, popped in `load_config` before
   the profile is parsed. Routes to the profile are dropped and fallbacks skip it. A disabled

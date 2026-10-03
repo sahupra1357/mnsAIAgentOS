@@ -90,7 +90,7 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
 - **Coverage guard:** a unit test lists `tests/test_*.py` and fails if a module is in no
   feature, so a new test cannot drop out of the per-feature runs. Never remove a module
   from the list to make that test pass.
-- **Scenarios with features on:** a scenario's `config = "../full.toml"` or an inline
+- **Scenarios with features on:** a scenario's `config = "../../models.toml"` or an inline
   `[harness]` table is merged into the scenario's config before the app is built. The model
   is still scripted, so these scenarios stay offline and deterministic.
 - **Live entries for a feature:** they reuse the existing smoke and benchmark machinery
