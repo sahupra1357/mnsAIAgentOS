@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .application import HarnessApplication, build_application
 from .coding import CODING_AGENT_SYSTEM_PROMPT
-from .config import ConfigError, load_config
+from .config import ConfigError, discover_config_path, load_config
 from .application import open_memory_store
 from .memory import SQLiteMemoryStore
 from .domain import (
@@ -33,12 +33,18 @@ from .instructions import resolve_path
 from .plugins import install_plugin, installed_plugins
 from .settings import SettingsError, load_layers, render_effective
 from .templates import expand_prompt
+from .repl import ChatOptions, ChatSession, TerminalIO
 from .evals import load_scenarios, run_scenario, summarize
 from .telemetry import JsonLinesTelemetry
 from .notifications import notifier_from_config
 from .streaming import StreamHub
 from .worker import Worker
 from .artifacts import LocalArtifactStore, referenced_artifacts
+
+
+_CONFIG_HELP = (
+    "config file (default: $AGENT_HARNESS_CONFIG, ./models.toml, or ~/.agent-harness/models.toml)"
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -87,12 +93,29 @@ def _parser() -> argparse.ArgumentParser:
     planning.add_argument("--no-plan", dest="planning", action="store_false",
                           help="turn off plan-and-execute even if [planning] enabled = true")
 
+    chat = subcommands.add_parser(
+        "chat", help="interactive chat in the terminal (the default with no arguments)"
+    )
+    _common_runtime_arguments(chat)
+    chat.add_argument("--system", help="optional system instruction")
+    chat.add_argument("--model-profile", help="profile or route name; defaults to the config value")
+    chat.add_argument("--max-steps", type=int, default=20, help="steps allowed per message")
+    chat.add_argument("--max-wall-seconds", type=float, default=300.0, help="seconds allowed per message")
+    chat.add_argument("--max-tokens", type=int, help="token budget for the whole conversation")
+    chat.add_argument("--max-cost-usd", type=float, help="cost budget for the whole conversation")
+    chat.add_argument("--no-stream", dest="stream", action="store_false",
+                      help="print each answer when it is complete instead of as it is generated")
+    chat.add_argument("--mode", choices=["default", "accept_edits", "plan", "bypass"],
+                      help="permission mode (default from [permissions] mode)")
+    chat.add_argument("--plan", dest="planning", action="store_true", default=None,
+                      help="plan-and-execute for each conversation")
+
     resume = subcommands.add_parser("resume", help="resume a durable run by ID")
     _common_runtime_arguments(resume)
     resume.add_argument("run_id")
 
     profiles = subcommands.add_parser("profiles", help="list configured model profiles")
-    profiles.add_argument("--config", type=Path, required=True)
+    profiles.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
 
     approve = subcommands.add_parser(
         "approve", help="approve or deny the pending tool call for a paused run"
@@ -202,9 +225,9 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--poll-seconds", type=float, default=1.0)
 
     templates = subcommands.add_parser("templates", help="list prompt templates (/name)")
-    templates.add_argument("--config", type=Path, required=True)
+    templates.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
     skills = subcommands.add_parser("skills", help="list skills available to the model")
-    skills.add_argument("--config", type=Path, required=True)
+    skills.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
 
     rewind = subcommands.add_parser(
         "rewind", help="restore files and conversation to before a step (dry run without --yes)"
@@ -217,7 +240,7 @@ def _parser() -> argparse.ArgumentParser:
     config_cmd = subcommands.add_parser("config", help="inspect layered settings")
     config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show", help="print effective settings and where each came from")
-    show.add_argument("--config", type=Path, required=True)
+    show.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
 
     tools = subcommands.add_parser("tools", help="list, sync, enable, or disable tools in the catalog")
     tools_sub = tools.add_subparsers(dest="tools_command", required=True)
@@ -253,13 +276,13 @@ def _parser() -> argparse.ArgumentParser:
     plugin_sub = plugin.add_subparsers(dest="plugin_command", required=True)
     install = plugin_sub.add_parser("install", help="validate and copy a plugin (not enabled)")
     install.add_argument("source", type=Path)
-    install.add_argument("--config", type=Path, required=True)
+    install.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
     install.add_argument("--replace", action="store_true")
     listing = plugin_sub.add_parser("list", help="list installed plugins")
-    listing.add_argument("--config", type=Path, required=True)
+    listing.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
     remove = plugin_sub.add_parser("remove", help="delete an installed plugin")
     remove.add_argument("name")
-    remove.add_argument("--config", type=Path, required=True)
+    remove.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
 
     evaluate = subcommands.add_parser(
         "eval", help="run scenario evaluations (scripted by default, --live for real models)"
@@ -274,7 +297,7 @@ def _parser() -> argparse.ArgumentParser:
         "doctor",
         help="check that a model profile's server is reachable and usable (live requests)",
     )
-    doctor.add_argument("--config", type=Path, required=True)
+    doctor.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
     doctor.add_argument("--model-profile", help="named profile; defaults to the config value")
     doctor.add_argument("--skip-tools", action="store_true", help="skip the tool-call check")
     doctor.add_argument("--skip-cache", action="store_true", help="skip the prefix-cache check")
@@ -285,7 +308,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _common_runtime_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
     parser.add_argument(
         "--database",
         default="agent-harness.sqlite3",
@@ -369,6 +392,34 @@ async def _run_command(args: argparse.Namespace) -> int:
             app, completed, streamed=stream is not None and stream.printed,
             show_reasoning=args.show_reasoning and stream is None,
         )
+
+
+async def _chat_command(args: argparse.Namespace) -> int:
+    with contextlib.suppress(ImportError):
+        import readline  # noqa: F401  (line editing and history for input())
+    stream = _StdoutStream() if args.stream else None
+    app = _build(args, stream=stream)
+    async with app:
+        await _start_tools(app)
+        requested = args.model_profile or app.config.default_model_profile
+        profile = app.config.resolve_model_name(requested)
+        system = args.system
+        if system is None and app.config.coding.enabled:
+            system = CODING_AGENT_SYSTEM_PROMPT
+        options = ChatOptions(
+            profile=profile,
+            route=requested if requested != profile else None,
+            system=system,
+            mode=args.mode,
+            planning=args.planning,
+            budget=RunBudget(
+                max_steps=args.max_steps,
+                max_wall_seconds=args.max_wall_seconds,
+                max_tokens=args.max_tokens,
+                max_cost_usd=args.max_cost_usd,
+            ),
+        )
+        return await ChatSession(app, options, TerminalIO(), stream=stream).loop()
 
 
 async def _resume_command(args: argparse.Namespace) -> int:
@@ -476,6 +527,8 @@ def _list_profiles(args: argparse.Namespace) -> int:
     for route, target in config.routes.items():
         marker = " *" if route == config.default_model_profile else ""
         print(f"route {route}{marker} -> {target}")
+    for name in config.disabled_models:
+        print(f"{name}: disabled (enabled = false)")
     return 0
 
 
@@ -997,9 +1050,34 @@ async def _eval_command(args: argparse.Namespace) -> int:
     return 1 if report["summary"]["fail"] else 0
 
 
+def _with_default_command(argv: Sequence[str], commands: Sequence[str]) -> list[str]:
+    """``agent-harness`` alone starts ``chat``; ``agent-harness "prompt"`` means ``run``."""
+
+    args = list(argv)
+    if not args:
+        return ["chat"]
+    first = args[0]
+    if first in commands or first in {"-h", "--help"}:
+        return args
+    return ["run", *args]
+
+
+def _subcommand_names(parser: argparse.ArgumentParser) -> list[str]:
+    for action in parser._actions:  # argparse exposes no public accessor
+        if isinstance(action, argparse._SubParsersAction):
+            return list(action.choices)
+    return []
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(_with_default_command(raw, _subcommand_names(parser)))
     try:
+        if hasattr(args, "config"):
+            args.config = discover_config_path(args.config)
+        if args.command == "chat":
+            return asyncio.run(_chat_command(args))
         if args.command == "run":
             return asyncio.run(_run_command(args))
         if args.command == "resume":
@@ -1051,6 +1129,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, HarnessError, KeyError, ValueError, SettingsError, OSError) as exc:
         print(f"agent-harness: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("", file=sys.stderr)
+        return 130
     return 2
 
 

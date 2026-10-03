@@ -39,7 +39,26 @@ python3 -m venv .venv
 cp examples/models.toml models.toml
 ```
 
-Edit `models.toml` so the endpoint and model name match your server. The default `local` profile does not require a credential.
+Edit `models.toml` so the endpoint and model name match your server. The default profile
+is `llamacpp` (a local llama.cpp server, no credential). Switch any profile off with
+`enabled = false` in its table, or `AGENT_HARNESS_MODEL__NAME__ENABLED=false`; a disabled
+profile cannot be selected, and routes and fallbacks to it are dropped.
+
+With `./models.toml` in place, no subcommand or `--config` is needed:
+
+```bash
+agent-harness                                   # interactive chat (the `chat` subcommand)
+agent-harness "Multiply 27 by 19."              # same as: agent-harness run "..."
+agent-harness --stream --model-profile ollama "Hello"
+```
+
+The config file is found in this order: `--config FILE`, `$AGENT_HARNESS_CONFIG`,
+`./models.toml`, `~/.agent-harness/models.toml`. Every subcommand accepts `--config` to
+override it. In `chat`, each message continues the same durable run; approvals and
+`ask_user` questions are asked inline; `/new`, `/status`, `/help`, and `/exit` are chat
+commands, and any other `/name` expands a prompt template. Each message gets
+`--max-steps` (20) more steps and `--max-wall-seconds` (300) more seconds.
+For everything turned on at once, start from `examples/full.toml` (Phase 15b).
 
 List the configured profiles:
 

@@ -239,3 +239,24 @@ Use network-free tests with scripted models:
 - **Rewind:** files are restored, and the event history stays intact.
 - **Settings:** layers merge in the right precedence.
 - **Plugins:** a plugin that isn't enabled has no effect.
+
+## Phase 15a: CLI defaults (implemented)
+
+- **Config discovery:** `--config` → `AGENT_HARNESS_CONFIG` → `./models.toml` →
+  `~/.agent-harness/models.toml`. It is resolved once in the CLI. `load_config()` itself is
+  unchanged, so library callers and tests see no difference. Layered settings still apply on
+  top of the config that was found.
+- **Implicit `run`:** in `main()`, if `argv[0]` is neither a known subcommand nor an option,
+  `run` is inserted before argparse runs. A prompt that equals a subcommand name needs an
+  explicit `agent-harness run "status"`.
+- **REPL:** `agent-harness` with no arguments. The first line creates a run, later lines call
+  `continue_run`, and streaming is on.
+  - A pause for approval prompts `[y/N]`; a pause for `ask_user` prompts for the answer, inline.
+  - `/new`, `/status`, `/exit` are REPL commands; any other `/name` expands a template.
+  - Ctrl-C cancels the current run, not the REPL.
+  - The run is persisted as usual, so `resume` and `runs` see it.
+- **Full-feature config (15b):** `examples/full.toml` turns features on through config only.
+  Never flip a dataclass default to "on". Defaults are part of the version hash and the tests.
+- **Profile switches:** `enabled = false` in `[models.X]`, popped in `load_config` before
+  the profile is parsed. Routes to the profile are dropped and fallbacks skip it. A disabled
+  default is a `ConfigError`. Tests: `tests/test_cli_defaults.py`.

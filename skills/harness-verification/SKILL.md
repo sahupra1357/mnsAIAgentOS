@@ -73,3 +73,26 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
 - **Judged `qa`:** with `match = "judge"`, the judge reply is parsed leniently
   (`parse_verdict`); an unreadable reply counts as incorrect. Prefer a judge profile
   different from the profile under test.
+
+## Phase 15c: per-feature validation (PLANNED)
+
+- **Features in the plan:** `[[feature]]` entries in `examples/validation.toml`, each with
+  `name`, `tests` (unit modules, e.g. `tests.test_guardrails`), `scenarios` (files under
+  `examples/evals/`), and `smoke` / `benchmarks` (names of the existing `[[smoke]]` /
+  `[[benchmark]]` entries). Planned features: `core`, `providers`, `context`, `guardrails`,
+  `hooks-permissions`, `subagents-planning`, `interaction`, `tools`, `memory`, `coding`,
+  `api-workers`, `production`, `extensibility`, `observability`.
+- **One command, any subset:** `agent-harness-bench pipeline examples/validation.toml`
+  runs everything (the master run). `--feature NAME` (repeatable) limits every stage to that
+  feature's entries. `--offline` drops smoke and benchmarks. `scripts/validate.sh [feature ...]`
+  wraps it. The report format is unchanged (`pipeline-summary.json`, `index.html`), with a
+  feature column added.
+- **Coverage guard:** a unit test lists `tests/test_*.py` and fails if a module is in no
+  feature, so a new test cannot drop out of the per-feature runs. Never remove a module
+  from the list to make that test pass.
+- **Scenarios with features on:** a scenario's `config = "../full.toml"` or an inline
+  `[harness]` table is merged into the scenario's config before the app is built. The model
+  is still scripted, so these scenarios stay offline and deterministic.
+- **Live entries for a feature:** they reuse the existing smoke and benchmark machinery
+  (residency, gates, baselines). A feature with no live check simply has none; do not
+  invent a live check that needs a paid service.

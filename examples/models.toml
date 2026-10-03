@@ -1,6 +1,11 @@
 # Select this profile by default. Override it with
 # AGENT_HARNESS_DEFAULT_MODEL_PROFILE or --model-profile.
-default_model_profile = "local"
+default_model_profile = "llamacpp"
+
+# Turn a profile off with `enabled = false` in its table (or
+# AGENT_HARNESS_MODEL__NAME__ENABLED=false). A disabled profile cannot be selected,
+# routes to it are dropped, and it is removed from other profiles' fallback chains.
+# `agent-harness profiles` lists it as disabled.
 
 # Capability routes: use a route name anywhere a profile name is accepted.
 [routes]
@@ -10,6 +15,7 @@ strong = "modal"
 # Any server exposing an OpenAI-compatible /chat/completions endpoint can be
 # used: a hosted provider, vLLM, llama.cpp server, Ollama's compatible API, etc.
 [models.local]
+enabled = true
 adapter = "openai_compatible"
 model = "your-model-name"
 endpoint = "http://127.0.0.1:8000/v1"
@@ -24,6 +30,7 @@ temperature = 0.2
 max_tokens = 1024
 
 [models.hosted]
+enabled = true
 adapter = "openai_compatible"
 model = "your-hosted-model"
 endpoint = "https://provider.example/v1"
@@ -42,6 +49,7 @@ max_tokens = 1024
 # OLLAMA_CONTEXT_LENGTH=8192 or set api_mode = "native" so context_window is
 # sent as options.num_ctx.
 [models.ollama]
+enabled = true
 adapter = "ollama"
 model = "qwen2.5-coder:7b"
 endpoint = "http://127.0.0.1:11434/v1"
@@ -62,6 +70,7 @@ max_tokens = 1024
 #   llama-server -m model.gguf --jinja -c 16384 --port 8080
 #   endpoint = "http://127.0.0.1:8080/v1", any `model` label, context_window = 16384
 [models.llamacpp]
+enabled = true
 adapter = "llama_cpp"
 model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
 endpoint = "http://127.0.0.1:9931/v1"
@@ -89,6 +98,7 @@ max_tokens = 1024
 # Both auth layers are required: the server's bearer key and Modal proxy auth.
 # The first request after scale-to-zero uses cold_start_timeout_seconds.
 [models.modal]
+enabled = true
 adapter = "modal"
 server = "vllm"            # or "sglang"
 model = "Qwen/Qwen2.5-7B-Instruct"
@@ -118,6 +128,7 @@ max_tokens = 1024
 # Embeddings for [memory] search = "semantic" / "hybrid" and the memory benchmark:
 #   ollama pull nomic-embed-text
 [models.embed]
+enabled = true
 adapter = "ollama"
 model = "nomic-embed-text"
 endpoint = "http://127.0.0.1:11434/v1"
