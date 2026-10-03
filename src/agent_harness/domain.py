@@ -727,6 +727,19 @@ class RunLister(Protocol):
     async def list_runs(self, query: RunQuery) -> RunPage: ...
 
 
+class ConversationStore(Protocol):
+    """Optional store capability (Phase 15d): map an OpenAI-style chat history to a run.
+
+    ``key`` is a digest of the conversation a client has seen so far; the
+    OpenAI-compatible endpoint saves it after each reply and looks it up when the
+    client sends the next message with the full history.
+    """
+
+    async def find_conversation(self, tenant: str, key: str) -> str | None: ...
+
+    async def save_conversation(self, tenant: str, key: str, run_id: str) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCatalogEntry:
     """One tool known to the persistent catalog.

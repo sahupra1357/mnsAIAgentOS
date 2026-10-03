@@ -144,6 +144,17 @@ CREATE INDEX IF NOT EXISTS quota_reservations_user ON quota_reservations(tenant,
 CREATE INDEX IF NOT EXISTS runs_tenant_end_user
     ON runs(tenant, json_extract(snapshot_json, '$.end_user'));
 """
+# OpenAI-compatible chat (Phase 15d): a client's conversation digest -> its run.
+CONVERSATIONS = """
+CREATE TABLE IF NOT EXISTS chat_conversations (
+    tenant TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant, conversation_key)
+);
+CREATE INDEX IF NOT EXISTS chat_conversations_run ON chat_conversations(run_id);
+"""
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline tables", BASELINE),
     (2, "tool catalog", TOOL_CATALOG),
@@ -152,6 +163,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (5, "quota reservations", RESERVATIONS),
     (6, "queue attempt counts", QUEUE_ATTEMPTS),
     (7, "per-user quotas", USER_QUOTAS),
+    (8, "chat conversations", CONVERSATIONS),
 )
 LATEST = MIGRATIONS[-1][0]
 

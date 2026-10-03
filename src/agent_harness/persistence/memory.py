@@ -47,12 +47,24 @@ class InMemoryRunStore:
         self._event_ids: set[str] = set()
         self._tool_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._steers: dict[str, list[SteerMessage]] = {}
+        self._conversations: dict[tuple[str, str], str] = {}  # (tenant, key) -> run_id
         self._catalog: dict[str, ToolCatalogEntry] = {}
         # run_id -> (tenant, token ceiling, cost ceiling, reserved at)
         self._reservations: dict[str, tuple[str, int | None, float | None, datetime]] = {}
         self._reservation_users: dict[str, str | None] = {}
         self._lock = asyncio.Lock()
         self._create_lock = asyncio.Lock()
+
+    async def find_conversation(self, tenant: str, key: str) -> str | None:
+        async with self._lock:
+            return self._conversations.get((tenant, key))
+
+    async def save_conversation(self, tenant: str, key: str, run_id: str) -> None:
+        _validate_identifier(run_id, "run_id")
+        async with self._lock:
+            if run_id not in self._runs:
+                raise KeyError(f"unknown run: {run_id}")
+            self._conversations[(tenant, key)] = run_id
 
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
         _validate_identifier(run_id, "run_id")
@@ -236,6 +248,8 @@ class InMemoryRunStore:
                         self._event_ids.discard(event.id or "")
                     self._queue.pop(run_id, None)
                     self._steers.pop(run_id, None)
+                    for conversation in [k for k, v in self._conversations.items() if v == run_id]:
+                        del self._conversations[conversation]
                     self._reservations.pop(run_id, None)
                     self._reservation_users.pop(run_id, None)
                     for key in [k for k in self._tool_results if k[1].startswith(f"{run_id}:")]:

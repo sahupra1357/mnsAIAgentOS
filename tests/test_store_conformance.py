@@ -216,6 +216,26 @@ class StoreContract:
         asyncio.run(body())
 
 
+    def test_chat_conversations(self) -> None:
+        async def body() -> None:
+            first, second = run("c1"), run("c2")
+            for record in (first, second):
+                await self.store.create_run(record, created(record))
+            self.assertIsNone(await self.store.find_conversation("default", "k1"))
+            await self.store.save_conversation("default", "k1", "c1")
+            await self.store.save_conversation("default", "k2", "c1")
+            self.assertEqual(await self.store.find_conversation("default", "k1"), "c1")
+            self.assertIsNone(await self.store.find_conversation("other", "k1"))  # per tenant
+            await self.store.save_conversation("default", "k1", "c2")  # upsert
+            self.assertEqual(await self.store.find_conversation("default", "k1"), "c2")
+            with self.assertRaises(KeyError):
+                await self.store.save_conversation("default", "k3", "missing")
+            first.status = RunStatus.COMPLETED
+            await self.store.save_checkpoint(first, [], expected_version=0)
+            await self.store.purge_runs(utc_now() + timedelta(seconds=5), dry_run=False)
+            self.assertIsNone(await self.store.find_conversation("default", "k2"))  # purged with c1
+        asyncio.run(body())
+
     def test_list_runs(self) -> None:
         async def body() -> None:
             base = utc_now() - timedelta(hours=1)

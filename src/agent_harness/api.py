@@ -37,6 +37,13 @@ a principal with a tenant and a role (viewer < operator < admin; see
                                      "decision": "deny" on /approval declines it)
     POST /runs/{id}/mode            {"mode": "default" | "accept_edits" | "plan" | "bypass"}
     POST /runs/{id}/rewind          {"to_step", "confirm"?}  (dry run unless confirm)
+
+OpenAI-compatible (Phase 15d; see ``agent_harness.openai_chat``), so chat clients can
+use the harness as a model:
+
+    GET  /v1/models                 profiles, routes, and "agent-harness" (the default)
+    POST /v1/chat/completions       {"model", "messages", "stream"?, "user"?}; header
+                                    X-Agent-Harness-Run picks the run explicitly
 """
 
 from __future__ import annotations
@@ -74,6 +81,7 @@ from agent_harness.domain import (
     RunStore,
     RunSummary,
 )
+from agent_harness.openai_chat import RUN_HEADER, ChatRequestError, OpenAIChat, parse_chat_request
 from agent_harness.orchestrator import AgentOrchestrator, validate_image_url
 from agent_harness.planning import plan_payload
 from agent_harness.ratelimit import RateLimiter
@@ -149,6 +157,11 @@ class HarnessAPI:
         self._hub = stream_hub
         self._cors = frozenset(cors_origins)
         self._limiter = rate_limiter
+        self._openai = OpenAIChat(
+            orchestrator=orchestrator, store=store, queue=queue, config=config,
+            run_versions=run_versions, default_system=default_system_prompt, hub=stream_hub,
+            poll_seconds=stream_poll_seconds,
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -163,7 +176,7 @@ class HarnessAPI:
             if scope["method"] == "OPTIONS":  # preflight: answered before authentication
                 await send({"type": "http.response.start", "status": 204, "headers": [
                     (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
-                    (b"access-control-allow-headers", b"authorization, content-type"),
+                    (b"access-control-allow-headers", b"authorization, content-type, x-agent-harness-run"),
                     (b"access-control-max-age", b"600"),
                 ]})
                 await send({"type": "http.response.body", "body": b""})
@@ -243,6 +256,24 @@ class HarnessAPI:
         if path == "/runs" and method == "GET":
             _require(principal, AccessRole.VIEWER)
             await self._list_runs(send, query, principal)
+            return
+        if path == "/v1/models" and method == "GET":
+            _require(principal, AccessRole.VIEWER)
+            await _json(send, 200, self._openai.models())
+            return
+        if path == "/v1/chat/completions" and method == "POST":
+            _require(principal, AccessRole.OPERATOR)
+            try:
+                request = parse_chat_request(await self._body(receive))
+            except ChatRequestError as exc:
+                raise ApiError(400, str(exc)) from exc
+            try:
+                await self._openai.complete(
+                    request, send, tenant=principal.creation_tenant, actor=principal.name,
+                    run_header=_header(scope, RUN_HEADER), can_access=principal.can_access,
+                )
+            except ChatRequestError as exc:
+                raise ApiError(409 if "still working" in str(exc) else 400, str(exc)) from exc
             return
         if path == "/runs" and method == "POST":
             _require(principal, AccessRole.OPERATOR)
@@ -899,7 +930,8 @@ def _with_cors(send: Send, origin: str) -> Send:
     async def wrapped(message: Mapping[str, Any]) -> None:
         if message["type"] == "http.response.start":
             headers = list(message.get("headers", []))
-            headers += [(b"access-control-allow-origin", origin.encode("latin-1")), (b"vary", b"origin")]
+            headers += [(b"access-control-allow-origin", origin.encode("latin-1")), (b"vary", b"origin"),
+                        (b"access-control-expose-headers", b"x-agent-harness-run")]
             message = {**message, "headers": headers}
         await send(message)
 
