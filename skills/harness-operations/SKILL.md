@@ -204,7 +204,7 @@ the feature is not configured.
 - **Search:** `semantic` uses cosine similarity; `hybrid` uses reciprocal rank fusion with
   the keyword results. An embedding outage falls back to keyword search.
 
-## Phase 15d–e: chat clients and web UI (PLANNED)
+## Phase 15d–e: chat clients and web UI (15d implemented; 15e planned)
 
 - **OpenAI-compatible surface** (`api.py`, same server and auth):
   - `GET /v1/models` lists profiles and routes.
@@ -230,3 +230,12 @@ the feature is not configured.
   - Optional Open WebUI service in `deploy/` compose, pointed at `/v1`.
 - **Tests:** an ASGI test client against a scripted model covers streaming frames, mapping,
   approval via chat text, and auth. No network.
+- **15d as built:**
+  - **Module:** `openai_chat.py`, with `OpenAIChat` built by `HarnessAPI.__init__`.
+  - **Optional store capability:** `ConversationStore` (`getattr` checks, so stores without it
+    simply never continue by digest).
+  - **Reply text:** `answer_text` reads only messages after the newest user message.
+  - **Stream ordering:** the stream subscribes to `StreamHub` before enqueueing.
+  - **Live check:** an end-to-end smoke (uvicorn plus a fake OpenAI-compatible server that
+    streams SSE) kept 3 turns on one run.
+  - **Workers:** `Worker` re-enqueues a run that was reopened while it still held the queue row.

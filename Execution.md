@@ -667,6 +667,20 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
     steers one that is still running.
   - Approvals: read with `GET /runs/{id}/approval`, decide with `POST /runs/{id}/approval`.
   - Usage: `GET /runs/{id}/usage`.
+  - OpenAI-compatible (Phase 15d, `openai_chat.py`): `GET /v1/models` and
+    `POST /v1/chat/completions`. `OpenAIChat.complete()` handles one request:
+
+    ```text
+    parse_chat_request()                 # messages, model → profile/route, stream
+    _start_turn()
+      ├── X-Agent-Harness-Run header, or find_conversation(digest of messages[:-1])
+      ├── run awaiting input   → answer() / resolve_approval(decision_from_text(...))
+      ├── completed/exhausted  → continue_run(budget + one turn)
+      └── otherwise            → create_run(seeded with the client's history, enqueue=True)
+    subscribe to StreamHub (stream) → enqueue → wait until run_is_settled()
+    reply: newest answer, or pause_text(pending)
+    save_conversation(digest of messages + reply, run_id)
+    ```
 - **Queue workers:** `agent-harness worker` claims queued runs with leases, so several
   workers can share one database. On Postgres the claim uses `FOR UPDATE SKIP LOCKED` and
   workers can run on many hosts. An expired lease makes the run available to

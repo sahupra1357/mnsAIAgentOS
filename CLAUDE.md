@@ -473,15 +473,21 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
   7. The plan's live config is the root `models.toml`, with llama.cpp smoke and gsm8k/bfcl/guardrails/
      humaneval/context/memory benchmarks. `[scenarios] config = "models.toml"` keeps bare scenarios
      on `examples/models.toml`.
-- **15d OpenAI-compatible chat endpoint** (`phase-15d-openai-chat`): `GET /v1/models` (profiles and
-  routes) and `POST /v1/chat/completions` (with `stream` as OpenAI SSE chunks) on `agent-harness serve`,
-  so Open WebUI, LibreChat, Chatbox, AnythingLLM, Continue, and OpenAI SDKs can use the harness as a "model".
-  1. **Mapping a request to a run.** An `X-Agent-Harness-Run` header names the run. Without it,
-     a hash of the earlier messages is looked up (new store column, with a migration). A match
-     continues that run; no match creates a new run.
-  2. **Pauses.** A paused run replies with the approval or question text, and the next user message
-     (`approve`/`deny` or the answer) resolves it.
-  3. **Auth.** Bearer API keys, as now.
+- **15d OpenAI-compatible chat endpoint** (`phase-15d-openai-chat`) — implemented in `openai_chat.py`,
+  routed by `api.py`:
+  - **Endpoints:** `GET /v1/models` lists `agent-harness` (the default profile), every profile, and
+    every route. `POST /v1/chat/completions` handles JSON and SSE `chat.completion.chunk` replies.
+  - **Conversation mapping:** a new optional `ConversationStore` protocol (`find_conversation`,
+    `save_conversation`) backs the `chat_conversations` table. It is SQLite migration 8 and Postgres
+    migration 5, is in the memory store too, and is purged with its run.
+  - **Finding the run:** the digest of the earlier messages, or an `X-Agent-Harness-Run` header. A miss
+    creates a run seeded with the client's history.
+  - **Pauses:** they are answered by the next chat message (`decision_from_text`).
+  - **Sampling options:** ignored. Client tools are refused.
+  - **Worker race fixed:** a run continued or approved between its final checkpoint and the
+    worker's queue release was dropped from the queue. `Worker._requeue_if_reopened` puts it back.
+  - **Tests:** `tests/test_openai_chat.py` (8 cases with in-process workers), a store conformance
+    case, and a worker regression test.
 - **15e Built-in web UI** (`phase-15e-web-ui`): `GET /ui` serves one static HTML/JS page from the package
   (no npm, no build step) that uses the existing API: run list, chat with live stream, approve/deny,
   `ask_user` answers, plan/todo panel, usage, and events. Also add an optional Open WebUI service

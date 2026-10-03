@@ -213,6 +213,26 @@ class SQLiteRunStore:
             ).fetchall()
         return tuple(_decode_event(row) for row in rows)
 
+    async def find_conversation(self, tenant: str, key: str) -> str | None:
+        async with self._lock:
+            row = self._connection.execute(
+                "SELECT run_id FROM chat_conversations WHERE tenant = ? AND conversation_key = ?",
+                (tenant, key),
+            ).fetchone()
+        return None if row is None else str(row["run_id"])
+
+    async def save_conversation(self, tenant: str, key: str, run_id: str) -> None:
+        _validate_identifier(run_id, "run_id")
+        async with self._lock:
+            if self._connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone() is None:
+                raise KeyError(f"unknown run: {run_id}")
+            self._connection.execute(
+                "INSERT INTO chat_conversations(tenant, conversation_key, run_id, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(tenant, conversation_key) "
+                "DO UPDATE SET run_id = excluded.run_id, updated_at = excluded.updated_at",
+                (tenant, key, run_id, utc_now().isoformat()),
+            )
+
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
         _validate_identifier(run_id, "run_id")
         steer = SteerMessage(uuid4().hex, run_id, content, utc_now())
@@ -504,7 +524,7 @@ class SQLiteRunStore:
                 self._connection.execute("BEGIN IMMEDIATE")
                 self._connection.execute("INSERT INTO purge_guard(holder) VALUES ('gc')")
                 for run_id in ids:
-                    for table in ("run_events", "run_queue", "steer_messages"):
+                    for table in ("run_events", "run_queue", "steer_messages", "chat_conversations"):
                         self._connection.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
                     self._connection.execute(
                         "DELETE FROM tool_results WHERE idempotency_key LIKE ? ESCAPE '\\'",

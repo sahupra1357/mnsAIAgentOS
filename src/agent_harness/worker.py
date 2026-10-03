@@ -139,6 +139,23 @@ class Worker:
             await self._queue.release(
                 run_id, self.worker_id, requeue=not settled and not give_up
             )
+            if settled and not cancelled:
+                await self._requeue_if_reopened(run_id)
+
+    async def _requeue_if_reopened(self, run_id: str) -> None:
+        """Put a run back on the queue if it was continued or approved after it settled.
+
+        Between the run's final checkpoint and the release above, a client may
+        continue it (``continue_run``) or resolve its approval and enqueue it; that
+        enqueue found the row this worker still held and was dropped by the release.
+        """
+
+        get_run = getattr(self._queue, "get_run", None)
+        if get_run is None:
+            return
+        current = await get_run(run_id)
+        if current is not None and current.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
+            await self._queue.enqueue(run_id)
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         """Process runs until ``stop`` is set; finish the current run first."""

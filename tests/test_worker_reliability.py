@@ -208,3 +208,31 @@ class CancelTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReopenedRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_run_continued_before_release_goes_back_on_the_queue(self) -> None:
+        # Phase 15d: a chat client continues a run the moment it settles. Its enqueue hits
+        # the queue row the worker still holds; the release must not drop the new turn.
+        for store in (InMemoryRunStore(), SQLiteRunStore(Path(tempfile.mkdtemp()) / "q.sqlite3")):
+            with self.subTest(store=type(store).__name__):
+                harness = orchestrator(store, Model("first", "second"))
+                worker = Worker(harness, store, poll_interval_seconds=0.01)
+                run = await harness.create_run(model_profile="p", messages=[Message(Role.USER, "hi")],
+                                               enqueue=True)
+                await store.enqueue(run.id)
+                release = store.release
+
+                async def continue_then_release(run_id: str, worker_id: str, *, requeue: bool = False) -> None:
+                    if not requeue:
+                        await harness.continue_run(run_id, "and then?")
+                        await store.enqueue(run_id)  # ignored: the worker still holds the row
+                    await release(run_id, worker_id, requeue=requeue)
+
+                store.release = continue_then_release  # type: ignore[method-assign]
+                first = await worker.run_once()
+                store.release = release  # type: ignore[method-assign]
+                self.assertEqual(first.status, RunStatus.COMPLETED)
+                second = await worker.run_once()
+                self.assertIsNotNone(second, "the continued run was dropped from the queue")
+                self.assertEqual((second.status, second.messages[-1].content), (RunStatus.COMPLETED, "second"))

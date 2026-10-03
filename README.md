@@ -1134,6 +1134,68 @@ the boundary: unknown fields, oversized text, and out-of-range budgets are rejec
     "updated_at"}`, never message text.
   - Delivery is best effort (2 retries) and never affects the run.
 
+### Using it from any chat window (OpenAI-compatible)
+
+`agent-harness serve` also speaks the OpenAI chat API, so any client that lets you set an
+"OpenAI-compatible" base URL can use the harness as a model. That includes Open WebUI,
+LibreChat, Chatbox, AnythingLLM, Continue (VS Code), Msty, and the OpenAI SDKs. Tools,
+hooks, guardrails, subagents, and approvals all run on the server; the client only sees
+the conversation.
+
+```bash
+pip install -e '.[api]'
+export AGENT_HARNESS_API_TOKEN="$(openssl rand -hex 24)"   # at least 16 characters
+agent-harness serve --host 127.0.0.1 --port 8000 --workers 2
+```
+
+| Client setting | Value |
+|---|---|
+| Base URL | `http://127.0.0.1:8000/v1` |
+| API key | the value of `AGENT_HARNESS_API_TOKEN` (or an `[[api.keys]]` key) |
+| Model | `agent-harness` (the default profile), or any profile or route from `GET /v1/models` |
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key=TOKEN)
+reply = client.chat.completions.create(model="agent-harness",
+                                       messages=[{"role": "user", "content": "Explain repl.py"}])
+```
+
+- **One conversation is one durable run.** Clients resend the whole history on every
+  message.
+  - **Continuing:** the harness looks up a digest of the earlier messages
+    (`chat_conversations` table) and continues that run. `X-Agent-Harness-Run: RUN_ID`
+    names the run explicitly, and every response carries that header.
+  - **New conversations:** an unknown history (a new chat, or an edited or regenerated
+    one) starts a new run seeded with those messages.
+  - **System prompt:** the client's system message becomes the run's system prompt.
+- **Approvals and questions arrive as chat messages.**
+  - **Approving:** a paused run replies "Approval needed: `tool` ...". Answer **approve**
+    (or yes/ok) to allow it, or **deny** / no with an optional reason. Any other text
+    denies the call with that text as feedback.
+  - **Plans:** a plan approval accepts approve, or what to change.
+  - **Questions:** an `ask_user` question takes your next message as the answer.
+- **Streaming.** With `"stream": true`, tokens arrive as `chat.completion.chunk` events.
+  Reasoning goes in `delta.reasoning_content`.
+  - **When previews are missing:** they come only from in-process workers
+    (`serve --workers N`), and output guardrails suppress them. Without previews the
+    answer arrives in one chunk.
+- **Ignored and refused fields.** Sampling options in the request (temperature,
+  max_tokens) are ignored; the profile's `parameters` apply. Client-side `tools` are
+  refused, because the harness runs its own.
+- **Auth.** `GET /v1/models` needs a viewer key; `POST /v1/chat/completions` needs an operator key.
+
+Open WebUI in Docker, pointed at a harness on the host:
+
+```bash
+docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway \
+  -e OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1 \
+  -e OPENAI_API_KEY="$AGENT_HARNESS_API_TOKEN" \
+  -v open-webui:/app/backend/data --name open-webui ghcr.io/open-webui/open-webui:main
+```
+
+Serve on `0.0.0.0` (with a key) when the client runs in a container that must reach the host.
+
 ## Artifacts, Memory, and Evaluations
 
 Enable either feature in `models.toml`. Both are off by default:

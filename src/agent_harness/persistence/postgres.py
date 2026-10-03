@@ -144,6 +144,18 @@ MIGRATIONS += (
     CREATE INDEX IF NOT EXISTS runs_tenant_end_user ON runs(tenant, ((snapshot_json::jsonb ->> 'end_user')));
     """),
 )
+MIGRATIONS += (
+    (5, """
+    CREATE TABLE IF NOT EXISTS chat_conversations (
+        tenant TEXT NOT NULL,
+        conversation_key TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (tenant, conversation_key)
+    );
+    CREATE INDEX IF NOT EXISTS chat_conversations_run ON chat_conversations(run_id);
+    """),
+)
 LATEST = MIGRATIONS[-1][0]
 
 
@@ -316,6 +328,26 @@ class PostgresRunStore:
         return tuple(_decode_event(row) for row in rows)
 
     # -- steering -------------------------------------------------------------------------
+
+    async def find_conversation(self, tenant: str, key: str) -> str | None:
+        row = await self._run(lambda: self._connection.execute(
+            "SELECT run_id FROM chat_conversations WHERE tenant = %s AND conversation_key = %s",
+            (tenant, key)).fetchone())
+        return None if row is None else str(row["run_id"])
+
+    async def save_conversation(self, tenant: str, key: str, run_id: str) -> None:
+        _validate_identifier(run_id, "run_id")
+
+        def save() -> None:
+            if self._connection.execute("SELECT 1 FROM runs WHERE id = %s", (run_id,)).fetchone() is None:
+                raise KeyError(f"unknown run: {run_id}")
+            self._connection.execute(
+                "INSERT INTO chat_conversations(tenant, conversation_key, run_id, updated_at) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT (tenant, conversation_key) "
+                "DO UPDATE SET run_id = EXCLUDED.run_id, updated_at = EXCLUDED.updated_at",
+                (tenant, key, run_id, utc_now()))
+
+        await self._run(save)
 
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
         _validate_identifier(run_id, "run_id")
@@ -554,7 +586,7 @@ class PostgresRunStore:
             if dry_run or not ids:
                 return ids
             self._connection.execute("SET LOCAL agent_harness.purge = 'on'")
-            for table in ("run_events", "run_queue", "steer_messages"):
+            for table in ("run_events", "run_queue", "steer_messages", "chat_conversations"):
                 self._connection.execute(f"DELETE FROM {table} WHERE run_id = ANY(%s)", (ids,))
             for run_id in ids:
                 self._connection.execute(
