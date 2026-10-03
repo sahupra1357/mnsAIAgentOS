@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 from collections.abc import Callable
+from collections.abc import Mapping
 from typing import Any
 from os import PathLike
 from pathlib import Path
@@ -168,10 +169,17 @@ def build_application(
     telemetry: TelemetrySink | None = None,
     stream_listener: StreamListener | None = None,
     hooks: HookRunner | None = None,
+    config_overrides: Mapping[str, Any] | None = None,
+    model_resolver: ModelResolver | None = None,
 ) -> HarnessApplication:
-    """Compose the default local application from replaceable implementations."""
+    """Compose the default local application from replaceable implementations.
 
-    config = load_config(config_path, layered=True)
+    ``config_overrides`` is merged over the config file (see ``load_config``).
+    ``model_resolver`` replaces the model gateway for runs, guardrails, and memory
+    embeddings (scripted scenarios); ``app.models`` stays the configured gateway.
+    """
+
+    config = load_config(config_path, layered=True, overrides=config_overrides)
     base_path = Path(config_path).parent
     context_policy = context_policy or context_policy_from_config(config)
     # Validated before any store or file is opened.
@@ -187,6 +195,7 @@ def build_application(
         + [plugin.skills_dir for plugin in plugins if plugin.skills_dir]
     )
     models = ModelGateway(config)
+    run_models: ModelResolver = model_resolver if model_resolver is not None else models
     # Configuration errors surface before any database connection is attempted.
     if config.memory.enabled and config.memory.backend == "sqlite":
         _memory_path(config, base_path, database_path)
@@ -201,7 +210,7 @@ def build_application(
             else None
         )
         memory = (
-            open_memory_store(config, base_path, database_path, models=models)
+            open_memory_store(config, base_path, database_path, models=run_models)
             if config.memory.enabled
             else None
         )
@@ -251,7 +260,7 @@ def build_application(
         if redactor is not None and telemetry is not None:
             telemetry = RedactingTelemetry(telemetry, redactor)
         orchestrator = AgentOrchestrator(
-            models=models,
+            models=run_models,
             tools=tool_runtime,
             # Events are masked for secrets on the way into the store.
             store=RedactingRunStore(store, redactor) if redactor is not None else store,
@@ -278,7 +287,7 @@ def build_application(
             ),
             task_tracking=config.tasks.enabled,
             ask_user=config.interaction.ask_user,
-            guardrails=_guardrails(config, models),
+            guardrails=_guardrails(config, run_models),
             system_context=system_context,
             snapshots=(
                 WorkspaceSnapshotter(

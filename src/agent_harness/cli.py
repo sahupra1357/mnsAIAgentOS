@@ -34,7 +34,7 @@ from .plugins import install_plugin, installed_plugins
 from .settings import SettingsError, load_layers, render_effective
 from .templates import expand_prompt
 from .repl import ChatOptions, ChatSession, TerminalIO
-from .evals import load_scenarios, run_scenario, summarize
+from .evals import load_scenarios, run_scenario, scenario_application, summarize
 from .telemetry import JsonLinesTelemetry
 from .notifications import notifier_from_config
 from .streaming import StreamHub
@@ -288,7 +288,7 @@ def _parser() -> argparse.ArgumentParser:
         "eval", help="run scenario evaluations (scripted by default, --live for real models)"
     )
     _common_runtime_arguments(evaluate)
-    evaluate.add_argument("scenarios", type=Path, help="scenario TOML file or directory")
+    evaluate.add_argument("scenarios", type=Path, nargs="+", help="scenario TOML files or directories")
     evaluate.add_argument("--live", action="store_true", help="use configured model profiles")
     evaluate.add_argument("--model-profile", help="profile or route for live scenarios")
     evaluate.add_argument("--report", type=Path, help="write a JSON report here")
@@ -1016,7 +1016,9 @@ async def _worker_command(args: argparse.Namespace) -> int:
 
 
 async def _eval_command(args: argparse.Namespace) -> int:
-    scenarios = load_scenarios(args.scenarios)
+    scenarios = [scenario for target in args.scenarios for scenario in load_scenarios(target)]
+    if len({s.name for s in scenarios}) != len(scenarios):
+        raise ValueError("scenario names must be unique")
     with tempfile.TemporaryDirectory() as scratch:
         args.database = Path(scratch, "eval.sqlite3")
         app = _build(args)
@@ -1031,6 +1033,9 @@ async def _eval_command(args: argparse.Namespace) -> int:
                         args.model_profile or name
                     ),
                     context=app.orchestrator.context_builder,
+                    app_factory=lambda scenario, models: scenario_application(
+                        scenario, models, default_config=Path(args.config)
+                    ),
                 )
                 for scenario in scenarios
             ]

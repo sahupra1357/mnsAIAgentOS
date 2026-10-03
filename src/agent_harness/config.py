@@ -827,8 +827,13 @@ def load_config(
     *,
     environ: Mapping[str, str] | None = None,
     layered: bool = False,
+    overrides: Mapping[str, Any] | None = None,
 ) -> HarnessConfig:
     """Load TOML configuration and apply environment overrides.
+
+    ``overrides`` (a table, e.g. a scenario's ``[harness]``) is merged over the file:
+    tables merge key by key, anything else replaces. ``AGENT_HARNESS_SET__`` variables
+    still apply last.
 
     If *path* is omitted, ``AGENT_HARNESS_CONFIG`` may name the TOML file.
     Profiles can also be defined entirely through variables of the form
@@ -856,6 +861,8 @@ def load_config(
         if not isinstance(parsed, dict):
             raise ConfigError("configuration root must be a table")
         raw = parsed
+    if overrides:
+        raw = merge_tables(raw, overrides)
     raw = _apply_set_overrides(raw, env)
 
     raw_models = raw.get("models", {})
@@ -940,6 +947,18 @@ def load_config(
         plugins=_parse_section(raw, "plugins", PluginsConfig),
         disabled_models=tuple(sorted(disabled)),
     )
+
+
+def merge_tables(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of ``base`` with ``update`` merged in: tables recursively, values replaced."""
+
+    merged = dict(base)
+    for key, value in update.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = merge_tables(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _disabled_profiles(models: dict[str, dict[str, Any]]) -> set[str]:

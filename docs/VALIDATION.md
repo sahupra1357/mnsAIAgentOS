@@ -22,6 +22,79 @@ agent-harness-bench pipeline examples/validation.toml                          #
 agent-harness-bench pipeline examples/validation.toml --stages smoke,benchmarks,gates
 ```
 
+## Per-feature validation
+
+`examples/validation.toml` groups every check by feature in `[[feature]]` entries:
+
+```toml
+[[feature]]
+name = "guardrails"
+description = "Input, output, and tool-output guards; taint mode; red-team set"
+tests = ["test_guardrails"]                           # unit-test modules in tests/
+scenarios = ["guardrail_refusal", "output_secret_redacted"]   # files in examples/evals/
+smoke = []                                            # [[smoke]] profiles
+benchmarks = ["guardrails"]                           # [[benchmark]] names
+```
+
+| Command | Runs |
+|---------|------|
+| `scripts/validate.sh` | **Master**: all six stages for every feature (the whole plan) |
+| `scripts/validate.sh guardrails` | Only that feature's unit modules, scenarios, smoke profiles, and benchmarks, then its gates |
+| `scripts/validate.sh memory tools` | The union of several features |
+| `scripts/validate.sh --offline` | Static, unit, and scenarios only (no model server) |
+| `scripts/validate.sh --list` | The features and how many checks each has |
+
+The script wraps `agent-harness-bench pipeline examples/validation.toml --feature NAME
+[--offline]`. Other pipeline options pass through (`--stages`, `--quiet`,
+`--update-baselines`, `--resume`). `VALIDATION_PLAN=examples/validation.local.toml`
+selects another plan; copy the `[[feature]]` entries into it first.
+
+Rules:
+- **Static is repo-wide.** A feature run skips it; the master run includes it.
+- **The live stages use the repository's `models.toml`.** It turns everything on, with
+  llama.cpp as the default profile. The smoke stage checks `llamacpp` and `ollama`; the
+  benchmarks run on `llamacpp`, and `memory` embeds with `embed` (Ollama
+  `nomic-embed-text`).
+- **`humaneval` needs Docker.**
+- **The llama.cpp server's context size must match `context_window` (16384).**
+- **Coverage is enforced.** `tests/test_feature_validation.py` fails when a
+  `tests/test_*.py` module, a scripted scenario, a smoke profile, or a benchmark is in no
+  feature, or when a feature names something that does not exist.
+
+**Application-backed scenarios.** A scenario can run against a fully configured
+application instead of a bare orchestrator:
+
+```toml
+config = "../../models.toml"     # every feature on; default: the eval's --config
+[harness.permissions]            # merged over that config (tables key by key)
+mode = "plan"
+[workspace]                      # files in a fresh temporary coding workspace
+"hello.txt" = "Hello, world"
+```
+
+`agent-harness eval` builds the application with the scripted model injected, so the
+real hooks, permission rules, subagents, memory, skills, and tool sources run while
+staying network-free:
+- Embeddings come from deterministic hashed-word vectors.
+- The coding workspace and artifacts live in a temporary directory.
+- Guardrails, orchestrator, interaction, and `ask_user` settings go in `[harness]`.
+- `wait_seconds` is only for bare scenarios.
+
+The scripted examples are:
+
+| Feature | Scenarios |
+|---------|-----------|
+| core | `calculator`, `transient_model_failure`, `unknown_tool_recovery`, `repeated_call_refusal`, `tool_calls_per_reply` |
+| context | `context_overflow_recovery` |
+| guardrails | `guardrail_refusal`, `output_secret_redacted` |
+| hooks-permissions | `full_config_read_with_hooks`, `hook_denies_command`, `permission_deny_rule`, `permission_ask_rule`, `plan_mode_then_edit` |
+| interaction | `ask_user`, `question_deadline`, `structured_output`, `ask_user_full_config` |
+| subagents-planning | `subagent_delegation`, `task_tracking` |
+| extensibility | `skill_loading`, `plan_mode_then_edit` |
+| tools | `dynamic_tool_loading` |
+| memory | `memory_roundtrip` |
+| coding | `plan_mode_then_edit` |
+
 ## Benchmark suites
 
 Each suite exercises a different layer of the harness:

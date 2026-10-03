@@ -1,0 +1,15 @@
+# Feature: skills. Only skill names and descriptions are in the context; load_skill
+# returns the full instructions of examples/skills/release-notes.
+name = "skill_loading"
+config = "../../models.toml"
+prompt = "Write release notes."
+
+[[model]]
+tool_calls = [{ name = "load_skill", arguments = { name = "release-notes" } }]
+[[model]]
+content = "Following the release-notes skill: grouped into Added, Changed, Fixed."
+
+[expect]
+tool_calls = ["load_skill"]
+output_contains = ["release-notes"]
+events_include = ["tool_responded"]

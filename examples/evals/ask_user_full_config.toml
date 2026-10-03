@@ -1,0 +1,15 @@
+# Feature: ask_user with the full config ([interaction] ask_user = true there).
+name = "ask_user_full_config"
+config = "../../models.toml"
+prompt = "Deploy the service."
+answers = ["staging"]
+
+[[model]]
+tool_calls = [{ name = "ask_user", arguments = { question = "Which environment?", options = ["staging", "production"] } }]
+[[model]]
+content = "Deploying to staging as requested."
+
+[expect]
+tool_calls = ["ask_user"]
+output_contains = ["staging"]
+events_include = ["approval_requested", "approval_resolved"]

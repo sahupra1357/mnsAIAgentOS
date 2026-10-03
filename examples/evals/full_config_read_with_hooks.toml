@@ -1,0 +1,19 @@
+# Feature: full config + hooks. The repository's models.toml (every feature on) with a
+# scripted model: a read-only tool call passes the pre_tool and post_tool audit hooks.
+name = "full_config_read_with_hooks"
+config = "../../models.toml"
+prompt = "What does README.md say?"
+
+[workspace]
+"README.md" = "Project Falcon ships on Fridays."
+
+[[model]]
+tool_calls = [{ name = "read_file", arguments = { path = "README.md" } }]
+[[model]]
+content = "README.md says Project Falcon ships on Fridays."
+
+[expect]
+tool_calls = ["read_file"]
+output_contains = ["Falcon"]
+events_include = ["hook_decided", "tool_responded"]
+event_payloads = [{ type = "hook_decided", hook_event = "pre_tool", decision = "allow" }]

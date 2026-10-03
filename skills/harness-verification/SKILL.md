@@ -74,7 +74,7 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
   (`parse_verdict`); an unreadable reply counts as incorrect. Prefer a judge profile
   different from the profile under test.
 
-## Phase 15c: per-feature validation (PLANNED)
+## Phase 15c: per-feature validation (implemented)
 
 - **Features in the plan:** `[[feature]]` entries in `examples/validation.toml`, each with
   `name`, `tests` (unit modules, e.g. `tests.test_guardrails`), `scenarios` (files under
@@ -96,3 +96,13 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
 - **Live entries for a feature:** they reuse the existing smoke and benchmark machinery
   (residency, gates, baselines). A feature with no live check simply has none; do not
   invent a live check that needs a paid service.
+- **Implementation notes:**
+  - `bench/features.py`: `parse_features`, `select_features`, `uncovered`.
+  - In `run_pipeline(features=...)`:
+    - The unit stage runs `python -m unittest MODULE ...` with `tests/` on `PYTHONPATH`.
+    - The scenarios stage passes the selected files to `agent-harness eval`.
+  - Feature `scenarios` are file stems; `calculator.toml` holds `calculator_multiplication`.
+  - App-backed scenarios use `evals.scenario_application`. Its `_ScenarioModel` adds
+    deterministic `embed()`, so hybrid memory works offline. Do not give `ScriptedModelClient`
+    itself an `embed()`; other tests rely on it lacking one.
+  - When adding a test module or scenario, add it to a `[[feature]]` in the same change.

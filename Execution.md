@@ -675,7 +675,14 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
 - **`agent-harness doctor --model-profile X`:** a live reachability and tool-call check
   against a real server.
 - **`agent-harness eval`:** runs scenario evaluations, scripted by default and live with
-  `--live`.
+  `--live`. It takes one or more files or directories.
+  - **Bare scenarios** run on an orchestrator with the config's tools.
+  - **Application-backed scenarios** (`config`, `[harness]`, `[workspace]`) go through
+    `scenario_application()`. It calls `build_application(config_overrides=..., model_resolver=...)`
+    in a temporary directory, so the run passes through the configured hooks, permission rules,
+    subagents, memory, skills, and tool sources with the scripted model.
+- **`scripts/validate.sh [feature ...]`:** runs `agent-harness-bench pipeline` for the named
+  `[[feature]]` entries, or all of them (`docs/VALIDATION.md`).
 
 ## 16. Programmatic usage
 

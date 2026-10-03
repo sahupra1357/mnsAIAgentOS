@@ -1,0 +1,18 @@
+# Feature: long-term memory. A note written with memory_write is found by memory_search.
+# Hybrid search, as in models.toml; scenarios embed with deterministic hashed-word vectors,
+# so no embedding server is needed (the live `memory` benchmark uses nomic-embed-text).
+name = "memory_roundtrip"
+config = "../../models.toml"
+prompt = "Remember that the staging database is called falcon-db, then look it up."
+approve = "allow"                 # memory_write is a side effect
+
+[[model]]
+tool_calls = [{ name = "memory_write", arguments = { text = "The staging database is called falcon-db.", tags = ["staging"] } }]
+[[model]]
+tool_calls = [{ name = "memory_search", arguments = { query = "staging database" } }]
+[[model]]
+content = "The staging database is falcon-db."
+
+[expect]
+tool_calls = ["memory_write", "memory_search"]
+output_contains = ["falcon-db"]

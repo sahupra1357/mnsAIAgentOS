@@ -449,20 +449,30 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
   each with its prerequisite. Planning stays a run mode (`--plan`).
   `tests/test_full_config.py` pins each feature on, checks every referenced path, and builds the app.
   Code defaults are unchanged.
-- **15c Per-feature validation** (`phase-15c-feature-validation`):
-  1. `[[feature]]` entries in `examples/validation.toml` give each feature its unit-test modules,
-     scenarios, and live smoke/benchmark entries.
-  2. `agent-harness-bench pipeline examples/validation.toml --feature guardrails` runs one feature
-     (repeat `--feature` for several), and with no `--feature` the pipeline runs everything (the master run).
-     `--offline` skips smoke and benchmarks.
-  3. `scripts/validate.sh [feature ...]` is a thin wrapper around that command. Results and the HTML report
-     go to `validation-results/` as before.
-  4. A unit test fails if any `tests/test_*.py` module is not assigned to a feature.
-  5. Scenarios get a `config` key (a path, e.g. `../../models.toml`) and an inline `[harness]` table, so
-     they can turn on hooks, permissions, agents, and so on.
-  6. New offline scenarios for features that have none yet: hooks, permissions, subagents, planning,
-     tasks, plan mode, rewind, memory, web_fetch (fake transport), dynamic tool loading, summarization,
-     instructions/skills/templates, redaction.
+- **15c Per-feature validation** (`phase-15c-feature-validation`) — implemented:
+  1. `[[feature]]` entries in `examples/validation.toml` (parsed by `bench/features.py`) give each
+     feature its `tests` (modules), `scenarios` (file stems in `examples/evals/`), `smoke` (profiles),
+     and `benchmarks` (names). The plan defines 14 features.
+  2. `agent-harness-bench pipeline PLAN --feature NAME` (repeatable) runs only those checks, and skips
+     the repo-wide static stage. `--offline` keeps static, unit, and scenarios.
+     `agent-harness-bench features PLAN` lists the features. Without `--feature` the master run is unchanged.
+  3. `scripts/validate.sh [feature ...] [--offline] [--list]` wraps the pipeline command;
+     `VALIDATION_PLAN` selects another plan.
+  4. `tests/test_feature_validation.py` fails when a test module, scripted scenario, smoke profile,
+     or benchmark is in no feature.
+  5. Application-backed scenarios:
+     - **Keys:** `config`, `[harness]` (merged with `load_config(overrides=)`), and `[workspace]`.
+     - **How they run:** `agent-harness eval` builds the app with
+       `build_application(config_overrides=, model_resolver=)`. The scripted model is
+       `_ScenarioModel`, which embeds with hashed-word vectors. Workspace and artifacts are temporary.
+     - **Bare-only keys:** `guardrails`, `orchestrator`, `interaction`, `ask_user`, and
+       `wait_seconds` are rejected next to `config`/`[harness]`.
+     - **Eval input:** `eval` takes several files.
+  6. 12 new app-backed scenarios: hooks, permission deny/ask, plan mode + snapshot, subagent, tasks,
+     memory, skills, dynamic tool loading, `ask_user`, output redaction.
+  7. The plan's live config is the root `models.toml`, with llama.cpp smoke and gsm8k/bfcl/guardrails/
+     humaneval/context/memory benchmarks. `[scenarios] config = "models.toml"` keeps bare scenarios
+     on `examples/models.toml`.
 - **15d OpenAI-compatible chat endpoint** (`phase-15d-openai-chat`): `GET /v1/models` (profiles and
   routes) and `POST /v1/chat/completions` (with `stream` as OpenAI SSE chunks) on `agent-harness serve`,
   so Open WebUI, LibreChat, Chatbox, AnythingLLM, Continue, and OpenAI SDKs can use the harness as a "model".

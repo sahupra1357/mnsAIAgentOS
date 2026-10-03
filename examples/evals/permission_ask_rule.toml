@@ -1,0 +1,19 @@
+# Feature: permission rules. `read_file(path=*.env)` is an ask rule, so reading a .env
+# file pauses for approval even though read_file is read-only; the reviewer denies it.
+name = "permission_ask_rule"
+config = "../../models.toml"
+prompt = "Show me the settings in prod.env."
+approve = "deny"
+
+[workspace]
+"prod.env" = "TOKEN=not-a-real-token"
+
+[[model]]
+tool_calls = [{ name = "read_file", arguments = { path = "prod.env" } }]
+[[model]]
+content = "Reading prod.env was not approved."
+
+[expect]
+tool_calls = ["read_file"]
+output_contains = ["not approved"]
+events_include = ["approval_requested", "approval_resolved"]

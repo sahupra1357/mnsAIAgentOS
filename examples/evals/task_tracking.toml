@@ -1,0 +1,16 @@
+# Feature: task tracking. todo_write stores the run's task list ([tasks] enabled).
+name = "task_tracking"
+config = "../../models.toml"
+prompt = "Plan the release checklist."
+
+[[model]]
+tool_calls = [{ name = "todo_write", arguments = { items = [
+  { id = "1", content = "Run the test suite", status = "completed" },
+  { id = "2", content = "Write release notes", status = "in_progress" },
+] } }]
+[[model]]
+content = "Tests are done; release notes are in progress."
+
+[expect]
+tool_calls = ["todo_write"]
+events_include = ["todos_updated"]

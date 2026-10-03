@@ -1339,6 +1339,22 @@ agent-harness-bench run --suite gsm8k --data datasets/gsm8k/test.jsonl --config 
 agent-harness-bench pipeline examples/validation.toml --update-baselines
 ```
 
+**Per-feature validation.** `scripts/validate.sh` is the master script. With no
+arguments it runs every stage for every feature. Name one or more features to run only
+their checks (unit-test modules, scenarios, smoke profiles, and benchmarks, as listed
+under `[[feature]]` in `examples/validation.toml`):
+
+```bash
+scripts/validate.sh --list                 # core, providers, context, guardrails, hooks-permissions, ...
+scripts/validate.sh                        # master: every feature, every stage (needs model servers)
+scripts/validate.sh guardrails             # one feature
+scripts/validate.sh memory tools --offline # several features, no model server
+```
+
+The live stages use the repository's `models.toml` (llama.cpp default). Start
+`llama-server`/the router (and Ollama for the `ollama` and `embed` profiles) first. See
+[docs/VALIDATION.md](docs/VALIDATION.md#per-feature-validation).
+
 ## Development
 
 Run the complete suite without network access:

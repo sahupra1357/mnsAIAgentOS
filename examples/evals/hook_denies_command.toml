@@ -1,0 +1,16 @@
+# Feature: hooks. The audit hook (examples/hooks/audit_hook.py) refuses a destructive
+# command; the model gets the refusal as the tool result and answers without running it.
+name = "hook_denies_command"
+config = "../../models.toml"
+prompt = "Delete the data directory."
+
+[[model]]
+tool_calls = [{ name = "run_command", arguments = { argv = ["/bin/rm", "-rf", "data"] } }]
+[[model]]
+content = "I was not allowed to delete it."
+
+[expect]
+tool_calls = ["run_command"]
+output_contains = ["not allowed"]
+event_payloads = [{ type = "hook_decided", hook_event = "pre_tool", decision = "deny" }]
+events_include = ["tool_responded"]

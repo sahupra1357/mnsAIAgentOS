@@ -1,0 +1,22 @@
+# Feature: subagents. The parent delegates to the `researcher` subagent from models.toml;
+# the child run answers and only its final answer returns to the parent.
+name = "subagent_delegation"
+config = "../../models.toml"
+prompt = "Find out where the release day is documented."
+
+[workspace]
+"docs/release.md" = "Releases happen on Fridays."
+
+[[model]]   # parent
+tool_calls = [{ name = "agent", arguments = { agent = "researcher", task = "Where is the release day documented?" } }]
+[[model]]   # child (researcher)
+tool_calls = [{ name = "search_files", arguments = { query = "Releases" } }]
+[[model]]   # child
+content = "docs/release.md: releases happen on Fridays."
+[[model]]   # parent
+content = "It is in docs/release.md: releases happen on Fridays."
+
+[expect]
+tool_calls = ["agent"]
+output_contains = ["docs/release.md"]
+events_include = ["subagent_started", "subagent_finished"]
