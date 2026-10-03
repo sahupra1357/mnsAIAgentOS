@@ -82,6 +82,10 @@ Layered settings (enterprise → user → project → local)
     ↓
 Environment overrides (AGENT_HARNESS_MODEL__*, AGENT_HARNESS_SET__SECTION__KEY)
     ↓
+Profiles: enabled = false removed; companions NAME.embed / NAME.guard added from
+embedding_model / guard_model; [memory] and [guardrails.model] default to the
+default profile's companions (one provider serves everything)
+    ↓
 Plugins, templates, skills
     ↓
 ModelGateway (Ollama, llama.cpp, Modal, OpenAI-compatible, LiteLLM)

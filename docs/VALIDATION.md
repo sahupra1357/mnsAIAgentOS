@@ -51,10 +51,14 @@ selects another plan; copy the `[[feature]]` entries into it first.
 
 Rules:
 - **Static is repo-wide.** A feature run skips it; the master run includes it.
-- **The live stages use the repository's `models.toml`.** It turns everything on, with
-  llama.cpp as the default profile. The smoke stage checks `llamacpp` and `ollama`; the
-  benchmarks run on `llamacpp`, and `memory` embeds with `embed` (Ollama
-  `nomic-embed-text`).
+- **The live stages use the repository's `models.toml` and follow its default profile.**
+  - **Entries:** smoke and benchmark entries have no `profile`, so they run on
+    `default_model_profile` (llama.cpp). `{profile}` in a baseline path keeps baselines per
+    provider.
+  - **Embeddings:** the `memory` benchmark embeds with that profile's own `embedding_model`.
+  - **Another provider:** validate it with
+    `AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh`.
+  - **Feature name:** the feature smoke name is `default`.
 - **`humaneval` needs Docker.**
 - **The llama.cpp server's context size must match `context_window` (16384).**
 - **Coverage is enforced.** `tests/test_feature_validation.py` fails when a

@@ -50,7 +50,7 @@ class CoverageTests(unittest.TestCase):
     def test_every_live_entry_is_in_a_feature(self) -> None:
         raw = plan()
         self.assertEqual(uncovered(self.features.values(), "smoke",
-                                   [str(e["profile"]) for e in raw.get("smoke", [])]), [])
+                                   [str(e.get("profile", "default")) for e in raw.get("smoke", [])]), [])
         self.assertEqual(uncovered(self.features.values(), "benchmarks",
                                    [str(e["name"]) for e in raw.get("benchmark", [])]), [])
 
@@ -66,7 +66,8 @@ class CoverageTests(unittest.TestCase):
         with mock.patch.dict("os.environ", HERMETIC):
             config = load_config(PLAN.parent / raw["pipeline"]["config"], environ={})
         for entry in [*raw.get("smoke", []), *raw.get("benchmark", [])]:
-            self.assertIn(entry["profile"], config.models, entry)
+            # No profile: the entry follows the config's default profile (Phase 16).
+            self.assertIn(entry.get("profile", config.default_model_profile), config.models, entry)
 
 
 class SelectionTests(unittest.TestCase):

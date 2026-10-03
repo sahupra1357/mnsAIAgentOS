@@ -674,10 +674,11 @@ class MemorySuite:
             store: Any = SQLiteMemoryStore(path, namespace="bench")
             try:
                 if mode != "keyword":
-                    profile = context.options.get("embedding_profile")
+                    # Default: the profile under test embeds with its own embedding_model.
+                    profile = context.options.get("embedding_profile") or context.embedding_profile
                     if not profile:
-                        raise BenchConfigError("memory: options.embedding_profile is required for "
-                                               f"search = {mode!r}")
+                        raise BenchConfigError("memory: options.embedding_profile (or embedding_model on "
+                                               f"the profile under test) is required for search = {mode!r}")
                     embed = getattr(context.models.resolve(str(profile)), "embed", None)
                     if not callable(embed):
                         raise BenchConfigError(f"memory: profile {profile!r} has no embeddings endpoint")

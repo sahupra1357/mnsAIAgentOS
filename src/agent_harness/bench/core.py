@@ -113,6 +113,8 @@ class BenchContext:
     options: Mapping[str, Any] = field(default_factory=dict)
     # Where run_agent writes each item's full run (messages, events) for debugging.
     transcripts: Path | None = None
+    # The embedding companion of the profile under test (``NAME.embed``), if it has one.
+    embedding_profile: str | None = None
 
     async def run_agent(
         self, messages: Sequence[Message], tools: ToolExecutor, *, budget: RunBudget | None = None

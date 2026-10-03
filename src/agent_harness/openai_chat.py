@@ -233,7 +233,7 @@ class OpenAIChat:
         self._poll = poll_seconds
 
     def models(self) -> dict[str, Any]:
-        names = [DEFAULT_MODEL_ALIAS, *self._config.models, *self._config.routes]
+        names = [DEFAULT_MODEL_ALIAS, *self._config.chat_models(), *self._config.routes]
         return {"object": "list", "data": [
             {"id": name, "object": "model", "created": 0, "owned_by": "agent-harness"} for name in names
         ]}

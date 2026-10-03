@@ -68,3 +68,10 @@ Document how callers select a profile and how another adapter can be registered.
   - **Unsupported:** Ollama, and SGLang on Modal. Setting `token_counting = "server"` there
     is a configuration error (`_counts_tokens`).
 - `token_counting` is hash-stable at its default (`HASH_OMIT_DEFAULT`).
+
+## Companion profiles (Phase 16)
+
+`ModelGateway.resolve("llamacpp.embed")` works like any profile: `load_config` adds companions to
+`config.models`. `OpenAICompatibleClient.embed()` sends `self._profile.model`, which for a companion
+is the embedding model, to the companion's endpoint. List user-facing profiles with
+`config.chat_models()`, never `config.models`.

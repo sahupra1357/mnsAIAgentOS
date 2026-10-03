@@ -27,7 +27,7 @@ from .domain import (
     ContentPart, HarnessError, Message, Role, RunBudget, RunQuery, RunRecord, RunStatus, StreamListener, utc_now,
 )
 from .model_gateway import ModelGateway, StdlibHttpTransport
-from .model_gateway.diagnostics import CheckStatus, diagnose
+from .model_gateway.diagnostics import CheckStatus, companion_checks, diagnose
 from .api import create_api
 from .instructions import resolve_path
 from .plugins import install_plugin, installed_plugins
@@ -518,12 +518,18 @@ async def _print_result(
 
 def _list_profiles(args: argparse.Namespace) -> int:
     config = load_config(args.config, layered=True)
-    for name, profile in config.models.items():
+    for name in config.chat_models():
+        profile = config.models[name]
         marker = " *" if name == config.default_model_profile else ""
         fallback = f" (fallback: {', '.join(profile.fallback)})" if profile.fallback else ""
         print(
             f"{name}{marker}: {profile.adapter} / {profile.model} @ {profile.endpoint}{fallback}"
         )
+        for kind in ("embed", "guard"):
+            companion = config.companion(name, kind)
+            if companion is not None:
+                served = config.models[companion]
+                print(f"  {kind}: {served.model} @ {served.endpoint}")
     for route, target in config.routes.items():
         marker = " *" if route == config.default_model_profile else ""
         print(f"route {route}{marker} -> {target}")
@@ -546,6 +552,7 @@ async def _doctor_command(args: argparse.Namespace) -> int:
         check_cache=not args.skip_cache,
         max_tokens=args.max_tokens,
     )
+    checks = [*checks, *await companion_checks(config, profile, ModelGateway(config, transport=transport))]
     for check in checks:
         print(f"[{check.status.value.upper():>4}] {check.name}: {check.detail}")
     failing = {CheckStatus.FAIL, CheckStatus.WARN} if args.strict else {CheckStatus.FAIL}

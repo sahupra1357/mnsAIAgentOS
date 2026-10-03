@@ -10,6 +10,7 @@ import json
 import time
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from agent_harness.domain import FinishReason, HarnessError, Message, ModelClient, ModelRequest, Role, ToolSpec
 
@@ -290,3 +291,31 @@ def _cache_report_hint(client: ModelClient) -> str:
 def _brief(error: BaseException) -> str:
     text = str(error) or type(error).__name__
     return text[:300]
+
+
+async def companion_checks(config: Any, profile: str, models: Any) -> list[DiagnosticCheck]:
+    """Phase 16: the same provider's embedding and guard models (``NAME.embed`` / ``NAME.guard``)."""
+
+    checks: list[DiagnosticCheck] = []
+    embed_name = config.companion(profile, "embed")
+    if embed_name is not None:
+        served = config.models[embed_name]
+        try:
+            vectors = await models.resolve(embed_name).embed(["agent harness embedding check"])
+            dims = len(vectors[0]) if vectors else 0
+            checks.append(DiagnosticCheck("embeddings", CheckStatus.OK if dims else CheckStatus.FAIL,
+                                          f"{served.model}: {dims} dimensions"))
+        except Exception as exc:  # noqa: BLE001 - every failure is reported, none raised
+            checks.append(DiagnosticCheck("embeddings", CheckStatus.FAIL, f"{served.model}: {_brief(exc)}"))
+    guard_name = config.companion(profile, "guard")
+    if guard_name is not None:
+        served = config.models[guard_name]
+        try:
+            response = await models.resolve(guard_name).complete(ModelRequest(
+                messages=(Message(Role.USER, "Hello"),), max_output_tokens=32))
+            verdict = (response.content or "").strip().splitlines()[:1]
+            checks.append(DiagnosticCheck("guard model", CheckStatus.OK,
+                                          f"{served.model} answered {verdict[0][:40]!r}" if verdict else served.model))
+        except Exception as exc:  # noqa: BLE001
+            checks.append(DiagnosticCheck("guard model", CheckStatus.FAIL, f"{served.model}: {_brief(exc)}"))
+    return checks
