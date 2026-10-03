@@ -433,16 +433,22 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
      `AGENT_HARNESS_MODEL__NAME__ENABLED=false`). It is removed at load, routes to it are
      dropped, and fallback chains skip it (`HarnessConfig.disabled_models`). The switch is
      not a `ModelProfile` field, so profile hashes do not change.
-- **15b Full-feature config** (`phase-15b-full-config`): add `examples/full.toml` (and a root `models.toml`
-  with the same content) that turns on every feature that works without outside services: guardrails
-  (heuristics), hooks (stdlib audit hook in `examples/hooks/`), permission rules, agents + subagents, tasks,
-  `ask_user`, approval deadlines, instructions, skills, templates, summarization + `[context]`, `web_fetch`,
-  dynamic tool loading, hybrid memory (`embed` profile), planning available via `--plan`, coding,
-  `network` egress allowlist, redaction, quotas, rate limits, artifacts.
-  Some features stay off until their prerequisite exists, with a comment: `web_search` (needs
-  `TAVILY_API_KEY`), `[[mcp_servers]]` (needs a server), model guard (needs `llama-guard3`), notifications
-  (needs a webhook URL), Postgres, LiteLLM. Coding uses `execution_runtime = "docker"` and so needs Docker.
-  A test loads `examples/full.toml` and checks that every section in it parses.
+- **15b Full-feature config** (`phase-15b-full-config`) — implemented: the repository's root `models.toml`
+  turns on every feature that needs nothing outside the harness. It is the file `agent-harness` finds
+  from the repository root. Relative paths point into `examples/`: `hooks/audit_hook.py`, `agents/`,
+  `skills/`, `templates/`, `tools/`. It covers:
+  - profiles: llama.cpp default, Ollama fallback, `embed`; Modal and Llama Guard off via `enabled = false`
+  - guardrails with taint mode, two audit hooks, permission rules, `ask_user` and deadlines, tasks
+  - three subagents, instructions, skills, templates
+  - summarization and `[context]`
+  - python and http tool sources, `web_fetch`, `web_search` (needs `TAVILY_API_KEY` at call time),
+    hybrid memory, artifacts, dynamic tool loading
+  - coding in a `per_run` Docker container (`python:3.12`, which has git)
+  - egress allowlist, redaction, quotas, API rate limit and CORS
+  API keys, webhooks, MCP, the guard model, and Postgres are commented out at the end of the file,
+  each with its prerequisite. Planning stays a run mode (`--plan`).
+  `tests/test_full_config.py` pins each feature on, checks every referenced path, and builds the app.
+  Code defaults are unchanged.
 - **15c Per-feature validation** (`phase-15c-feature-validation`):
   1. `[[feature]]` entries in `examples/validation.toml` give each feature its unit-test modules,
      scenarios, and live smoke/benchmark entries.
@@ -452,7 +458,7 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
   3. `scripts/validate.sh [feature ...]` is a thin wrapper around that command. Results and the HTML report
      go to `validation-results/` as before.
   4. A unit test fails if any `tests/test_*.py` module is not assigned to a feature.
-  5. Scenarios get a `config` key (a path, e.g. `../full.toml`) and an inline `[harness]` table, so
+  5. Scenarios get a `config` key (a path, e.g. `../../models.toml`) and an inline `[harness]` table, so
      they can turn on hooks, permissions, agents, and so on.
   6. New offline scenarios for features that have none yet: hooks, permissions, subagents, planning,
      tasks, plan mode, rewind, memory, web_fetch (fake transport), dynamic tool loading, summarization,

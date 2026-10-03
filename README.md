@@ -58,7 +58,7 @@ override it. In `chat`, each message continues the same durable run; approvals a
 `ask_user` questions are asked inline; `/new`, `/status`, `/help`, and `/exit` are chat
 commands, and any other `/name` expands a prompt template. Each message gets
 `--max-steps` (20) more steps and `--max-wall-seconds` (300) more seconds.
-For everything turned on at once, start from `examples/full.toml` (Phase 15b).
+The repository's own `models.toml` turns every feature on (see "Everything On" below).
 
 List the configured profiles:
 
@@ -85,6 +85,45 @@ Resume an interrupted run:
   --database agent-harness.sqlite3 \
   RUN_ID
 ```
+
+## Everything On (`models.toml`)
+
+The code defaults keep every optional feature off, for these reasons:
+- **Side effects.** Coding tools write files and hooks run programs.
+- **Cost.** Summaries, guard models, and subagents each make extra model calls.
+- **Outside services.** Docker, a Tavily key, an embedding model, and MCP servers are needed by some features.
+- **Behaviour changes.** Guardrails can refuse, and permission rules pause runs.
+- **Stable hashes.** Defaults feed the version hashes and the prompt prefix.
+
+The repository's `models.toml` opts into all of them, so `agent-harness` run from the
+repository root starts with everything on:
+
+| On | Section |
+|----|---------|
+| llama.cpp default, Ollama fallback, `embed` profile; Modal and Llama Guard switched off (`enabled = false`) | `[models.*]`, `[routes]` |
+| Coding tools in a warm per-run Docker container (`python:3.12`, has git) | `[coding]`, `[coding.docker]` |
+| Permission rules, an audit hook (`examples/hooks/audit_hook.py`), `ask_user`, approval and question deadlines, task list | `[permissions]`, `[[hooks]]`, `[interaction]`, `[tasks]` |
+| Three subagents (`examples/agents/`), nesting depth 2 | `[[agents]]`, `[subagents]` |
+| Instruction files, skills (`examples/skills/`), templates (`examples/templates/`) | `[instructions]`, `[skills]`, `[templates]` |
+| Summarization, context policy | `[summarization]`, `[context]` |
+| Python and HTTP tool sources, `web_fetch`, `web_search`, hybrid memory, artifacts, dynamic tool loading | `[[tools]]`, `[web_fetch]`, `[web_search]`, `[memory]`, `[artifacts]`, `[tool_loading]` |
+| Guardrails with taint mode | `[guardrails]` |
+| Egress allowlist, redaction, tenant and user quotas, API rate limit and CORS | `[network]`, `[redaction]`, `[[quotas]]`, `[user_quotas]`, `[api]` |
+
+Some features need something the harness cannot provide. They are at the end of the
+file, commented out, each with what it needs:
+- per-tenant API keys
+- webhooks
+- MCP servers (Node.js)
+- the Llama Guard classifier
+- Postgres
+
+`web_search` is on but needs `TAVILY_API_KEY` at call time. `agent-harness config show`
+prints every value and the file it came from. `tests/test_full_config.py` checks that
+every listed feature stays on and every path in the file exists.
+
+Turn a feature off by editing its section, or for one process with
+`AGENT_HARNESS_SET__SECTION__KEY=value`, e.g. `AGENT_HARNESS_SET__GUARDRAILS__ENABLED=false`.
 
 ## Pointing at Different Models
 

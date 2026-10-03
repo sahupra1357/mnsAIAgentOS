@@ -1,0 +1,348 @@
+# Agent harness: every feature turned on (Phase 15b).
+#
+# `agent-harness` with no --config finds this file when run from the repository
+# root (see README "Quick Start"). Relative paths below resolve against this file's
+# directory. Features that need something outside the harness are listed at the end,
+# with what they need; they stay off until you provide it.
+#
+#   agent-harness                      # interactive chat on the default profile
+#   agent-harness "Explain src/agent_harness/repl.py"
+#   agent-harness profiles             # which profiles are on
+#   agent-harness config show          # every value below and where it came from
+#   scripts/validate.sh                # validate every feature (offline + live)
+#
+# The code defaults are deliberately off (opt-in); this file is how you opt in.
+
+default_model_profile = "llamacpp"
+
+# Capability routes: use a route name anywhere a profile name is accepted. A route to a
+# disabled profile is dropped (here `strong` disappears while modal is disabled).
+[routes]
+fast = "llamacpp"
+strong = "modal"
+local = "ollama"
+
+# --- Model profiles -------------------------------------------------------------
+# Switch a profile on or off with `enabled` (or AGENT_HARNESS_MODEL__NAME__ENABLED).
+
+# llama.cpp router: `llama serve --models-preset ... --port 9931 --jinja`.
+# Plain single-model server: `llama-server -m model.gguf --jinja -c 16384 --port 8080`
+# with endpoint http://127.0.0.1:8080/v1 and context_window = 16384.
+[models.llamacpp]
+enabled = true
+adapter = "llama_cpp"
+model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
+endpoint = "http://127.0.0.1:9931/v1"
+context_window = 16384           # keep equal to the server's context size for this model
+token_counting = "server"
+timeout_seconds = 600
+max_retries = 1
+fallback = ["ollama"]            # used only after llama.cpp's retries are exhausted
+
+[models.llamacpp.parameters]
+temperature = 0.2
+max_tokens = 2048
+
+# Ollama: `ollama serve`, then `ollama pull qwen2.5-coder:7b`.
+[models.ollama]
+enabled = true
+adapter = "ollama"
+model = "qwen2.5-coder:7b"
+endpoint = "http://127.0.0.1:11434/v1"
+api_mode = "native"              # sends context_window as num_ctx
+context_window = 8192
+timeout_seconds = 180
+max_retries = 1
+
+[models.ollama.parameters]
+temperature = 0.2
+num_predict = 1024
+
+# Embeddings for [memory] search = "hybrid": `ollama pull nomic-embed-text`.
+[models.embed]
+enabled = true
+adapter = "ollama"
+model = "nomic-embed-text"
+endpoint = "http://127.0.0.1:11434/v1"
+timeout_seconds = 60
+
+# Modal (vLLM or SGLang): needs MODAL_LLM_API_KEY, MODAL_PROXY_TOKEN_ID and
+# MODAL_PROXY_TOKEN_SECRET, and your workspace in the endpoint. Then enable it.
+[models.modal]
+enabled = false
+adapter = "modal"
+server = "vllm"
+model = "Qwen/Qwen2.5-7B-Instruct"
+endpoint = "https://WORKSPACE--agent-harness-vllm-serve.modal.run/v1"
+api_key_env = "MODAL_LLM_API_KEY"
+timeout_seconds = 120
+cold_start_timeout_seconds = 600
+max_retries = 1
+context_window = 32768
+token_counting = "server"
+fallback = ["llamacpp"]
+
+[models.modal.headers_env]
+Modal-Key = "MODAL_PROXY_TOKEN_ID"
+Modal-Secret = "MODAL_PROXY_TOKEN_SECRET"
+
+[models.modal.parameters]
+temperature = 0.2
+max_tokens = 1024
+
+# Llama Guard 3 for [guardrails.model]: `ollama pull llama-guard3:1b`, then enable it
+# and set [guardrails.model] profile = "guard".
+[models.guard]
+enabled = false
+adapter = "ollama"
+model = "llama-guard3:1b"
+endpoint = "http://127.0.0.1:11434/v1"
+timeout_seconds = 60
+
+[models.guard.parameters]
+max_tokens = 32
+
+# --- Orchestrator and context ---------------------------------------------------
+[orchestrator]
+max_model_attempts = 3
+max_tool_attempts = 3
+max_identical_tool_calls = 5
+max_refused_repeats = 2
+max_tool_calls_per_turn = 32
+context_overflow_retries = 2
+context_overflow_shrink = 0.5
+
+[context]
+chars_per_token = 3.0            # code and JSON use more tokens per character
+high_water_ratio = 0.85
+low_water_ratio = 0.60
+max_tool_output_chars = 16000
+
+# Summarize older turns instead of only dropping them (profiles with context_window).
+[summarization]
+enabled = true
+max_output_tokens = 1024
+
+# --- Coding tools (Docker sandbox) ----------------------------------------------
+# Needs a running Docker daemon. python:3.12 (not -slim) includes git.
+[coding]
+enabled = true
+workspace = "."
+execution_runtime = "docker"
+approval_mode = "side_effects"   # pause before writes and commands
+command_timeout_seconds = 120
+enable_git_commit = true
+enable_pull_requests = false
+
+[coding.docker]
+image = "python:3.12"
+mode = "per_run"                 # one warm container per run, removed when it ends
+network_enabled = false
+cpus = 2.0
+memory = "2g"
+
+# --- Permissions, hooks, interaction --------------------------------------------
+[permissions]
+mode = "default"                 # default | accept_edits | plan | bypass
+allow = ["read_file", "search_files", "git_status", "git_diff", "run_tests",
+         "run_command(argv.0=pytest)"]
+ask = ["read_file(path=*.env)"]
+deny = ["run_command(argv.0=rm)", "run_command(argv.0=sudo)", "git_*(force=true)"]
+edit_tools = ["apply_patch"]
+
+[[hooks]]
+name = "audit-pre-tool"
+event = "pre_tool"
+matcher = "*"
+command = ["python3", "examples/hooks/audit_hook.py"]
+timeout_seconds = 10
+
+[[hooks]]
+name = "audit-post-tool"
+event = "post_tool"
+matcher = "*"
+command = ["python3", "examples/hooks/audit_hook.py"]
+timeout_seconds = 10
+
+[interaction]
+ask_user = true                  # the model may ask you a clarifying question
+approval_timeout_seconds = 3600  # unanswered approvals and questions are resolved
+question_timeout_seconds = 3600  #   after an hour by workers / `agent-harness expire`
+on_timeout = "deny"
+
+[tasks]
+enabled = true                   # todo_write task list, shown by `status`
+
+# --- Subagents and planning -----------------------------------------------------
+[subagents]
+max_depth = 2
+max_per_run = 6
+
+[[agents]]
+name = "researcher"
+description = "Answers one question about the codebase by searching and reading files. Read-only."
+prompt_file = "examples/agents/researcher.md"
+tools = ["read_file", "search_files", "search_documentation"]
+max_steps = 12
+
+[[agents]]
+name = "reviewer"
+description = "Reviews the current uncommitted changes and reports real problems, most severe first. Read-only."
+prompt_file = "examples/agents/reviewer.md"
+tools = ["git_status", "git_diff", "read_file", "search_files"]
+max_steps = 12
+
+[[agents]]
+name = "test-runner"
+description = "Runs the test suite and explains any failures with their likely cause. Cannot edit files."
+prompt_file = "examples/agents/test-runner.md"
+tools = ["run_tests", "read_file", "search_files"]
+max_steps = 8
+
+# Plan-and-execute is a run mode, not a tool: `agent-harness run --plan "..."` (or
+# `chat --plan`). enabled = true would plan every run, which is slow for chat.
+[planning]
+enabled = false
+max_plan_steps = 20
+max_replans = 2
+
+# --- Instructions, skills, templates, plugins -----------------------------------
+[instructions]
+enabled = true
+files = ["~/.agent-harness/AGENTS.md", "AGENTS.md"]
+subdirectories = true
+
+[skills]
+enabled = true
+paths = ["examples/skills"]
+
+[templates]
+paths = ["examples/templates"]   # /review FILE, /explain TOPIC
+
+[plugins]
+directory = ".agent-harness/plugins"
+enabled = []                     # `agent-harness plugin install DIR`, then list it here
+
+# --- Tools: sources, web, memory, artifacts, dynamic loading --------------------
+[[tools]]
+name = "text-tools"
+kind = "python"
+module = "example_tools:register"
+path = "examples/tools"
+
+# Declarative HTTP tool; its output is untrusted data (guardrails taint mode applies).
+[[tools]]
+name = "github_repo"
+kind = "http"
+method = "GET"
+url = "https://api.github.com/repos/octocat/hello-world"
+description = "Fetch public metadata of the example GitHub repository."
+input_schema = { type = "object", properties = {} }
+
+[web_fetch]
+enabled = true
+max_chars = 20000
+
+# Tavily web search. The key is read from TAVILY_API_KEY at call time; without it the
+# tool returns an error to the model. `agent-harness tools disable web_search` hides it.
+[web_search]
+enabled = true
+api_key_env = "TAVILY_API_KEY"
+max_results = 5
+
+[memory]
+enabled = true
+namespace = "default"
+search = "hybrid"                # keyword + embeddings (falls back to keyword if Ollama is down)
+embedding_profile = "embed"
+
+[artifacts]
+enabled = true                   # large tool outputs are stored outside the history
+directory = ".agent-harness/artifacts"
+threshold_bytes = 16384
+
+# Offer a core set plus search_tools / load_tools; the rest are loaded on demand.
+# Orchestrator tools (agent, ask_user, todo_write, plan tools) are always offered.
+[tool_loading]
+mode = "dynamic"
+core = ["read_file", "search_files", "search_documentation", "apply_patch", "run_tests",
+        "run_command", "git_status", "git_diff", "memory_search", "memory_write",
+        "load_skill", "web_fetch"]
+max_loaded = 30
+search_limit = 8
+
+# --- Guardrails -----------------------------------------------------------------
+[guardrails]
+enabled = true
+refusal_message = "I can't help with that request."
+
+[guardrails.input]
+injection = "block"
+prompt_extraction = "block"
+hidden_characters = "redact"
+encoded_payloads = "block"
+pii = "allow"
+
+[guardrails.output]
+canary = "block"
+secrets = "redact"
+pii = "redact"
+
+[guardrails.tools]
+injection = "redact"
+taint = true                     # side-effect tools need approval after untrusted output
+
+# --- Network, redaction, quotas, API --------------------------------------------
+# Egress allowlist for HTTP tools, web search, web_fetch, and MCP over HTTP (not for
+# model endpoints). Add the hosts you want web_fetch to reach.
+[network]
+restrict_egress = true
+allowed_hosts = ["api.tavily.com", "api.github.com", "github.com", "raw.githubusercontent.com",
+                 "docs.python.org", "pypi.org", "en.wikipedia.org"]
+
+[redaction]
+enabled = true
+
+[[quotas]]
+tenant = "default"
+max_runs_per_day = 500
+max_tokens_per_day = 5000000
+max_concurrent_runs = 8
+
+[user_quotas]
+max_runs_per_day = 200
+max_concurrent_runs = 4
+
+[api]
+cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8080"]
+rate_limit_per_minute = 240
+rate_limit_burst = 40
+
+# --- Needs something outside the harness (off until you provide it) ------------
+# Per-tenant API keys (the key lives in the environment, at least 16 characters):
+# [[api.keys]]
+# name = "me"
+# tenant = "default"
+# role = "admin"
+# key_env = "AGENT_HARNESS_API_KEY"
+#
+# Webhooks when runs pause or finish:
+# [notifications]
+# webhook_url = "https://hooks.example.com/agent-harness"
+# secret_env = "AGENT_HARNESS_WEBHOOK_SECRET"
+#
+# MCP server over stdio (needs Node.js / npx):
+# [[mcp_servers]]
+# name = "filesystem"
+# command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "./docs"]
+# read_only = ["read_file", "read_text_file", "list_directory", "search_files", "get_file_info"]
+# sync_on_start = true
+#
+# Llama Guard classifier (enable [models.guard] first):
+# [guardrails.model]
+# profile = "guard"
+# check = ["input", "output"]
+#
+# Postgres storage (needs the [postgres] extra and a server):
+# [storage]
+# url_env = "AGENT_HARNESS_DATABASE_URL"

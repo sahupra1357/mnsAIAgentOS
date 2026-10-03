@@ -14,3 +14,7 @@ build/
 .ruff_cache/
 validation-results/
 bench-results/
+
+# Local harness state (hook audit log, artifacts, installed plugins)
+.agent-harness/
+.DS_Store
