@@ -1,0 +1,19 @@
+# Feature: dynamic tool loading. word_count is not in the core set; the model finds it
+# with search_tools, loads it with load_tools, then calls it.
+name = "dynamic_tool_loading"
+config = "../../models.toml"
+prompt = "How many words are in 'one two three'?"
+
+[[model]]
+tool_calls = [{ name = "search_tools", arguments = { query = "count words" } }]
+[[model]]
+tool_calls = [{ name = "load_tools", arguments = { names = ["word_count"] } }]
+[[model]]
+tool_calls = [{ name = "word_count", arguments = { text = "one two three" } }]
+[[model]]
+content = "There are 3 words."
+
+[expect]
+tool_calls = ["search_tools", "load_tools", "word_count"]
+output_contains = ["3 words"]
+events_include = ["tools_loaded"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import tempfile
@@ -10,6 +11,7 @@ from collections import deque
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from agent_harness import cli
 from agent_harness.api import HarnessAPI
@@ -35,7 +37,7 @@ from agent_harness.domain import (
     ToolRisk,
     ToolSpec,
 )
-from agent_harness.evals import Scenario, ScenarioError, load_scenarios, run_scenario
+from agent_harness.evals import Scenario, ScenarioError, load_scenarios, run_scenario, scenario_application
 from agent_harness.memory import (
     MEMORY_SEARCH_SPEC,
     MEMORY_WRITE_SPEC,
@@ -291,10 +293,16 @@ class CompositionTests(unittest.IsolatedAsyncioTestCase):
 
 class EvalTests(unittest.IsolatedAsyncioTestCase):
     async def test_example_scenarios_pass_scripted_and_live_ones_skip(self) -> None:
-        results = {
-            scenario.name: await run_scenario(scenario, tools=create_default_runtime())
-            for scenario in load_scenarios(EXAMPLES)
-        }
+        # Application-backed scenarios (Phase 15c) get the factory `agent-harness eval` uses.
+        factory = functools.partial(scenario_application, default_config=EXAMPLES.parent / "models.toml")
+        with mock.patch.dict("os.environ", {
+            "AGENT_HARNESS_USER_SETTINGS": "/nonexistent/settings.toml",
+            "AGENT_HARNESS_ENTERPRISE_SETTINGS": "/nonexistent/enterprise.toml",
+        }):
+            results = {
+                scenario.name: await run_scenario(scenario, tools=create_default_runtime(), app_factory=factory)
+                for scenario in load_scenarios(EXAMPLES)
+            }
         self.assertEqual(results["live_multiplication"].outcome, "skip")
         for name, result in results.items():
             if name != "live_multiplication":
@@ -382,7 +390,10 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
             with redirect_stdout(out), redirect_stderr(err):
                 code = cli.main(["eval", "--config", str(config), str(EXAMPLES), "--report", str(report)])
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(report.read_text())["summary"], {"pass": 10, "fail": 0, "skip": 1})  # every scripted example passes
+            scripted = sum(s.scripted is not None for s in load_scenarios(EXAMPLES))
+            # every scripted example passes (live-only ones skip)
+            self.assertEqual(json.loads(report.read_text())["summary"],
+                             {"pass": scripted, "fail": 0, "skip": len(load_scenarios(EXAMPLES)) - scripted})
             self.assertIn("[PASS] calculator_multiplication", out.getvalue())
 
             failing = Path(directory, "failing.toml")

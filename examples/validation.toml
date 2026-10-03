@@ -1,15 +1,26 @@
 # Validation pipeline plan: agent-harness-bench pipeline examples/validation.toml
 # Paths are relative to this file. Replace the sample datasets with the public
 # datasets you download (see docs/VALIDATION.md) and raise `limit`.
+#
+# Master run (every feature):   scripts/validate.sh
+# One or more features:         scripts/validate.sh guardrails memory
+# Without model servers:        scripts/validate.sh --offline
+# List the features:            scripts/validate.sh --list
+# The [[feature]] entries at the end map each feature to its unit-test modules,
+# scenarios, smoke profiles, and benchmarks (tests/test_feature_validation.py checks
+# that every test module and scenario belongs to a feature).
 
 [pipeline]
-config = "models.toml"            # harness model configuration
+config = "../models.toml"         # the repository's full-feature config (llama.cpp default)
 repo = ".."                       # repository root (static/unit stages)
 output_dir = "../validation-results"
 # Stage order: static, unit, scenarios, smoke, benchmarks, gates
 
 [scenarios]
 path = "evals"                    # offline scripted scenarios
+# Bare scenarios (no `config` key) use this config's tools (the calculator lives here);
+# application-backed scenarios name ../../models.toml themselves.
+config = "models.toml"
 
 # Ollama and llama.cpp on one machine share GPU memory. With this on, large models on
 # the other local server are unloaded before each local profile runs, and restored
@@ -19,6 +30,11 @@ path = "evals"                    # offline scripted scenarios
 # min_params_b = 20
 
 [[smoke]]                         # live: `agent-harness doctor` per profile
+profile = "llamacpp"              # the default profile
+skip_cache = false
+max_tokens = 512                  # thinking models (Qwen3) need room before answering
+
+[[smoke]]
 profile = "ollama"
 skip_cache = true
 
@@ -45,6 +61,88 @@ baseline = "../baselines/bfcl-ollama.json"
 [benchmark.thresholds]
 max_accuracy_drop = 0.05
 
+[[benchmark]]
+name = "gsm8k-llamacpp"
+suite = "gsm8k"
+data = "bench/gsm8k_sample.jsonl"
+profile = "llamacpp"
+limit = 3
+concurrency = 1
+max_steps = 8
+baseline = "../baselines/gsm8k-llamacpp.json"
+[benchmark.thresholds]
+max_accuracy_drop = 0.03
+max_error_rate = 0.10
+
+[[benchmark]]
+name = "bfcl-llamacpp"
+suite = "bfcl"
+data = "bench/bfcl_sample.json"
+answers = "bench/bfcl_sample_answers.json"
+profile = "llamacpp"
+baseline = "../baselines/bfcl-llamacpp.json"
+[benchmark.thresholds]
+max_accuracy_drop = 0.05
+
+# Guardrails red-team set (heuristics only, no model call; add `options = { model_guard = true }`
+# and enable [models.guard] in models.toml to include the Llama Guard classifier).
+[[benchmark]]
+name = "guardrails"
+suite = "guardrails"
+data = "bench/guardrails_sample.jsonl"
+profile = "llamacpp"
+baseline = "../baselines/guardrails.json"
+[benchmark.thresholds]
+max_accuracy_drop = 0.0
+
+# Coding path: generated code runs in Docker without network (needs a Docker daemon).
+[[benchmark]]
+name = "humaneval-llamacpp"
+suite = "humaneval"
+data = "bench/humaneval_sample.jsonl"
+profile = "llamacpp"
+limit = 3
+max_steps = 6
+baseline = "../baselines/humaneval-llamacpp.json"
+[benchmark.thresholds]
+max_error_rate = 0.34
+
+# Context handling past the window: filler (JSON, code, prose) overflows the profile's
+# context_window (16384 in models.toml), exercising trimming, server token counting
+# (context_capped), and overflow recovery. Raise `turns` if all three counts stay 0.
+[[benchmark]]
+name = "context-llamacpp"
+suite = "context"
+data = "bench/context_sample.jsonl"
+profile = "llamacpp"
+limit = 3
+concurrency = 1
+max_steps = 3
+[benchmark.options]
+turns = 48
+chars_per_turn = 1500
+[benchmark.thresholds]
+min_accuracy = 0.66
+max_error_rate = 0.34
+
+# Long-term memory: notes are saved, embedded with the `embed` profile
+# (ollama pull nomic-embed-text), and found by memory_search with different wording.
+[[benchmark]]
+name = "memory-llamacpp"
+suite = "memory"
+data = "bench/memory_sample.jsonl"
+profile = "llamacpp"
+limit = 3
+concurrency = 1
+max_steps = 6
+[benchmark.options]
+search = "hybrid"
+embedding_profile = "embed"
+[benchmark.thresholds]
+min_accuracy = 0.66
+max_error_rate = 0.34
+
+# --- Earlier examples, kept for reference (enable any by removing the comments) ------
 # Guardrails red-team set (no model needed; add `options = { model_guard = true }` and a
 # guard profile such as llama-guard3 to include the classifier). See docs/GUARDRAILS.md.
 # [[benchmark]]
@@ -98,3 +196,99 @@ max_accuracy_drop = 0.05
 # [benchmark.thresholds]
 # min_accuracy = 0.66
 # max_error_rate = 0.34
+
+# --- Features ----------------------------------------------------------------------
+# `--feature NAME` runs only that feature's checks; without it every check runs.
+
+[[feature]]
+name = "core"
+description = "Agent loop, durable state, retries, budgets, runaway guards, tool runtime"
+tests = ["test_orchestrator", "test_config", "test_durability", "test_reliability", "test_runaway_guards",
+         "test_persistence", "test_store_conformance", "test_tools"]
+scenarios = ["calculator", "transient_model_failure", "unknown_tool_recovery",
+             "repeated_call_refusal", "tool_calls_per_reply"]
+benchmarks = ["gsm8k-llamacpp", "gsm8k-ollama"]
+
+[[feature]]
+name = "providers"
+description = "Model gateway and adapters: llama.cpp, Ollama, Modal, LiteLLM, reasoning, gateway options"
+tests = ["test_model_gateway", "test_providers", "test_gateway_ops", "test_litellm", "test_reasoning"]
+smoke = ["llamacpp", "ollama"]
+benchmarks = ["bfcl-llamacpp", "bfcl-ollama"]
+
+[[feature]]
+name = "context"
+description = "Context window: trimming, summarization, server token counts, overflow recovery, limits"
+tests = ["test_context", "test_summarization", "test_phase13_limits", "test_phase14"]
+scenarios = ["context_overflow_recovery"]
+benchmarks = ["context-llamacpp"]
+
+[[feature]]
+name = "guardrails"
+description = "Input, output, and tool-output guards; taint mode; red-team set"
+tests = ["test_guardrails"]
+scenarios = ["guardrail_refusal", "output_secret_redacted"]
+benchmarks = ["guardrails"]
+
+[[feature]]
+name = "hooks-permissions"
+description = "Command hooks, permission rules and modes, plan mode"
+tests = ["test_hooks_permissions"]
+scenarios = ["full_config_read_with_hooks", "hook_denies_command", "permission_deny_rule",
+             "permission_ask_rule", "plan_mode_then_edit"]
+
+[[feature]]
+name = "interaction"
+description = "Conversations, steering, ask_user, deadlines, structured output, CLI defaults and chat"
+tests = ["test_conversation", "test_ask_user", "test_structured_output", "test_cli_defaults"]
+scenarios = ["ask_user", "question_deadline", "structured_output", "ask_user_full_config"]
+
+[[feature]]
+name = "subagents-planning"
+description = "Subagents, task lists, plans, plan-and-execute, parallel delegation"
+tests = ["test_subagents_tasks", "test_planning_delegation", "test_example_subagents"]
+scenarios = ["subagent_delegation", "task_tracking"]
+
+[[feature]]
+name = "extensibility"
+description = "Instruction files, skills, templates, layered settings, plugins, rewind, full config"
+tests = ["test_instructions_settings_plugins", "test_instruction_discovery", "test_rewind",
+         "test_full_config"]
+scenarios = ["skill_loading", "plan_mode_then_edit"]
+
+[[feature]]
+name = "tools"
+description = "Tool catalog, python/http sources, MCP, web_fetch, web_search, dynamic tool loading"
+tests = ["test_tool_platform", "test_phase14"]
+scenarios = ["dynamic_tool_loading"]
+
+[[feature]]
+name = "memory"
+description = "Artifacts, long-term memory (keyword, semantic, hybrid), memory backends"
+tests = ["test_artifacts_memory_evals", "test_memory_backends", "test_phase14"]
+scenarios = ["memory_roundtrip"]
+benchmarks = ["memory-llamacpp"]
+
+[[feature]]
+name = "coding"
+description = "Workspace-safe coding tools, Docker sandbox, warm per-run containers, rewind"
+tests = ["test_coding", "test_sandbox_containers", "test_rewind"]
+scenarios = ["plan_mode_then_edit"]
+benchmarks = ["humaneval-llamacpp"]
+
+[[feature]]
+name = "api-workers"
+description = "HTTP API, chat API, OpenAI-compatible endpoint, web UI, workers, run listing, telemetry"
+tests = ["test_api_workers", "test_chat_api", "test_worker_reliability", "test_run_listing",
+         "test_observability"]
+
+[[feature]]
+name = "production"
+description = "Migrations, Postgres, tenancy, quotas, secrets, egress, redaction, retention"
+tests = ["test_production_hardening", "test_quota_enforcement", "test_store_conformance"]
+
+[[feature]]
+name = "validation"
+description = "Benchmarks, pipeline, residency, live-check suites, feature coverage"
+tests = ["test_bench", "test_pipeline_observability", "test_residency", "test_live_check_suites",
+         "test_feature_validation"]

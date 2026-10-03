@@ -41,16 +41,37 @@ A scenario is a TOML file::
 A scripted ``[[model]]`` entry may also be ``error = "context_overflow"`` (the server
 rejects the request as too long).
 
+Scenarios that need a fully configured application (hooks, permission rules,
+subagents, memory, skills, tool sources, ...) name a config file and/or an inline
+``[harness]`` table, merged over it (Phase 15c)::
+
+    config = "../../models.toml"      # relative to the scenario; default: the eval's --config
+    [harness.permissions]             # merged over the config, tables key by key
+    deny = ["read_file(path=*.env)"]
+    [workspace]                       # files created in a fresh temporary coding workspace
+    "README.md" = "hello"
+
+The application is built by ``agent-harness eval`` with the scripted model injected
+(``build_application(model_resolver=...)``), so these scenarios stay network-free.
+The coding workspace and artifacts always live in a temporary directory. Put
+guardrails, orchestrator, interaction, and ``ask_user`` settings in ``[harness]``;
+``wait_seconds`` is not available (the application uses the real clock).
+
 Scenarios with ``[[model]]`` entries run scripted (network-free) unless live
 mode is requested; scenarios without them run only in live mode.
 """
 
 from __future__ import annotations
 
+import hashlib
+import math
+import re
+import tempfile
 import time
 import tomllib
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import timedelta
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -80,7 +101,9 @@ from agent_harness.persistence import InMemoryRunStore
 
 _TOP_LEVEL = {"name", "prompt", "system", "model_profile", "approve", "budget", "model", "expect",
               "output_schema", "answers", "guardrails", "orchestrator", "interaction", "ask_user",
-              "wait_seconds"}
+              "wait_seconds", "config", "harness", "workspace"}
+# Scenario keys that configure a bare orchestrator; with config/[harness] they go in [harness].
+_BARE_ONLY = {"guardrails", "orchestrator", "interaction", "ask_user", "wait_seconds"}
 _EXPECT = {
     "status", "tool_calls", "output_contains", "output_not_contains",
     "max_steps", "events_include", "error_contains", "result", "event_payloads",
@@ -124,6 +147,14 @@ class Scenario:
     interaction: dict[str, Any] = field(default_factory=dict)
     ask_user: bool = False
     wait_seconds: float = 0.0
+    # Application-backed scenarios (Phase 15c).
+    config: Path | None = None
+    harness: dict[str, Any] = field(default_factory=dict)
+    workspace: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def uses_app(self) -> bool:
+        return self.config is not None or bool(self.harness) or bool(self.workspace)
 
 
 @dataclass(slots=True)
@@ -203,6 +234,12 @@ def _load_scenario(file: Path) -> Scenario:
     wait = raw.get("wait_seconds", 0)
     if isinstance(wait, bool) or not isinstance(wait, (int, float)) or wait < 0:
         raise ScenarioError(f"{file}: wait_seconds must be a non-negative number")
+    config, harness, workspace = _application_fields(file, raw)
+    if (config is not None or harness or workspace) and _BARE_ONLY & set(raw):
+        raise ScenarioError(
+            f"{file}: with config/[harness], put {', '.join(sorted(_BARE_ONLY & set(raw)))} in [harness]"
+            + (" (wait_seconds is not available)" if "wait_seconds" in raw else "")
+        )
     return Scenario(
         name=str(raw.get("name") or file.stem),
         prompt=prompt,
@@ -220,7 +257,73 @@ def _load_scenario(file: Path) -> Scenario:
         interaction=_interaction(file, raw.get("interaction")),
         ask_user=ask_user,
         wait_seconds=float(wait),
+        config=config,
+        harness=harness,
+        workspace=workspace,
     )
+
+
+def _application_fields(file: Path, raw: dict[str, Any]) -> tuple[Path | None, dict[str, Any], dict[str, str]]:
+    config = raw.get("config")
+    if config is not None:
+        if not isinstance(config, str) or not config:
+            raise ScenarioError(f"{file}: config must be a path string")
+        resolved = (file.parent / config).resolve()
+        if not resolved.is_file():
+            raise ScenarioError(f"{file}: config {config!r} not found")
+        config = resolved
+    harness = raw.get("harness", {})
+    if not isinstance(harness, dict):
+        raise ScenarioError(f"{file}: harness must be a table")
+    workspace = raw.get("workspace", {})
+    if not isinstance(workspace, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in workspace.items()
+    ):
+        raise ScenarioError(f"{file}: workspace must map relative file paths to text")
+    for name in workspace:
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise ScenarioError(f"{file}: workspace path {name!r} must be relative, without '..'")
+    return config, harness, dict(workspace)
+
+
+AppFactory = Callable[["Scenario", "ModelResolver | None"], AbstractAsyncContextManager[Any]]
+
+
+@asynccontextmanager
+async def scenario_application(
+    scenario: Scenario, models: ModelResolver | None, *, default_config: Path
+) -> AsyncIterator[Any]:
+    """Build the application an application-backed scenario runs in.
+
+    ``models`` (the scripted resolver) replaces the model gateway; ``None`` keeps the
+    configured gateway (live mode). The coding workspace, artifacts, and databases
+    live in a temporary directory that is removed afterwards.
+    """
+
+    from agent_harness.application import build_application
+    from agent_harness.config import merge_tables
+
+    with tempfile.TemporaryDirectory(prefix="agent-harness-scenario-") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        for name, text in scenario.workspace.items():
+            target = workspace / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        overrides = merge_tables(scenario.harness, {
+            "coding": {"workspace": str(workspace)},
+            "artifacts": {"directory": str(root / "artifacts")},
+        })
+        app = build_application(
+            config_path=scenario.config or default_config,
+            database_path=root / "runs.sqlite3",
+            config_overrides=overrides,
+            model_resolver=models,
+        )
+        async with app:
+            yield app
 
 
 def _settings(file: Path, raw: Any) -> OrchestratorSettings | None:
@@ -316,6 +419,24 @@ def _expectations(file: Path, raw: Any) -> Expectations:
     )
 
 
+class _ScenarioModel(ScriptedModelClient):
+    """Scripted completions plus deterministic local embeddings (hashed words), so
+    hybrid memory works in network-free scenarios."""
+
+    dimensions = 64
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        vectors = []
+        for text in texts:
+            vector = [0.0] * self.dimensions
+            for word in re.findall(r"[a-z0-9]+", text.lower()):
+                digest = hashlib.sha256(word.encode()).digest()
+                vector[int.from_bytes(digest[:4], "big") % self.dimensions] += 1.0
+            norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+            vectors.append([value / norm for value in vector])
+        return vectors
+
+
 class _FixedResolver:
     def __init__(self, client: ScriptedModelClient) -> None:
         self._client = client
@@ -332,8 +453,13 @@ async def run_scenario(
     live_profile: Callable[[str | None], str] | None = None,
     context: ContextBuilder | None = None,
     settings: OrchestratorSettings | None = None,
+    app_factory: AppFactory | None = None,
 ) -> ScenarioResult:
-    """Run one scenario. Live mode is used when ``live_models`` is given."""
+    """Run one scenario. Live mode is used when ``live_models`` is given.
+
+    Application-backed scenarios (``config`` / ``[harness]`` / ``[workspace]``) need
+    ``app_factory`` (``agent-harness eval`` passes :func:`scenario_application`).
+    """
 
     live = live_models is not None
     if not live and scenario.scripted is None:
@@ -343,8 +469,24 @@ async def run_scenario(
         models: ModelResolver = live_models  # type: ignore[assignment]
         profile = live_profile(scenario.model_profile)
     else:
-        models = _FixedResolver(ScriptedModelClient(scenario.scripted or ()))
+        models = _FixedResolver(_ScenarioModel(scenario.scripted or ()))
         profile = "scripted"
+    mode = "live" if live else "scripted"
+    if scenario.uses_app:
+        if app_factory is None:
+            return ScenarioResult(scenario.name, "skip", ["needs an application (run with agent-harness eval)"],
+                                  mode=mode)
+        started = time.monotonic()
+        try:
+            async with app_factory(scenario, None if live else models) as app:
+                if not live:
+                    profile = app.config.resolve_model_name(scenario.model_profile)
+                return await _execute(scenario, app.orchestrator, app.store, profile, None, mode)
+        except Exception as exc:  # noqa: BLE001 - a configuration error is a scenario failure
+            result = ScenarioResult(scenario.name, "fail", mode=mode)
+            result.failures.append(f"application failed: {type(exc).__name__}: {exc}")
+            result.duration_seconds = time.monotonic() - started
+            return result
     store = InMemoryRunStore()
     guardrails = (Guardrails(scenario.guardrails, models=models)
                   if scenario.guardrails is not None and scenario.guardrails.enabled else None)
@@ -355,11 +497,18 @@ async def run_scenario(
         ask_user=bool(scenario.answers) or scenario.ask_user, guardrails=guardrails,
         **scenario.interaction,
     )
+    return await _execute(scenario, orchestrator, store, profile, now, mode)
+
+
+async def _execute(
+    scenario: Scenario, orchestrator: AgentOrchestrator, store: Any, profile: str,
+    now: list[Any] | None, mode: str,
+) -> ScenarioResult:
     messages = [Message(role=Role.USER, content=scenario.prompt)]
     if scenario.system:
         messages.insert(0, Message(role=Role.SYSTEM, content=scenario.system))
     started = time.monotonic()
-    result = ScenarioResult(scenario.name, "fail", mode="live" if live else "scripted")
+    result = ScenarioResult(scenario.name, "fail", mode=mode)
     try:
         run = await orchestrator.create_run(
             model_profile=profile, messages=messages, budget=scenario.budget,
@@ -373,7 +522,7 @@ async def run_scenario(
             pending = await orchestrator.pending_approval(run.id)
             if pending is None:
                 break
-            if scenario.wait_seconds and not waited:
+            if scenario.wait_seconds and not waited and now is not None:
                 waited = True
                 now[0] += timedelta(seconds=scenario.wait_seconds)
                 if await orchestrator.expire_pending_input():

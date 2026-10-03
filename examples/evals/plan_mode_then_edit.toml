@@ -1,0 +1,27 @@
+# Feature: plan mode and rewind snapshots. In plan mode only read-only tools run; the model
+# presents a plan with exit_plan, the reviewer approves, and the edit that follows is
+# snapshotted first (file_snapshot) so it can be rewound.
+name = "plan_mode_then_edit"
+config = "../../models.toml"
+prompt = "Change the greeting in hello.txt to 'Hello, Falcon'."
+approve = "allow"
+
+[harness.permissions]
+mode = "plan"
+
+[workspace]
+"hello.txt" = "Hello, world"
+
+[[model]]
+tool_calls = [{ name = "read_file", arguments = { path = "hello.txt" } }]
+[[model]]
+tool_calls = [{ name = "exit_plan", arguments = { plan = "Replace 'world' with 'Falcon' in hello.txt." } }]
+[[model]]
+tool_calls = [{ name = "apply_patch", arguments = { path = "hello.txt", old_text = "world", new_text = "Falcon" } }]
+[[model]]
+content = "hello.txt now says Hello, Falcon."
+
+[expect]
+tool_calls = ["read_file", "exit_plan", "apply_patch"]
+output_contains = ["Hello, Falcon"]
+events_include = ["mode_changed", "file_snapshot"]

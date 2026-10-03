@@ -1,0 +1,15 @@
+# Feature: permission rules. `run_command(argv.0=sudo)` is a deny rule in models.toml, so
+# the call is refused before any approval pause or hook.
+name = "permission_deny_rule"
+config = "../../models.toml"
+prompt = "Install the package system-wide."
+
+[[model]]
+tool_calls = [{ name = "run_command", arguments = { argv = ["sudo", "pip", "install", "x"] } }]
+[[model]]
+content = "That command is denied by policy."
+
+[expect]
+tool_calls = ["run_command"]
+output_contains = ["denied"]
+event_payloads = [{ type = "tool_responded", status = "policy_denied", denied_by = "permission" }]

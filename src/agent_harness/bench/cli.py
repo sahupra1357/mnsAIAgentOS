@@ -5,6 +5,8 @@
         --model-profile ollama --limit 200 --concurrency 2 --out results/gsm8k-ollama
     agent-harness-bench compare results/gsm8k-ollama/report.json --baseline baselines/gsm8k.json
     agent-harness-bench pipeline validation.toml [--stages unit,benchmarks,gates]
+    agent-harness-bench pipeline validation.toml --feature guardrails [--offline]
+    agent-harness-bench features validation.toml
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from agent_harness.model_gateway import ModelGateway
 from .compare import Thresholds, compare_reports
 from .core import BenchConfigError, BenchContext, ExecutionFactory, ItemResult
 from .data import DatasetError, file_sha256
+from .features import FeatureSelection, parse_features, select_features
 from .history import finish_run, latest_run, run_directory
 from .html_report import BenchmarkEntry, write_html_report
 from .residency import ResidencyHttp, ResidencyManager, ResidencyPolicy
@@ -46,6 +49,8 @@ from .runner import build_report, run_benchmark
 from .suites import SUITES
 
 ALL_STAGES = ("static", "unit", "scenarios", "smoke", "benchmarks", "gates")
+# Stages that need no model server (--offline keeps only these).
+OFFLINE_STAGES = ("static", "unit", "scenarios")
 
 
 @dataclass(slots=True)
@@ -206,6 +211,7 @@ async def run_pipeline(
     on_progress: Callable[[str], None] | None = None,
     telemetry_path: Path | None = None,
     resume: bool = False,
+    features: Sequence[str] = (),
 ) -> list[StageResult]:
     """Run the plan's stages into a new timestamped folder, ``<output_dir>/runs/<time>``.
 
@@ -213,6 +219,10 @@ async def run_pipeline(
     ``latest.txt`` names the newest. ``resume`` continues the latest run's folder (an
     interrupted run; items recorded as error/failed are re-run), and a gates-only run
     re-gates the latest run. ``[pipeline] keep_runs = N`` keeps only the newest N runs.
+
+    ``features`` limits every stage to those ``[[feature]]`` entries' checks (unit-test
+    modules, scenarios, smoke profiles, benchmarks); the repo-wide static stage is
+    skipped then. Without ``features`` every check runs (the master validation).
     """
     base = plan_path.parent
     try:
@@ -220,9 +230,14 @@ async def run_pipeline(
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise BenchConfigError(f"could not read pipeline plan {plan_path}: {exc}") from exc
     settings = plan.get("pipeline", {})
-    unknown = set(plan) - {"pipeline", "scenarios", "smoke", "benchmark", "residency"}
+    unknown = set(plan) - {"pipeline", "scenarios", "smoke", "benchmark", "residency", "feature"}
     if unknown:
         raise BenchConfigError(f"unknown sections in pipeline plan: {sorted(unknown)}")
+    selection: FeatureSelection | None = (
+        select_features(parse_features(plan), features) if features else None
+    )
+    if selection is None:
+        parse_features(plan)  # validated even when every check runs
     config = base / settings.get("config", "models.toml")
     repo = base / settings.get("repo", ".")
     root = base / settings.get("output_dir", "validation-results")
@@ -286,7 +301,9 @@ async def run_pipeline(
             if stage not in ALL_STAGES:
                 raise BenchConfigError(f"unknown stage {stage!r}; choose from {ALL_STAGES}")
             announce(f"== {stage}")
-            if stage == "static":
+            if stage == "static" and selection is not None:
+                add(StageResult("static", "skip", "repo-wide; not part of a feature run"))
+            elif stage == "static":
                 checks = [("compileall", [python, "-m", "compileall", "-q", "src", "tests"])]
                 for tool in ("ruff", "mypy"):
                     if shutil.which(tool):
@@ -298,21 +315,45 @@ async def run_pipeline(
                 for name, argv in checks:
                     ok, detail = _run_command(argv, cwd=repo, env={**env, "MYPYPATH": str(src)})
                     add(StageResult(f"static:{name}", "pass" if ok else "fail", detail))
+            elif stage == "unit" and selection is not None:
+                if not selection.tests:
+                    add(StageResult(f"unit:{selection.label}", "skip", "no unit-test modules listed"))
+                    continue
+                # Modules by name, imported from tests/ (as `discover -s tests` would).
+                unit_env = {**hermetic, "PYTHONPATH": os.pathsep.join(
+                    filter(None, [str(repo / "tests"), hermetic.get("PYTHONPATH")]))}
+                ok, detail = _run_command(
+                    [python, "-m", "unittest", *selection.tests], cwd=repo, env=unit_env
+                )
+                add(StageResult(f"unit:{selection.label}", "pass" if ok else "fail", detail))
             elif stage == "unit":
                 ok, detail = _run_command(
                     [python, "-m", "unittest", "discover", "-s", "tests"], cwd=repo, env=hermetic
                 )
                 add(StageResult("unit", "pass" if ok else "fail", detail))
             elif stage == "scenarios":
-                path = base / plan.get("scenarios", {}).get("path", "examples/evals")
+                scenario_plan = plan.get("scenarios", {})
+                path = base / scenario_plan.get("path", "examples/evals")
+                # Bare scenarios use this config's tools; application-backed ones name their own.
+                scenario_config = base / scenario_plan["config"] if "config" in scenario_plan else config
+                targets = [str(path)]
+                name = "scenarios"
+                if selection is not None:
+                    name = f"scenarios:{selection.label}"
+                    targets = [str(path / f"{scenario}.toml") for scenario in selection.scenarios]
+                    if not targets:
+                        add(StageResult(name, "skip", "no scenarios listed"))
+                        continue
                 ok, detail = _run_command(
-                    [python, "-m", "agent_harness", "eval", "--config", str(config), str(path),
+                    [python, "-m", "agent_harness", "eval", "--config", str(scenario_config), *targets,
                      "--report", str(output_dir / "scenarios.json")],
                     cwd=repo, env=hermetic,
                 )
-                add(StageResult("scenarios", "pass" if ok else "fail", detail))
+                add(StageResult(name, "pass" if ok else "fail", detail))
             elif stage == "smoke":
                 entries = plan.get("smoke", [])
+                if selection is not None:
+                    entries = [e for e in entries if str(e.get("profile")) in selection.smoke]
                 if not entries:
                     add(StageResult("smoke", "skip", "no [[smoke]] entries"))
                 for entry in entries:
@@ -331,7 +372,7 @@ async def run_pipeline(
                     ok, detail = _run_command(argv, cwd=repo, env=env)
                     add(StageResult(f"smoke:{entry['profile']}", "pass" if ok else "fail", detail))
             elif stage == "benchmarks":
-                entries = plan.get("benchmark", [])
+                entries = _selected_benchmarks(plan, selection)
                 if not entries:
                     add(StageResult("benchmarks", "skip", "no [[benchmark]] entries"))
                 for entry in entries:
@@ -352,7 +393,7 @@ async def run_pipeline(
                     ))
             elif stage == "gates":
                 if not reports:
-                    for entry in plan.get("benchmark", []):
+                    for entry in _selected_benchmarks(plan, selection):
                         spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
                         report_path = (spec.out or output_dir) / "report.json"
                         if report_path.exists():
@@ -384,6 +425,19 @@ async def run_pipeline(
                                                                             output_dir), telemetry_path)
     finish_run(root, output_dir, keep_runs=keep_runs)
     return results
+
+
+def _selected_benchmarks(
+    plan: Mapping[str, Any], selection: FeatureSelection | None
+) -> list[dict[str, Any]]:
+    entries = list(plan.get("benchmark", []))
+    if selection is None:
+        return entries
+    return [
+        entry for entry in entries
+        if str(entry.get("name") or f"{entry.get('suite')}-{entry.get('profile', 'default')}")
+        in selection.benchmarks
+    ]
 
 
 def _report_entries(
@@ -520,6 +574,13 @@ def _parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--stages", help=f"comma-separated subset of {','.join(ALL_STAGES)}")
     pipeline.add_argument("--update-baselines", action="store_true",
                           help="save reports as baselines when gates pass (or no baseline exists)")
+    pipeline.add_argument("--feature", action="append", default=[], metavar="NAME",
+                          help="validate only this [[feature]] (repeatable); default: every feature")
+    pipeline.add_argument("--offline", action="store_true",
+                          help=f"only the stages that need no model server ({','.join(OFFLINE_STAGES)})")
+
+    features = commands.add_parser("features", help="list the [[feature]] entries of a plan file")
+    features.add_argument("plan", type=Path)
     return parser
 
 
@@ -568,8 +629,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             for line in gate.lines():
                 print(line)
             return 0 if gate.passed else 1
+        if args.command == "features":
+            try:
+                plan = tomllib.loads(args.plan.read_text(encoding="utf-8"))
+            except tomllib.TOMLDecodeError as exc:
+                raise BenchConfigError(f"could not read pipeline plan {args.plan}: {exc}") from exc
+            for feature in parse_features(plan).values():
+                counts = (f"{len(feature.tests)} test modules, {len(feature.scenarios)} scenarios, "
+                          f"{len(feature.smoke)} smoke, {len(feature.benchmarks)} benchmarks")
+                print(f"{feature.name:20} {feature.description}  [{counts}]")
+            return 0
         if args.command == "pipeline":
             stages = tuple(s.strip() for s in args.stages.split(",")) if args.stages else ALL_STAGES
+            if args.offline:
+                stages = tuple(stage for stage in stages if stage in OFFLINE_STAGES)
             def show(result: StageResult) -> None:
                 print(f"[{result.status.upper():>4}] {result.stage}: {result.detail}", flush=True)
 
@@ -579,7 +652,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             results = asyncio.run(run_pipeline(
                 args.plan, stages=stages, update_baselines=args.update_baselines, on_result=show,
                 on_progress=None if args.quiet else progress, telemetry_path=args.telemetry_file,
-                resume=args.resume,
+                resume=args.resume, features=args.feature,
             ))
             failed = [r for r in results if r.status == "fail"]
             print(f"stages: {len(results) - len(failed)} ok, {len(failed)} failed", file=sys.stderr)
