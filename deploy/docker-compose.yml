@@ -1,6 +1,9 @@
 # Postgres, the HTTP API, and two queue workers.
 #   cp deploy/.env.example deploy/.env   # then set real values
 #   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up --build
+# The built-in web chat is at http://localhost:8000/ui (enter an API key in its settings).
+# Optional Open WebUI on http://localhost:3000, talking to the harness's /v1 endpoint:
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile chat up --build
 services:
   postgres:
     image: postgres:16
@@ -53,6 +56,23 @@ services:
     deploy:
       replicas: 2
 
+  open-webui:
+    # Any OpenAI-compatible chat UI works; this one is optional (`--profile chat`).
+    image: ghcr.io/open-webui/open-webui:main
+    profiles: ["chat"]
+    environment:
+      OPENAI_API_BASE_URL: http://api:8000/v1
+      OPENAI_API_KEY: ${AGENT_HARNESS_TEAM_A_KEY:?set AGENT_HARNESS_TEAM_A_KEY}
+      ENABLE_OLLAMA_API: "false"
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - "3000:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   pgdata:
   harness-data:
+  open-webui:

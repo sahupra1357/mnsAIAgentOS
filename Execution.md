@@ -681,6 +681,10 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
     reply: newest answer, or pause_text(pending)
     save_conversation(digest of messages + reply, run_id)
     ```
+- **Web chat:** `GET /ui` serves `src/agent_harness/ui/index.html` (no key needed for the page;
+  every call it makes is authenticated). It drives the same endpoints: `POST /runs`,
+  `GET /runs/{id}/stream` (read with `fetch`, so the bearer header is sent), `/messages`,
+  `/approval`, `/answer`, `/usage`, `/events`, `/cancel`, `/steer`.
 - **Queue workers:** `agent-harness worker` claims queued runs with leases, so several
   workers can share one database. On Postgres the claim uses `FOR UPDATE SKIP LOCKED` and
   workers can run on many hosts. An expired lease makes the run available to

@@ -11,6 +11,7 @@ Endpoints (all JSON; every route except ``/healthz`` and ``/readyz`` requires
 a principal with a tenant and a role (viewer < operator < admin; see
 ``agent_harness.access``); a principal sees only its tenant's runs:
 
+    GET  /ui                        built-in web chat (static page; it calls the API with your key)
     GET  /healthz                   liveness
     GET  /readyz                    store reachable, schema version
     GET  /profiles
@@ -51,6 +52,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
+import importlib.resources
 import json
 import math
 import re
@@ -232,6 +235,13 @@ class HarnessAPI:
         path = scope["path"]
         if path == "/healthz" and method == "GET":
             await _json(send, 200, {"ok": True})
+            return
+        if path in {"/ui", "/ui/"} and method == "GET":
+            await _send_ui(send)  # a static page; every API call it makes is authenticated
+            return
+        if path == "/" and method == "GET":
+            await send({"type": "http.response.start", "status": 307, "headers": [(b"location", b"/ui")]})
+            await send({"type": "http.response.body", "body": b""})
             return
         if path == "/readyz" and method == "GET":
             await self._ready(send)
@@ -924,6 +934,27 @@ def _header(scope: Scope, name: bytes) -> str | None:
         if key.lower() == name:
             return bytes(value).decode("latin-1")
     return None
+
+
+_UI_CSP = (
+    b"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
+    b"img-src 'self' data: https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
+
+@functools.cache
+def _ui_page() -> bytes:
+    return importlib.resources.files("agent_harness").joinpath("ui/index.html").read_bytes()
+
+
+async def _send_ui(send: Send) -> None:
+    body = _ui_page()
+    await send({"type": "http.response.start", "status": 200, "headers": [
+        (b"content-type", b"text/html; charset=utf-8"), (b"cache-control", b"no-cache"),
+        (b"content-length", str(len(body)).encode()), (b"content-security-policy", _UI_CSP),
+        (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"),
+    ]})
+    await send({"type": "http.response.body", "body": body})
 
 
 def _with_cors(send: Send, origin: str) -> Send:

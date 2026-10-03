@@ -279,7 +279,7 @@ benchmarks = ["humaneval-llamacpp"]
 [[feature]]
 name = "api-workers"
 description = "HTTP API, chat API, OpenAI-compatible endpoint, web UI, workers, run listing, telemetry"
-tests = ["test_api_workers", "test_chat_api", "test_openai_chat", "test_worker_reliability",
+tests = ["test_api_workers", "test_chat_api", "test_openai_chat", "test_web_ui", "test_worker_reliability",
          "test_run_listing", "test_observability"]
 
 [[feature]]
