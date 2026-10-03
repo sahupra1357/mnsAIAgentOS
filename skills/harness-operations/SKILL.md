@@ -204,7 +204,7 @@ the feature is not configured.
 - **Search:** `semantic` uses cosine similarity; `hybrid` uses reciprocal rank fusion with
   the keyword results. An embedding outage falls back to keyword search.
 
-## Phase 15d–e: chat clients and web UI (15d implemented; 15e planned)
+## Phase 15d–e: chat clients and web UI (implemented)
 
 - **OpenAI-compatible surface** (`api.py`, same server and auth):
   - `GET /v1/models` lists profiles and routes.
@@ -239,3 +239,11 @@ the feature is not configured.
   - **Live check:** an end-to-end smoke (uvicorn plus a fake OpenAI-compatible server that
     streams SSE) kept 3 turns on one run.
   - **Workers:** `Worker` re-enqueues a run that was reopened while it still held the queue row.
+- **15e as built:**
+  - **Page:** `ui/index.html` is served by `_send_ui` in `api.py`. `_ui_page` is
+    `functools.cache`d, so restart `serve` after editing it.
+  - **Rendering:** DOM building with `textContent` only. Code fences become `<pre>` and
+    backticks become `<code>`.
+  - **Events:** `addEvent` skips indexes already shown, because the stream and refresh overlap.
+  - **Checks:** `tests/test_web_ui.py` verifies that the page only calls existing `/runs`
+    and `/profiles` paths and loads nothing from external hosts.

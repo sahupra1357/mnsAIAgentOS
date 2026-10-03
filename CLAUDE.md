@@ -488,10 +488,19 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
     worker's queue release was dropped from the queue. `Worker._requeue_if_reopened` puts it back.
   - **Tests:** `tests/test_openai_chat.py` (8 cases with in-process workers), a store conformance
     case, and a worker regression test.
-- **15e Built-in web UI** (`phase-15e-web-ui`): `GET /ui` serves one static HTML/JS page from the package
-  (no npm, no build step) that uses the existing API: run list, chat with live stream, approve/deny,
-  `ask_user` answers, plan/todo panel, usage, and events. Also add an optional Open WebUI service
-  to `deploy/` compose pointed at `/v1` (15d).
+- **15e Built-in web UI** (`phase-15e-web-ui`) — implemented. `GET /ui` (and `/` → 307 `/ui`) serves
+  `src/agent_harness/ui/index.html`:
+  - **Packaging:** vanilla JS, no build step. It ships as `[tool.setuptools.package-data]` and
+    is read with `importlib.resources` and cached per process (restart `serve` after editing it).
+  - **Headers:** CSP `default-src 'none'; connect-src 'self'; frame-ancestors 'none'`.
+  - **Key handling:** the key is entered in the page and kept in `sessionStorage` (`localStorage`
+    only if "remember" is ticked).
+  - **What it uses:** only existing endpoints; streams are read with `fetch` so the bearer header
+    is sent. It never uses `innerHTML` for model text.
+  - **Compose:** `deploy/docker-compose.yml` has an optional `open-webui` service (`--profile chat`)
+    pointed at `/v1`.
+  - **Tests:** `tests/test_web_ui.py`. The page was also checked in a headless browser against a
+    live server: chat, follow-up turns, budget panel, events, and mobile layout.
 
 ## Validation
 

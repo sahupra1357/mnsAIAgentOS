@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Harness</title>
+<style>
+:root {
+  --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
+  --accent: #2f5d50; --accent-ink: #ffffff; --user: #e9efe9; --warn: #8a5a00; --warn-bg: #fff6df;
+  --bad: #9b2c2c; --bad-bg: #fdecec; --ok: #2f6b3b; --code: #f0efea;
+  --radius: 10px; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151614; --panel: #1d1f1c; --ink: #e8e8e3; --muted: #9a9b94; --line: #30322e;
+    --accent: #7fb8a4; --accent-ink: #10201a; --user: #243029; --warn: #f0c46a; --warn-bg: #2d2615;
+    --bad: #f0a0a0; --bad-bg: #3a1f1f; --ok: #8fd19e; --code: #262824;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #151614; --panel: #1d1f1c; --ink: #e8e8e3; --muted: #9a9b94; --line: #30322e;
+  --accent: #7fb8a4; --accent-ink: #10201a; --user: #243029; --warn: #f0c46a; --warn-bg: #2d2615;
+  --bad: #f0a0a0; --bad-bg: #3a1f1f; --ok: #8fd19e; --code: #262824;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 12px; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+input, select, textarea { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+.app { display: grid; grid-template-columns: 260px 1fr 300px; height: 100vh; }
+aside, .details { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.details { border-right: 0; border-left: 1px solid var(--line); }
+.brand { padding: 14px 16px; font-weight: 650; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); }
+.brand small { color: var(--muted); font-weight: 400; }
+.side-actions { padding: 12px 16px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
+.runs { overflow-y: auto; flex: 1; padding: 6px 8px; }
+.run-item { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 8px 10px; border-radius: 8px; margin: 2px 0; }
+.run-item:hover { background: var(--bg); }
+.run-item.active { background: var(--user); }
+.run-item .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-item .meta { color: var(--muted); font-size: 12px; }
+main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.topbar { padding: 10px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; min-height: 52px; }
+.topbar .run-title { font-weight: 600; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.chat { flex: 1; overflow-y: auto; padding: 24px max(20px, calc(50% - 400px)); }
+.msg { margin: 0 0 18px; display: flex; }
+.msg .bubble { padding: 10px 14px; border-radius: var(--radius); max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.user { justify-content: flex-end; }
+.msg.user .bubble { background: var(--user); max-width: 80%; }
+.msg.assistant .bubble { background: transparent; padding-left: 0; padding-right: 0; }
+.msg .bubble pre { background: var(--code); padding: 10px 12px; border-radius: 8px; overflow-x: auto; white-space: pre; font: 13px/1.45 var(--mono); }
+.msg .bubble code { font: 13px var(--mono); background: var(--code); padding: 1px 4px; border-radius: 4px; }
+.reasoning { color: var(--muted); font-size: 13px; border-left: 3px solid var(--line); padding-left: 10px; margin-bottom: 6px; white-space: pre-wrap; }
+.card { border: 1px solid var(--line); background: var(--warn-bg); border-radius: var(--radius); padding: 12px 14px; margin: 0 0 18px; }
+.card h4 { margin: 0 0 6px; color: var(--warn); font-size: 14px; }
+.card pre { background: var(--panel); padding: 8px 10px; border-radius: 8px; overflow-x: auto; font: 12px/1.45 var(--mono); margin: 6px 0; }
+.card .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.card input { flex: 1; min-width: 160px; }
+.notice { color: var(--muted); text-align: center; margin: 60px 0; }
+.error { background: var(--bad-bg); color: var(--bad); padding: 8px 12px; border-radius: 8px; margin: 0 20px 10px; }
+.composer { border-top: 1px solid var(--line); padding: 12px max(20px, calc(50% - 400px)) 16px; display: flex; gap: 10px; align-items: flex-end; }
+.composer textarea { flex: 1; resize: none; min-height: 44px; max-height: 220px; }
+.details .section { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.details h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 13px; overflow-wrap: anywhere; }
+.kv span:nth-child(odd) { color: var(--muted); }
+.meter { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin: 3px 0 8px; }
+.meter > div { height: 100%; background: var(--accent); }
+.list { margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.list li { padding: 2px 0; }
+.events { overflow-y: auto; flex: 1; font: 12px/1.4 var(--mono); padding: 8px 16px; }
+.events div { padding: 2px 0; border-bottom: 1px dashed var(--line); overflow-wrap: anywhere; }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.badge.completed { color: var(--ok); } .badge.failed, .badge.cancelled { color: var(--bad); }
+.badge.awaiting_input { color: var(--warn); } .badge.running, .badge.queued { color: var(--accent); }
+dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--ink); padding: 20px; width: min(460px, 92vw); }
+dialog::backdrop { background: rgb(0 0 0 / .35); }
+dialog label { display: grid; gap: 4px; margin: 10px 0; font-size: 13px; color: var(--muted); }
+.hide-wide { display: none; }
+@media (max-width: 1100px) { .app { grid-template-columns: 240px 1fr; } .details { display: none; } }
+@media (max-width: 720px) {
+  .app { grid-template-columns: 1fr; } aside { display: none; } .hide-wide { display: inline-block; } aside.open { display: flex; position: fixed; inset: 0 25% 0 0; z-index: 5; }
+  .chat, .composer { padding-left: 16px; padding-right: 16px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside id="sidebar">
+    <div class="brand">Agent Harness <small id="conn">offline</small></div>
+    <div class="side-actions">
+      <button class="primary" id="new-chat">New chat</button>
+      <select id="profile" title="Model profile or route"></select>
+    </div>
+    <div class="runs" id="runs"></div>
+    <div class="side-actions"><button id="open-settings">Settings</button></div>
+  </aside>
+  <main>
+    <div class="topbar">
+      <button id="toggle-sidebar" class="hide-wide" title="Runs" aria-label="Runs">☰</button>
+      <div class="run-title" id="run-title">New chat</div>
+      <span class="badge" id="run-status" hidden></span>
+      <button class="danger" id="stop" hidden>Stop</button>
+    </div>
+    <div class="chat" id="chat"><div class="notice">Start a conversation below.</div></div>
+    <div id="error" class="error" hidden></div>
+    <form class="composer" id="composer">
+      <textarea id="input" rows="1" placeholder="Message the agent" title="Enter sends; Shift+Enter adds a new line"></textarea>
+      <button class="primary" id="send" type="submit">Send</button>
+    </form>
+  </main>
+  <section class="details" id="details">
+    <div class="section"><h3>Run</h3><div class="kv" id="run-kv"><span>none</span><span></span></div></div>
+    <div class="section"><h3>Budget</h3><div id="usage"></div></div>
+    <div class="section" id="plan-section" hidden><h3>Plan</h3><ul class="list" id="plan"></ul></div>
+    <div class="section" id="todo-section" hidden><h3>Tasks</h3><ul class="list" id="todos"></ul></div>
+    <div class="section" id="sub-section" hidden><h3>Subagents</h3><ul class="list" id="subagents"></ul></div>
+    <div class="section"><h3>Events</h3></div>
+    <div class="events" id="events"></div>
+  </section>
+</div>
+
+<dialog id="settings">
+  <form method="dialog" id="settings-form">
+    <h3 style="margin-top:0">Connection</h3>
+    <label>API key (AGENT_HARNESS_API_TOKEN or an [[api.keys]] key)
+      <input id="key" type="password" autocomplete="off" placeholder="leave empty if auth is disabled"></label>
+    <label><span><input id="remember" type="checkbox"> Remember on this device (localStorage)</span></label>
+    <label>End user (optional, recorded on new runs)<input id="end-user" placeholder="e.g. alice"></label>
+    <label>Theme<select id="theme"><option value="">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+    <div class="row" style="display:flex;gap:8px;justify-content:flex-end"><button value="cancel">Close</button><button class="primary" value="save" id="save-settings">Save</button></div>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = { runId: null, run: null, events: 0, streaming: null, profiles: null };
+const store = {
+  get(name) { try { return sessionStorage.getItem(name) ?? localStorage.getItem(name) ?? ""; } catch { return ""; } },
+  set(name, value, remember) {
+    try {
+      sessionStorage.setItem(name, value);
+      if (remember) localStorage.setItem(name, value); else localStorage.removeItem(name);
+    } catch { /* storage blocked: kept in memory for this page only */ }
+    memory[name] = value;
+  },
+};
+const memory = {};
+const setting = (name) => memory[name] ?? store.get(name);
+
+function applyTheme() {
+  const theme = setting("ah-theme");
+  if (theme) document.documentElement.dataset.theme = theme; else delete document.documentElement.dataset.theme;
+}
+
+async function api(method, path, body) {
+  const headers = { "content-type": "application/json" };
+  const key = setting("ah-key");
+  if (key) headers.authorization = "Bearer " + key;
+  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await response.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
+  if (!response.ok) {
+    const message = (data && data.error) || response.statusText;
+    if (response.status === 401) openSettings();
+    throw new Error(`${response.status}: ${message}`);
+  }
+  return data;
+}
+
+function showError(error) {
+  const box = $("error");
+  if (!error) { box.hidden = true; return; }
+  box.textContent = String(error.message || error);
+  box.hidden = false;
+}
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (value !== undefined && value !== null) node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+
+// Plain text with ``` fences and `inline code`; never HTML from the model.
+function renderText(text) {
+  const fragment = document.createDocumentFragment();
+  const parts = String(text).split(/```/);
+  parts.forEach((part, index) => {
+    if (index % 2 === 1) {
+      const body = part.replace(/^[\w+-]*\n/, "");
+      fragment.append(el("pre", {}, body.replace(/\n$/, "")));
+      return;
+    }
+    part.split(/(`[^`\n]+`)/).forEach((piece) => {
+      if (piece.startsWith("`") && piece.endsWith("`") && piece.length > 2) fragment.append(el("code", {}, piece.slice(1, -1)));
+      else if (piece) fragment.append(document.createTextNode(piece));
+    });
+  });
+  return fragment;
+}
+
+function message(role, text, extra) {
+  const bubble = el("div", { class: "bubble" });
+  if (extra && extra.reasoning) bubble.append(el("div", { class: "reasoning" }, extra.reasoning));
+  bubble.append(renderText(text));
+  return el("div", { class: `msg ${role}` }, bubble);
+}
+
+async function loadProfiles() {
+  try {
+    const data = await api("GET", "/profiles");
+    const select = $("profile");
+    select.replaceChildren();
+    select.append(el("option", { value: "" }, `default (${data.default})`));
+    for (const name of Object.keys(data.profiles)) select.append(el("option", { value: name }, name));
+    for (const [route, target] of Object.entries(data.routes || {})) select.append(el("option", { value: route }, `${route} → ${target}`));
+    $("conn").textContent = "connected";
+    return true;
+  } catch (error) {
+    $("conn").textContent = "not connected";
+    showError(error);
+    return false;
+  }
+}
+
+async function loadRuns() {
+  try {
+    const data = await api("GET", "/runs?limit=50");
+    const list = $("runs");
+    list.replaceChildren();
+    for (const run of data.runs) {
+      list.append(el("button", { class: "run-item" + (run.id === state.runId ? " active" : ""), onclick: () => openRun(run.id) },
+        el("div", { class: "title" }, run.title || run.id),
+        el("div", { class: "meta" }, `${run.status} · ${run.model_profile} · ${new Date(run.updated_at).toLocaleString()}`)));
+    }
+    if (!data.runs.length) list.append(el("div", { class: "notice", style: "margin:20px 0" }, "No runs yet"));
+  } catch (error) { showError(error); }
+}
+
+async function openRun(runId) {
+  state.runId = runId;
+  state.events = 0;
+  $("events").replaceChildren();
+  $("sidebar").classList.remove("open");
+  await refresh();
+  loadRuns();
+  if (state.run && (state.run.status === "running" || state.run.status === "queued")) stream();
+}
+
+async function refresh() {
+  if (!state.runId) return;
+  try {
+    const [run, transcript, usage, events] = await Promise.all([
+      api("GET", `/runs/${state.runId}`),
+      api("GET", `/runs/${state.runId}/messages?reasoning=true`),
+      api("GET", `/runs/${state.runId}/usage`),
+      api("GET", `/runs/${state.runId}/events?after=${state.events}`),
+    ]);
+    state.run = run;
+    renderTranscript(transcript);
+    renderDetails(run, usage);
+    for (const event of events.events || []) addEvent(event);
+    showError(null);
+  } catch (error) { showError(error); }
+}
+
+function renderTranscript(transcript) {
+  const chat = $("chat");
+  chat.replaceChildren();
+  for (const turn of transcript.messages) {
+    if (turn.kind === "question") chat.append(message("assistant", "❓ " + turn.content + (turn.options && turn.options.length ? "\n(" + turn.options.join(" / ") + ")" : "")));
+    else chat.append(message(turn.role, turn.content, turn));
+  }
+  if (transcript.pending_approval) chat.append(pendingCard(transcript.pending_approval));
+  if (state.run && state.run.error) chat.append(el("div", { class: "card" }, el("h4", {}, `Run ${state.run.status}`), state.run.error));
+  if (!transcript.messages.length && !transcript.pending_approval) chat.append(el("div", { class: "notice" }, "No messages yet."));
+  chat.scrollTop = chat.scrollHeight;
+  $("run-title").textContent = (transcript.messages.find((t) => t.role === "user") || {}).content || state.runId;
+}
+
+function pendingCard(pending) {
+  if (pending.kind === "question") {
+    const input = el("input", { placeholder: "Your answer" });
+    const answer = async (text) => {
+      if (!text.trim()) return;
+      await act(() => api("POST", `/runs/${state.runId}/answer`, { call_id: pending.call_id, answer: text }));
+    };
+    return el("div", { class: "card" },
+      el("h4", {}, "The agent asks"), pending.arguments.question || "",
+      el("div", { class: "row" }, ...(pending.arguments.options || []).map((option) => el("button", { onclick: () => answer(option) }, option))),
+      el("div", { class: "row" }, input,
+        el("button", { class: "primary", onclick: () => answer(input.value) }, "Answer"),
+        el("button", { onclick: () => act(() => api("POST", `/runs/${state.runId}/approval`, { call_id: pending.call_id, decision: "deny" })) }, "Decline")));
+  }
+  const feedback = el("input", { placeholder: pending.kind === "plan" ? "What to change (when rejecting)" : "Reason (optional, sent to the model)" });
+  const decide = (decision) => act(() => api("POST", `/runs/${state.runId}/approval`,
+    { call_id: pending.call_id, decision, ...(feedback.value.trim() ? { feedback: feedback.value.trim() } : {}) }));
+  return el("div", { class: "card" },
+    el("h4", {}, pending.kind === "plan" ? "Plan ready for approval" : `Approval needed: ${pending.tool} (${pending.risk})`),
+    pending.kind === "plan" ? el("div", { style: "white-space:pre-wrap" }, pending.arguments.plan || "") : el("pre", {}, JSON.stringify(pending.arguments, null, 2)),
+    el("div", { class: "row" }, feedback,
+      el("button", { class: "primary", onclick: () => decide("allow") }, "Approve"),
+      el("button", { class: "danger", onclick: () => decide("deny") }, "Deny")));
+}
+
+async function act(request) {
+  try { await request(); await refresh(); stream(); } catch (error) { showError(error); }
+}
+
+function meter(label, used, limit, format = (v) => v) {
+  const ratio = limit ? Math.min(1, used / limit) : 0;
+  return [el("div", { class: "kv" }, el("span", {}, label), el("span", {}, `${format(used)} / ${limit == null ? "∞" : format(limit)}`)),
+    el("div", { class: "meter" }, el("div", { style: `width:${(ratio * 100).toFixed(1)}%` }))];
+}
+
+function renderDetails(run, usage) {
+  const status = $("run-status");
+  status.hidden = false;
+  status.textContent = run.status;
+  status.className = "badge " + run.status;
+  $("stop").hidden = !(run.status === "running" || run.status === "queued" || run.status === "awaiting_input");
+  const kv = $("run-kv");
+  kv.replaceChildren(...[["id", run.id], ["profile", run.model_profile], ["mode", run.mode], ["end user", run.end_user || "—"],
+    ["created", new Date(run.created_at).toLocaleString()]].flatMap(([k, v]) => [el("span", {}, k), el("span", {}, v)]));
+  $("usage").replaceChildren(
+    ...meter("steps", usage.steps, usage.max_steps),
+    ...meter("tokens", usage.total_tokens, usage.max_tokens),
+    ...meter("cost $", usage.cost_usd, usage.max_cost_usd, (v) => Number(v).toFixed(4)),
+    ...meter("seconds", Math.round(usage.active_seconds), usage.max_wall_seconds),
+    el("div", { class: "kv" }, el("span", {}, "calls"), el("span", {}, `${usage.model_calls} model · ${usage.tool_calls} tool · ${usage.subagents} subagents`)));
+  const marks = { pending: "○", in_progress: "◐", completed: "●", failed: "✕", skipped: "–" };
+  const plan = run.plan;
+  $("plan-section").hidden = !plan;
+  if (plan) $("plan").replaceChildren(el("li", {}, el("b", {}, plan.goal || "")),
+    ...(plan.steps || []).map((step) => el("li", {}, `${marks[step.status] || "○"} ${step.title}${step.agent ? " → " + step.agent : ""}`)));
+  $("todo-section").hidden = !(run.todos && run.todos.length);
+  $("todos").replaceChildren(...(run.todos || []).map((t) => el("li", {}, `${marks[t.status] || "○"} ${t.content}`)));
+  $("sub-section").hidden = !(run.subagents && run.subagents.length);
+  $("subagents").replaceChildren(...(run.subagents || []).map((s) => el("li", {},
+    el("a", { href: "#", onclick: (e) => { e.preventDefault(); openRun(s.run_id); } }, s.agent || s.run_id), ` ${s.status || ""}`)));
+}
+
+function addEvent(event) {
+  if (event.index < state.events) return;  // already shown (stream and refresh overlap)
+  state.events = event.index + 1;
+  const payload = event.payload || {};
+  const detail = payload.tool || payload.hook_event || payload.status || payload.decision || payload.model_profile || "";
+  const box = $("events");
+  box.prepend(el("div", {}, `#${event.index} ${event.type}${detail ? " · " + detail : ""}`));
+}
+
+async function stream() {
+  if (!state.runId) return;
+  if (state.streaming) state.streaming.abort();
+  const controller = new AbortController();
+  state.streaming = controller;
+  const runId = state.runId;
+  const headers = {};
+  const key = setting("ah-key");
+  if (key) headers.authorization = "Bearer " + key;
+  let live = null;
+  let liveText = "";
+  try {
+    const response = await fetch(`/runs/${runId}/stream?after=${state.events}`, { headers, signal: controller.signal });
+    if (!response.ok) throw new Error(`${response.status}: stream failed`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let split;
+      while ((split = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        let name = "message", data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event: ")) name = line.slice(7);
+          else if (line.startsWith("data: ")) data += line.slice(6);
+        }
+        const parsed = data ? JSON.parse(data) : null;
+        if (runId !== state.runId) return;
+        if (name === "delta" && parsed && parsed.type === "text") {
+          if (!live) { live = message("assistant", ""); $("chat").append(live); }
+          liveText += parsed.text;
+          live.firstChild.replaceChildren(renderText(liveText));
+          $("chat").scrollTop = $("chat").scrollHeight;
+        } else if (name === "end") {
+          await refresh();
+          loadRuns();
+          return;
+        } else if (parsed && typeof parsed.index === "number") {
+          addEvent(parsed);
+          if (name === "model_responded" || name === "tool_responded" || name === "approval_requested") { live = null; liveText = ""; await refresh(); }
+        }
+      }
+    }
+  } catch (error) {
+    if (error.name !== "AbortError") showError(error);
+  } finally {
+    if (state.streaming === controller) state.streaming = null;
+  }
+}
+
+async function send(text) {
+  const run = state.run;
+  const userName = setting("ah-user");
+  if (!state.runId) {
+    const body = { prompt: text };
+    if ($("profile").value) body.model_profile = $("profile").value;
+    if (userName) body.user = userName;
+    const created = await api("POST", "/runs", body);
+    state.runId = created.id;
+    state.events = 0;
+    $("events").replaceChildren();
+  } else if (run && run.status === "awaiting_input") {
+    const transcript = await api("GET", `/runs/${state.runId}/messages`);
+    const pending = transcript.pending_approval;
+    if (pending && pending.kind === "question") await api("POST", `/runs/${state.runId}/answer`, { call_id: pending.call_id, answer: text });
+    else throw new Error("Approve or deny the pending request first.");
+  } else if (run && (run.status === "running" || run.status === "queued")) {
+    await api("POST", `/runs/${state.runId}/steer`, { content: text });
+  } else {
+    await api("POST", `/runs/${state.runId}/messages`, { content: text });
+  }
+  $("chat").append(message("user", text));
+  await refresh();
+  loadRuns();
+  stream();
+}
+
+function openSettings() {
+  $("key").value = setting("ah-key");
+  $("end-user").value = setting("ah-user");
+  $("theme").value = setting("ah-theme");
+  $("remember").checked = !!(function () { try { return localStorage.getItem("ah-key"); } catch { return ""; } })();
+  if (!$("settings").open) $("settings").showModal();
+}
+
+$("settings-form").addEventListener("submit", async (event) => {
+  if (event.submitter && event.submitter.value !== "save") return;
+  const remember = $("remember").checked;
+  store.set("ah-key", $("key").value.trim(), remember);
+  store.set("ah-user", $("end-user").value.trim(), remember);
+  store.set("ah-theme", $("theme").value, true);
+  applyTheme();
+  if (await loadProfiles()) { showError(null); loadRuns(); }
+});
+$("open-settings").addEventListener("click", openSettings);
+$("toggle-sidebar").addEventListener("click", () => $("sidebar").classList.toggle("open"));
+$("new-chat").addEventListener("click", () => {
+  if (state.streaming) state.streaming.abort();
+  Object.assign(state, { runId: null, run: null, events: 0 });
+  $("chat").replaceChildren(el("div", { class: "notice" }, "Start a conversation below."));
+  $("run-title").textContent = "New chat";
+  $("run-status").hidden = true;
+  $("stop").hidden = true;
+  $("events").replaceChildren();
+  $("sidebar").classList.remove("open");
+  loadRuns();
+  $("input").focus();
+});
+$("stop").addEventListener("click", () => act(() => api("POST", `/runs/${state.runId}/cancel`)));
+const input = $("input");
+input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 220) + "px"; });
+input.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); $("composer").requestSubmit(); }
+});
+$("composer").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  $("send").disabled = true;
+  try { input.value = ""; input.style.height = "auto"; await send(text); showError(null); }
+  catch (error) { input.value = text; showError(error); }
+  finally { $("send").disabled = false; input.focus(); }
+});
+
+applyTheme();
+loadProfiles().then((ok) => { if (ok) loadRuns(); else openSettings(); });
+const initial = new URLSearchParams(location.search).get("run");
+if (initial) openRun(initial);
+</script>
+</body>
+</html>

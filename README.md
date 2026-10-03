@@ -1134,6 +1134,29 @@ the boundary: unknown fields, oversized text, and out-of-range budgets are rejec
     "updated_at"}`, never message text.
   - Delivery is best effort (2 retries) and never affects the run.
 
+### Built-in web chat (`/ui`)
+
+`agent-harness serve` serves a chat page at **http://127.0.0.1:8000/ui** (`/` redirects
+there). It is one static file in the package, with no build step, no CDN, and a strict
+Content-Security-Policy. Open its Settings and paste an API key. The key is kept in
+`sessionStorage`, or in `localStorage` if you tick "remember". The page calls the same
+authenticated API as any other client.
+
+| Area | What it shows |
+|---|---|
+| Left | Your runs (newest first), a **New chat** button, and the profile or route for new chats |
+| Center | The conversation, with streamed replies and reasoning. Approval and plan cards (Approve/Deny with a reason) and `ask_user` cards (option buttons or free text) appear inline. **Stop** cancels the run. |
+| Right | Run facts; steps, tokens, cost, and time against the budget; plan steps; tasks; subagents (click to open); and the event log |
+
+Sending a message picks the right call for the run's state:
+- a new chat → `POST /runs`
+- a finished run → `POST /runs/{id}/messages`
+- a working run → `/steer`
+- an open question → `/answer`
+
+The page follows the system light/dark setting. The `deploy/` compose file can also start
+Open WebUI next to the harness (`--profile chat`).
+
 ### Using it from any chat window (OpenAI-compatible)
 
 `agent-harness serve` also speaks the OpenAI chat API, so any client that lets you set an
