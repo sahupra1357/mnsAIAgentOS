@@ -270,7 +270,8 @@ Order matters: 6.1 is the foundation for most of the rest.
     artifact store. `rewind(run_id, step)` restores the files and truncates the
     conversation view, recorded as an event without deleting history.
 13. Layered settings: enterprise → user → project → local merge, with defined precedence
-    and a CLI `config show --effective`.
+    and a CLI `config show --config FILE` (there is no `--effective` flag; it always prints
+    the merged layers with the layer each key came from, and keys left at code defaults are not listed).
 14. Plugins: a manifest bundling templates, subagent definitions, hooks, and skills.
     Nothing is enabled unless explicitly installed and enabled in settings.
 15. Usage display: `status`/API endpoint showing per-run tokens, cost, cache-hit rate,
@@ -415,6 +416,60 @@ Live checks (on `phase-14b-live-checks`): bench suites `context` (overflows a sm
 JSON/code/prose filler; reports omitted/capped/overflow counts) and `memory` (save, embed, find
 with different wording). Example profiles `llamacpp`/`modal` use `token_counting = "server"`, and
 `[models.embed]` is `nomic-embed-text` on Ollama.
+
+**Phase 15 – Defaults, feature validation, chat clients, web UI** [interactive-extensibility, harness-verification, harness-operations] — approved by the user; each part on its own branch and PR.
+Code defaults stay off (opt-in). "Everything on" is a config file, not a change to dataclass
+defaults, so existing tests, version hashes, and the prefix cache are unaffected.
+- **15a CLI defaults** (`phase-15a-cli-defaults`) — implemented:
+  1. `--config` becomes optional. Order: `--config` → `AGENT_HARNESS_CONFIG` → `./models.toml` →
+     `~/.agent-harness/models.toml`. If none is found, the error lists the paths that were tried.
+  2. `agent-harness "prompt"` means `agent-harness run "prompt"`. When the first argument is not a
+     subcommand or an option, `run` is inserted before argparse runs. Existing subcommands keep working.
+  3. `agent-harness` with no arguments starts an interactive chat REPL: the first message
+     creates a run, and later ones use `continue_run`. Approvals and `ask_user` are asked
+     inline. `/exit`, `/new`, `/status` are REPL commands; other `/name` inputs go to the templates.
+  4. The default profile is still `default_model_profile` from the config; the examples use
+     `llamacpp`. A profile is switched off with `enabled = false` (or
+     `AGENT_HARNESS_MODEL__NAME__ENABLED=false`). It is removed at load, routes to it are
+     dropped, and fallback chains skip it (`HarnessConfig.disabled_models`). The switch is
+     not a `ModelProfile` field, so profile hashes do not change.
+- **15b Full-feature config** (`phase-15b-full-config`): add `examples/full.toml` (and a root `models.toml`
+  with the same content) that turns on every feature that works without outside services: guardrails
+  (heuristics), hooks (stdlib audit hook in `examples/hooks/`), permission rules, agents + subagents, tasks,
+  `ask_user`, approval deadlines, instructions, skills, templates, summarization + `[context]`, `web_fetch`,
+  dynamic tool loading, hybrid memory (`embed` profile), planning available via `--plan`, coding,
+  `network` egress allowlist, redaction, quotas, rate limits, artifacts.
+  Some features stay off until their prerequisite exists, with a comment: `web_search` (needs
+  `TAVILY_API_KEY`), `[[mcp_servers]]` (needs a server), model guard (needs `llama-guard3`), notifications
+  (needs a webhook URL), Postgres, LiteLLM. Coding uses `execution_runtime = "docker"` and so needs Docker.
+  A test loads `examples/full.toml` and checks that every section in it parses.
+- **15c Per-feature validation** (`phase-15c-feature-validation`):
+  1. `[[feature]]` entries in `examples/validation.toml` give each feature its unit-test modules,
+     scenarios, and live smoke/benchmark entries.
+  2. `agent-harness-bench pipeline examples/validation.toml --feature guardrails` runs one feature
+     (repeat `--feature` for several), and with no `--feature` the pipeline runs everything (the master run).
+     `--offline` skips smoke and benchmarks.
+  3. `scripts/validate.sh [feature ...]` is a thin wrapper around that command. Results and the HTML report
+     go to `validation-results/` as before.
+  4. A unit test fails if any `tests/test_*.py` module is not assigned to a feature.
+  5. Scenarios get a `config` key (a path, e.g. `../full.toml`) and an inline `[harness]` table, so
+     they can turn on hooks, permissions, agents, and so on.
+  6. New offline scenarios for features that have none yet: hooks, permissions, subagents, planning,
+     tasks, plan mode, rewind, memory, web_fetch (fake transport), dynamic tool loading, summarization,
+     instructions/skills/templates, redaction.
+- **15d OpenAI-compatible chat endpoint** (`phase-15d-openai-chat`): `GET /v1/models` (profiles and
+  routes) and `POST /v1/chat/completions` (with `stream` as OpenAI SSE chunks) on `agent-harness serve`,
+  so Open WebUI, LibreChat, Chatbox, AnythingLLM, Continue, and OpenAI SDKs can use the harness as a "model".
+  1. **Mapping a request to a run.** An `X-Agent-Harness-Run` header names the run. Without it,
+     a hash of the earlier messages is looked up (new store column, with a migration). A match
+     continues that run; no match creates a new run.
+  2. **Pauses.** A paused run replies with the approval or question text, and the next user message
+     (`approve`/`deny` or the answer) resolves it.
+  3. **Auth.** Bearer API keys, as now.
+- **15e Built-in web UI** (`phase-15e-web-ui`): `GET /ui` serves one static HTML/JS page from the package
+  (no npm, no build step) that uses the existing API: run list, chat with live stream, approve/deny,
+  `ask_user` answers, plan/todo panel, usage, and events. Also add an optional Open WebUI service
+  to `deploy/` compose pointed at `/v1` (15d).
 
 ## Validation
 

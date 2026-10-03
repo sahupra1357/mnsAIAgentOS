@@ -47,7 +47,31 @@ main()
 `--model-profile` accepts a profile name or a route name (`fast`, `strong`). A route is
 resolved to its profile, and the route is recorded on the run.
 
-Relevant file: `src/agent_harness/cli.py`
+Defaults (Phase 15a), applied in `main()` before any command runs:
+- **Implicit command:** `_with_default_command()` turns `agent-harness` (no arguments)
+  into `agent-harness chat`, and `agent-harness "prompt"` (first argument not a
+  subcommand) into `agent-harness run "prompt"`.
+- **Config discovery:** `discover_config_path()` (in `config.py`) resolves a missing
+  `--config` to `$AGENT_HARNESS_CONFIG`, `./models.toml`, or `~/.agent-harness/models.toml`,
+  in that order. `load_config()` itself never searches.
+- **Profile switches:** `load_config()` removes profiles with `enabled = false`, drops
+  routes to them, and prunes them from fallback chains (`HarnessConfig.disabled_models`).
+
+The chat flow (`repl.py`):
+
+```text
+main() → _chat_command()
+  └── ChatSession.loop()
+        └── per message: send()
+              ├── first message:  create_run()
+              ├── later messages: continue_run(budget raised by one turn's steps and seconds)
+              │                   (a failed or cancelled run starts a new conversation)
+              ├── orchestrator.run()
+              ├── _settle()        # approvals [y/N], plan approval, ask_user answers → resume()
+              └── _show()          # streamed text or the last answer
+```
+
+Relevant files: `src/agent_harness/cli.py`, `src/agent_harness/repl.py`
 
 ## 2. Application construction
 

@@ -203,3 +203,30 @@ the feature is not configured.
   fixed by `memory reindex`.
 - **Search:** `semantic` uses cosine similarity; `hybrid` uses reciprocal rank fusion with
   the keyword results. An embedding outage falls back to keyword search.
+
+## Phase 15d–e: chat clients and web UI (PLANNED)
+
+- **OpenAI-compatible surface** (`api.py`, same server and auth):
+  - `GET /v1/models` lists profiles and routes.
+  - `POST /v1/chat/completions` runs the agent and returns `chat.completion`, or with
+    `stream: true` returns `chat.completion.chunk` SSE frames built from `StreamHub` previews.
+  - The final content is the run's last assistant message.
+  - Tool activity can be shown as short text lines (`[api] chat_show_tools = true`).
+- **Conversation mapping:**
+  - If the `X-Agent-Harness-Run` header is present, the request continues that run.
+  - Otherwise `sha256(canonical(messages[:-1]))` is looked up in a new store column (with a
+    migration in all stores). A match continues the run; no match creates a new run, using
+    the client's `system` message as the run's system.
+  - An edited or regenerated client history does not match, so it starts a new run.
+- **Pauses in a plain chat:**
+  - Approval: the reply says what needs approval, and the next user message `approve` or
+    `deny` resolves it.
+  - `ask_user`: the next user message is the answer.
+  - Both go through `resolve_approval` / `answer` with the principal as actor.
+- **Web UI `/ui`:** one static HTML/JS file shipped in the package (stdlib serving, no build).
+  - It uses only the existing endpoints: `/runs`, `/runs/{id}/stream`, `/messages`,
+    `/approval`, `/answer`, `/usage`, `/events`.
+  - The API key is entered in the page and kept in `sessionStorage`.
+  - Optional Open WebUI service in `deploy/` compose, pointed at `/v1`.
+- **Tests:** an ASGI test client against a scripted model covers streaming frames, mapping,
+  approval via chat text, and auth. No network.

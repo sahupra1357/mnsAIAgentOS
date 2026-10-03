@@ -7,7 +7,7 @@ only when they make a request.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -59,6 +59,7 @@ _PROFILE_FIELDS = {
     "MAX_RETRY_AFTER_SECONDS": "max_retry_after_seconds",
     "STRUCTURED_OUTPUT": "structured_output",
     "TOKEN_COUNTING": "token_counting",
+    "ENABLED": "enabled",
 }
 # Marks dataclass fields that versioning.profile_sha256 skips while they hold their default.
 HASH_OMIT_DEFAULT = MappingProxyType({"hash": "omit_default"})
@@ -727,6 +728,8 @@ class HarnessConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     templates: TemplatesConfig = field(default_factory=TemplatesConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
+    # Profiles switched off with ``enabled = false``; listed, never resolved.
+    disabled_models: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         copied = dict(self.models)
@@ -782,6 +785,43 @@ class HarnessConfig:
         return self.models[name].fallback
 
 
+CONFIG_FILE_NAME = "models.toml"
+
+
+def config_search_paths(environ: Mapping[str, str] | None = None, cwd: Path | None = None) -> list[Path]:
+    """Where the CLI looks for a config when ``--config`` is not given, in order."""
+
+    env = os.environ if environ is None else environ
+    home = Path(env.get("HOME", str(Path.home())))
+    paths = []
+    if env.get("AGENT_HARNESS_CONFIG"):
+        paths.append(Path(env["AGENT_HARNESS_CONFIG"]).expanduser())
+    paths.append((cwd or Path.cwd()) / CONFIG_FILE_NAME)
+    paths.append(home / ".agent-harness" / CONFIG_FILE_NAME)
+    return paths
+
+
+def discover_config_path(
+    explicit: str | os.PathLike[str] | None,
+    environ: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> Path:
+    """Resolve the config file: ``explicit`` → ``AGENT_HARNESS_CONFIG`` → ``./models.toml``
+    → ``~/.agent-harness/models.toml``. ``load_config`` itself does not search."""
+
+    if explicit is not None:
+        return Path(explicit)
+    env = os.environ if environ is None else environ
+    candidates = config_search_paths(env, cwd)
+    if env.get("AGENT_HARNESS_CONFIG"):
+        return candidates[0]  # named explicitly: a missing file is reported by the loader
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    tried = ", ".join(str(path) for path in candidates)
+    raise ConfigError(f"no config file found (tried {tried}); pass --config FILE")
+
+
 def load_config(
     path: str | os.PathLike[str] | None = None,
     *,
@@ -828,11 +868,18 @@ def load_config(
         models[name] = dict(values)
 
     _apply_environment_overrides(models, env)
+    disabled = _disabled_profiles(models)
     profiles = {name: _parse_profile(name, values) for name, values in models.items()}
+    profiles = _without_disabled(profiles, disabled)
 
     default = env.get("AGENT_HARNESS_DEFAULT_MODEL_PROFILE") or raw.get(
         "default_model_profile"
     )
+    if isinstance(default, str) and default in disabled:
+        raise ConfigError(
+            f"default model profile {default!r} is disabled (enabled = false); "
+            "enable it or choose another default_model_profile"
+        )
     if default is None:
         if len(profiles) == 1:
             default = next(iter(profiles))
@@ -853,6 +900,8 @@ def load_config(
     for key, value in env.items():
         if key.startswith(_ROUTE_ENV_PREFIX) and key != _ROUTE_ENV_PREFIX:
             raw_routes[key[len(_ROUTE_ENV_PREFIX) :].lower()] = value
+    # A route to a disabled profile is dropped, so the route name is simply unknown.
+    raw_routes = {route: target for route, target in raw_routes.items() if target not in disabled}
     return HarnessConfig(
         models=profiles,
         default_model_profile=default,
@@ -889,7 +938,40 @@ def load_config(
         skills=_parse_section(raw, "skills", SkillsConfig),
         templates=_parse_section(raw, "templates", TemplatesConfig),
         plugins=_parse_section(raw, "plugins", PluginsConfig),
+        disabled_models=tuple(sorted(disabled)),
     )
+
+
+def _disabled_profiles(models: dict[str, dict[str, Any]]) -> set[str]:
+    """Remove the ``enabled`` switch from each profile table; return the disabled names."""
+
+    disabled = set()
+    for name, values in models.items():
+        enabled = values.pop("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ConfigError(f"models.{name}.enabled must be true or false")
+        if not enabled:
+            disabled.add(name)
+    return disabled
+
+
+def _without_disabled(
+    profiles: dict[str, ModelProfile], disabled: set[str]
+) -> dict[str, ModelProfile]:
+    """Drop disabled profiles, and remove them from the remaining fallback chains."""
+
+    kept = {}
+    for name, profile in profiles.items():
+        if name in disabled:
+            continue
+        if any(target in disabled for target in profile.fallback):
+            profile = replace(
+                profile, fallback=tuple(t for t in profile.fallback if t not in disabled)
+            )
+        kept[name] = profile
+    if not kept and profiles:
+        raise ConfigError("every model profile is disabled (enabled = false)")
+    return kept
 
 
 def _parse_agents(
@@ -1253,7 +1335,7 @@ def _parse_environment_value(key: str, field_name: str, value: str) -> Any:
             return float(value)
         if field_name in {"max_retries", "context_window", "max_concurrency"}:
             return int(value)
-        if field_name == "reasoning_tags":
+        if field_name in {"reasoning_tags", "enabled"}:
             if value.strip().lower() not in {"true", "false", "1", "0"}:
                 raise ValueError("must be true or false")
             return value.strip().lower() in {"true", "1"}
