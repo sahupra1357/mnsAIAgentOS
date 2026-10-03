@@ -58,7 +58,8 @@ def parse_features(plan: Mapping[str, Any]) -> dict[str, Feature]:
     raw = plan.get("feature", [])
     if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
         raise BenchConfigError("feature must be an array of tables ([[feature]])")
-    smoke_profiles = {str(entry.get("profile")) for entry in plan.get("smoke", [])}
+    # A smoke entry without a profile checks the default profile; features call it "default".
+    smoke_profiles = {str(entry.get("profile", "default")) for entry in plan.get("smoke", [])}
     benchmark_names = {
         str(entry.get("name") or f"{entry.get('suite')}-{entry.get('profile', 'default')}")
         for entry in plan.get("benchmark", [])

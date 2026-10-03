@@ -58,6 +58,10 @@ context_window = 8192
 timeout_seconds = 180
 max_retries = 1
 
+# Phase 16: the same Ollama server embeds (ollama pull nomic-embed-text); this adds the
+# hidden companion profile `ollama.embed`. guard_model = "llama-guard3:1b" works the same way.
+embedding_model = "nomic-embed-text"
+
 [models.ollama.parameters]
 temperature = 0.2
 max_tokens = 1024
@@ -88,6 +92,10 @@ max_retries = 1
 # reasoning_tags = true splits <think>...</think> out of the answer instead.
 # reasoning_tags = true
 # reasoning_history = "drop"   # "keep" sends earlier reasoning back (costs context)
+
+# The router serves an embedding model next to the chat model (preset section with
+# `embedding = true`, router started with models-max >= 2): companion `llamacpp.embed`.
+embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"
 
 [models.llamacpp.parameters]
 temperature = 0.2
@@ -125,7 +133,8 @@ max_tokens = 1024
 # [models.modal.pricing]
 # gpu_usd_per_second = 0.0003
 
-# Embeddings for [memory] search = "semantic" / "hybrid" and the memory benchmark:
+# A separate embedding profile (older style; prefer embedding_model on the provider's own
+# profile, which needs no cross-profile reference):
 #   ollama pull nomic-embed-text
 [models.embed]
 enabled = true

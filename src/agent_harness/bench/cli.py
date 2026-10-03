@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import hashlib
 import json
 import os
@@ -115,6 +116,7 @@ async def execute_benchmark(
         execution=execution,
         options=spec.options,
         telemetry=telemetry,
+        embedding_profile=config.companion(profile, "embed"),
     )
     out = spec.out or Path("bench-results") / f"{spec.name or spec.suite}-{profile}"
     out.mkdir(parents=True, exist_ok=True)
@@ -353,12 +355,15 @@ async def run_pipeline(
             elif stage == "smoke":
                 entries = plan.get("smoke", [])
                 if selection is not None:
-                    entries = [e for e in entries if str(e.get("profile")) in selection.smoke]
+                    entries = [e for e in entries if str(e.get("profile", "default")) in selection.smoke]
                 if not entries:
                     add(StageResult("smoke", "skip", "no [[smoke]] entries"))
                 for entry in entries:
-                    argv = [python, "-m", "agent_harness", "doctor", "--config", str(config),
-                            "--model-profile", str(entry["profile"])]
+                    # No profile: the config's default profile (the provider under test).
+                    smoke_profile = str(entry.get("profile") or _default_profile(config) or "default")
+                    argv = [python, "-m", "agent_harness", "doctor", "--config", str(config)]
+                    if entry.get("profile"):
+                        argv += ["--model-profile", str(entry["profile"])]
                     if entry.get("skip_tools"):
                         argv.append("--skip-tools")
                     if entry.get("skip_cache", True):
@@ -367,10 +372,10 @@ async def run_pipeline(
                         argv.append("--strict")  # a WARN (e.g. tool calls as plain text) fails the stage
                     if entry.get("max_tokens"):
                         argv += ["--max-tokens", str(int(entry["max_tokens"]))]
-                    make_room(str(entry["profile"]))
-                    announce(f"   doctor {entry['profile']} ...")
+                    make_room(entry.get("profile"))
+                    announce(f"   doctor {smoke_profile} ...")
                     ok, detail = _run_command(argv, cwd=repo, env=env)
-                    add(StageResult(f"smoke:{entry['profile']}", "pass" if ok else "fail", detail))
+                    add(StageResult(f"smoke:{smoke_profile}", "pass" if ok else "fail", detail))
             elif stage == "benchmarks":
                 entries = _selected_benchmarks(plan, selection)
                 if not entries:
@@ -480,7 +485,11 @@ def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, outpu
     options = dict(entry.get("options", {}))
     if "answers" in entry:
         options["answers"] = str(base / entry["answers"])
-    name = str(entry.get("name") or f"{entry['suite']}-{entry.get('profile', 'default')}")
+    # Without a profile the entry follows the config's default profile (Phase 16), and
+    # "{profile}" in name/baseline becomes that profile, so baselines stay per provider.
+    resolved = str(entry.get("profile") or _default_profile(config) or "default")
+    name = str(entry.get("name") or f"{entry['suite']}-{resolved}").replace("{profile}", resolved)
+    baseline = str(entry["baseline"]).replace("{profile}", resolved) if entry.get("baseline") else None
     return BenchmarkSpec(
         suite=str(entry["suite"]),
         data=base / str(entry["data"]),
@@ -497,9 +506,20 @@ def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, outpu
         docker_image=str(entry.get("docker_image", "python:3.12-slim")),
         unsafe_local_execution=bool(entry.get("unsafe_local_execution", False)),
         transcripts=_transcripts_mode(entry.get("transcripts", "failed")),
-        baseline=base / entry["baseline"] if entry.get("baseline") else None,
+        baseline=base / baseline if baseline else None,
         thresholds=Thresholds.from_mapping(entry.get("thresholds", {})),
     )
+
+
+@functools.cache
+def _default_profile(config: Path) -> str | None:
+    """The profile a plan entry without ``profile`` runs on (None if the config cannot load)."""
+
+    try:
+        loaded = load_config(config, layered=True)
+        return loaded.resolve_model_name(None)
+    except (ConfigError, OSError):
+        return None
 
 
 def _open_append(path: Path) -> TextIO:

@@ -20,14 +20,24 @@ default_model_profile = "llamacpp"
 [routes]
 fast = "llamacpp"
 strong = "modal"
-local = "ollama"
+local = "ollama"                 # routes are aliases, not dependencies
 
 # --- Model profiles -------------------------------------------------------------
-# Switch a profile on or off with `enabled` (or AGENT_HARNESS_MODEL__NAME__ENABLED).
+# Each profile is self-contained: one provider serves chat, embeddings (embedding_model,
+# used by [memory]) and, optionally, the guard model (guard_model, used by
+# [guardrails.model]). Switching default_model_profile switches all of them; nothing
+# here depends on another provider. Switch a profile on or off with `enabled` (or
+# AGENT_HARNESS_MODEL__NAME__ENABLED). `agent-harness profiles` shows what each serves.
 
-# llama.cpp router: `llama serve --models-preset ... --port 9931 --jinja`.
-# Plain single-model server: `llama-server -m model.gguf --jinja -c 16384 --port 8080`
-# with endpoint http://127.0.0.1:8080/v1 and context_window = 16384.
+# llama.cpp router (`llama serve --models-preset ... --port 9931 --jinja`, models-max >= 2):
+# the router loads the chat and embedding models side by side and routes by model name.
+# Preset (e.g. ~/.config/llama/models.user.ini for the Llama app):
+#   [ggml-org/Qwen3.8-27B-GGUF:Q4_K_M]
+#   ctx-size = 16384
+#   [nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0]
+#   embedding = true
+# Plain single-model server instead: `llama-server -m model.gguf --jinja -c 16384 --port 8080`
+# plus `llama-server -m embed.gguf --embedding --port 8081` and embedding_endpoint below.
 [models.llamacpp]
 enabled = true
 adapter = "llama_cpp"
@@ -37,13 +47,17 @@ context_window = 16384           # keep equal to the server's context size for t
 token_counting = "server"
 timeout_seconds = 600
 max_retries = 1
-fallback = ["ollama"]            # used only after llama.cpp's retries are exhausted
+embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"   # same router
+# embedding_endpoint = "http://127.0.0.1:8081/v1"            # only for a separate server
+# guard_model = "QuantFactory/Llama-Guard-3-1B-GGUF:Q4_K_M"   # Llama Guard in the same router
+# fallback = ["ollama"]          # opt-in only: crossing providers breaks "one profile"
 
 [models.llamacpp.parameters]
 temperature = 0.2
 max_tokens = 2048
 
-# Ollama: `ollama serve`, then `ollama pull qwen2.5-coder:7b`.
+# Ollama: `ollama serve`, then `ollama pull qwen2.5-coder:7b` and `ollama pull nomic-embed-text`
+# (and `ollama pull llama-guard3:1b` for guard_model). One server, three model names.
 [models.ollama]
 enabled = true
 adapter = "ollama"
@@ -53,21 +67,19 @@ api_mode = "native"              # sends context_window as num_ctx
 context_window = 8192
 timeout_seconds = 180
 max_retries = 1
+embedding_model = "nomic-embed-text"
+# guard_model = "llama-guard3:1b"
 
 [models.ollama.parameters]
 temperature = 0.2
 num_predict = 1024
 
-# Embeddings for [memory] search = "hybrid": `ollama pull nomic-embed-text`.
-[models.embed]
-enabled = true
-adapter = "ollama"
-model = "nomic-embed-text"
-endpoint = "http://127.0.0.1:11434/v1"
-timeout_seconds = 60
-
 # Modal (vLLM or SGLang): needs MODAL_LLM_API_KEY, MODAL_PROXY_TOKEN_ID and
 # MODAL_PROXY_TOKEN_SECRET, and your workspace in the endpoint. Then enable it.
+# One deployment serves one model, so embeddings need a second deployment: a copy of
+# examples/modal/vllm_server.py with MODEL_NAME set to an embedding model and vLLM's
+# embedding (pooling) mode on (check the flag for your vLLM version), named by
+# embedding_endpoint below. Same Modal auth, so it is still the one `modal` profile.
 [models.modal]
 enabled = false
 adapter = "modal"
@@ -80,7 +92,8 @@ cold_start_timeout_seconds = 600
 max_retries = 1
 context_window = 32768
 token_counting = "server"
-fallback = ["llamacpp"]
+# embedding_model = "nomic-ai/nomic-embed-text-v1.5"
+# embedding_endpoint = "https://WORKSPACE--agent-harness-vllm-embed-serve.modal.run/v1"
 
 [models.modal.headers_env]
 Modal-Key = "MODAL_PROXY_TOKEN_ID"
@@ -89,18 +102,6 @@ Modal-Secret = "MODAL_PROXY_TOKEN_SECRET"
 [models.modal.parameters]
 temperature = 0.2
 max_tokens = 1024
-
-# Llama Guard 3 for [guardrails.model]: `ollama pull llama-guard3:1b`, then enable it
-# and set [guardrails.model] profile = "guard".
-[models.guard]
-enabled = false
-adapter = "ollama"
-model = "llama-guard3:1b"
-endpoint = "http://127.0.0.1:11434/v1"
-timeout_seconds = 60
-
-[models.guard.parameters]
-max_tokens = 32
 
 # --- Orchestrator and context ---------------------------------------------------
 [orchestrator]
@@ -253,8 +254,8 @@ max_results = 5
 [memory]
 enabled = true
 namespace = "default"
-search = "hybrid"                # keyword + embeddings (falls back to keyword if Ollama is down)
-embedding_profile = "embed"
+search = "hybrid"                # keyword + embeddings from the default profile's embedding_model
+# embedding_profile = ""         # empty: the default profile's own embedding model
 
 [artifacts]
 enabled = true                   # large tool outputs are stored outside the history
@@ -338,9 +339,9 @@ rate_limit_burst = 40
 # read_only = ["read_file", "read_text_file", "list_directory", "search_files", "get_file_info"]
 # sync_on_start = true
 #
-# Llama Guard classifier (enable [models.guard] first):
+# Llama Guard classifier: set guard_model on the default profile; it is then used
+# automatically ([guardrails.model] profile defaults to that profile's guard model).
 # [guardrails.model]
-# profile = "guard"
 # check = ["input", "output"]
 #
 # Postgres storage (needs the [postgres] extra and a server):

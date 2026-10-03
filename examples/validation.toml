@@ -29,81 +29,57 @@ config = "models.toml"
 # enabled = true
 # min_params_b = 20
 
-[[smoke]]                         # live: `agent-harness doctor` per profile
-profile = "llamacpp"              # the default profile
-skip_cache = false
+# --- Live checks: they follow the config's default profile ------------------------
+# Entries without `profile` run on default_model_profile (llama.cpp in ../models.toml),
+# and "{profile}" in a baseline path becomes that profile, so baselines stay per provider.
+# Validate another provider end to end without editing this file:
+#   AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh
+# That profile serves everything itself: chat, embeddings (embedding_model), and the
+# guard model (guard_model), so no check here depends on a second provider.
+
+[[smoke]]                         # live: `agent-harness doctor` on the default profile
+skip_cache = false                # (chat, tool calls, prefix cache, embeddings, guard model)
 max_tokens = 512                  # thinking models (Qwen3) need room before answering
 
-[[smoke]]
-profile = "ollama"
-skip_cache = true
-
 [[benchmark]]
-name = "gsm8k-ollama"
+name = "gsm8k"
 suite = "gsm8k"
 data = "bench/gsm8k_sample.jsonl"  # e.g. datasets/gsm8k/test.jsonl
-profile = "ollama"
 limit = 3
 concurrency = 1
 max_steps = 8
-baseline = "../baselines/gsm8k-ollama.json"
+baseline = "../baselines/gsm8k-{profile}.json"
 [benchmark.thresholds]
 max_accuracy_drop = 0.03
 max_error_rate = 0.10
 
 [[benchmark]]
-name = "bfcl-ollama"
+name = "bfcl"
 suite = "bfcl"
 data = "bench/bfcl_sample.json"            # e.g. datasets/bfcl/BFCL_v3_simple.json
 answers = "bench/bfcl_sample_answers.json" # e.g. datasets/bfcl/possible_answer/BFCL_v3_simple.json
-profile = "ollama"
-baseline = "../baselines/bfcl-ollama.json"
-[benchmark.thresholds]
-max_accuracy_drop = 0.05
-
-[[benchmark]]
-name = "gsm8k-llamacpp"
-suite = "gsm8k"
-data = "bench/gsm8k_sample.jsonl"
-profile = "llamacpp"
-limit = 3
-concurrency = 1
-max_steps = 8
-baseline = "../baselines/gsm8k-llamacpp.json"
-[benchmark.thresholds]
-max_accuracy_drop = 0.03
-max_error_rate = 0.10
-
-[[benchmark]]
-name = "bfcl-llamacpp"
-suite = "bfcl"
-data = "bench/bfcl_sample.json"
-answers = "bench/bfcl_sample_answers.json"
-profile = "llamacpp"
-baseline = "../baselines/bfcl-llamacpp.json"
+baseline = "../baselines/bfcl-{profile}.json"
 [benchmark.thresholds]
 max_accuracy_drop = 0.05
 
 # Guardrails red-team set (heuristics only, no model call; add `options = { model_guard = true }`
-# and enable [models.guard] in models.toml to include the Llama Guard classifier).
+# and set guard_model on the default profile to include the Llama Guard classifier).
 [[benchmark]]
 name = "guardrails"
 suite = "guardrails"
 data = "bench/guardrails_sample.jsonl"
-profile = "llamacpp"
 baseline = "../baselines/guardrails.json"
 [benchmark.thresholds]
 max_accuracy_drop = 0.0
 
 # Coding path: generated code runs in Docker without network (needs a Docker daemon).
 [[benchmark]]
-name = "humaneval-llamacpp"
+name = "humaneval"
 suite = "humaneval"
 data = "bench/humaneval_sample.jsonl"
-profile = "llamacpp"
 limit = 3
 max_steps = 6
-baseline = "../baselines/humaneval-llamacpp.json"
+baseline = "../baselines/humaneval-{profile}.json"
 [benchmark.thresholds]
 max_error_rate = 0.34
 
@@ -111,10 +87,9 @@ max_error_rate = 0.34
 # context_window (16384 in models.toml), exercising trimming, server token counting
 # (context_capped), and overflow recovery. Raise `turns` if all three counts stay 0.
 [[benchmark]]
-name = "context-llamacpp"
+name = "context"
 suite = "context"
 data = "bench/context_sample.jsonl"
-profile = "llamacpp"
 limit = 3
 concurrency = 1
 max_steps = 3
@@ -125,24 +100,41 @@ chars_per_turn = 1500
 min_accuracy = 0.66
 max_error_rate = 0.34
 
-# Long-term memory: notes are saved, embedded with the `embed` profile
-# (ollama pull nomic-embed-text), and found by memory_search with different wording.
+# Long-term memory: notes are saved, embedded with the profile's own embedding_model,
+# and found by memory_search with different wording.
 [[benchmark]]
-name = "memory-llamacpp"
+name = "memory"
 suite = "memory"
 data = "bench/memory_sample.jsonl"
-profile = "llamacpp"
 limit = 3
 concurrency = 1
 max_steps = 6
 [benchmark.options]
 search = "hybrid"
-embedding_profile = "embed"
 [benchmark.thresholds]
 min_accuracy = 0.66
 max_error_rate = 0.34
 
 # --- Earlier examples, kept for reference (enable any by removing the comments) ------
+# Pinning a profile compares providers side by side in one run (each still self-contained):
+# [[smoke]]
+# profile = "ollama"
+# skip_cache = true
+# [[benchmark]]
+# name = "gsm8k-ollama"
+# suite = "gsm8k"
+# data = "bench/gsm8k_sample.jsonl"
+# profile = "ollama"
+# limit = 3
+# baseline = "../baselines/gsm8k-ollama.json"
+# [[benchmark]]
+# name = "bfcl-ollama"
+# suite = "bfcl"
+# data = "bench/bfcl_sample.json"
+# answers = "bench/bfcl_sample_answers.json"
+# profile = "ollama"
+# baseline = "../baselines/bfcl-ollama.json"
+
 # Guardrails red-team set (no model needed; add `options = { model_guard = true }` and a
 # guard profile such as llama-guard3 to include the classifier). See docs/GUARDRAILS.md.
 # [[benchmark]]
@@ -207,21 +199,22 @@ tests = ["test_orchestrator", "test_config", "test_durability", "test_reliabilit
          "test_persistence", "test_store_conformance", "test_tools"]
 scenarios = ["calculator", "transient_model_failure", "unknown_tool_recovery",
              "repeated_call_refusal", "tool_calls_per_reply"]
-benchmarks = ["gsm8k-llamacpp", "gsm8k-ollama"]
+benchmarks = ["gsm8k"]
 
 [[feature]]
 name = "providers"
 description = "Model gateway and adapters: llama.cpp, Ollama, Modal, LiteLLM, reasoning, gateway options"
-tests = ["test_model_gateway", "test_providers", "test_gateway_ops", "test_litellm", "test_reasoning"]
-smoke = ["llamacpp", "ollama"]
-benchmarks = ["bfcl-llamacpp", "bfcl-ollama"]
+tests = ["test_model_gateway", "test_providers", "test_gateway_ops", "test_litellm", "test_reasoning",
+         "test_self_contained_profiles"]
+smoke = ["default"]
+benchmarks = ["bfcl"]
 
 [[feature]]
 name = "context"
 description = "Context window: trimming, summarization, server token counts, overflow recovery, limits"
 tests = ["test_context", "test_summarization", "test_phase13_limits", "test_phase14"]
 scenarios = ["context_overflow_recovery"]
-benchmarks = ["context-llamacpp"]
+benchmarks = ["context"]
 
 [[feature]]
 name = "guardrails"
@@ -265,16 +258,17 @@ scenarios = ["dynamic_tool_loading"]
 [[feature]]
 name = "memory"
 description = "Artifacts, long-term memory (keyword, semantic, hybrid), memory backends"
-tests = ["test_artifacts_memory_evals", "test_memory_backends", "test_phase14"]
+tests = ["test_artifacts_memory_evals", "test_memory_backends", "test_phase14",
+         "test_self_contained_profiles"]
 scenarios = ["memory_roundtrip"]
-benchmarks = ["memory-llamacpp"]
+benchmarks = ["memory"]
 
 [[feature]]
 name = "coding"
 description = "Workspace-safe coding tools, Docker sandbox, warm per-run containers, rewind"
 tests = ["test_coding", "test_sandbox_containers", "test_rewind"]
 scenarios = ["plan_mode_then_edit"]
-benchmarks = ["humaneval-llamacpp"]
+benchmarks = ["humaneval"]
 
 [[feature]]
 name = "api-workers"

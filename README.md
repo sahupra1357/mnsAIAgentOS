@@ -100,7 +100,7 @@ repository root starts with everything on:
 
 | On | Section |
 |----|---------|
-| llama.cpp default, Ollama fallback, `embed` profile; Modal and Llama Guard switched off (`enabled = false`) | `[models.*]`, `[routes]` |
+| llama.cpp default, serving chat and embeddings from one router; Ollama self-contained as an alternative; Modal switched off (`enabled = false`) | `[models.*]`, `[routes]` |
 | Coding tools in a warm per-run Docker container (`python:3.12`, has git) | `[coding]`, `[coding.docker]` |
 | Permission rules, an audit hook (`examples/hooks/audit_hook.py`), `ask_user`, approval and question deadlines, task list | `[permissions]`, `[[hooks]]`, `[interaction]`, `[tasks]` |
 | Three subagents (`examples/agents/`), nesting depth 2 | `[[agents]]`, `[subagents]` |
@@ -177,6 +177,46 @@ AGENT_HARNESS_MODEL__<PROFILE>__PARAMETERS
 ```
 
 `PARAMETERS` is a JSON object. Environment profile names are normalized to lowercase.
+
+## One Profile Serves Everything
+
+Each provider profile is self-contained:
+- **Chat:** `model`.
+- **Embeddings:** `embedding_model`, used by `[memory]` hybrid/semantic search and the memory
+  benchmark.
+- **Guard model:** `guard_model`, used by `[guardrails.model]`.
+
+Switching `default_model_profile` (or `AGENT_HARNESS_DEFAULT_MODEL_PROFILE`) switches all
+three; no setting points at a second provider.
+
+```toml
+[models.llamacpp]
+adapter = "llama_cpp"
+endpoint = "http://127.0.0.1:9931/v1"                         # llama serve router
+model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
+embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"   # same router
+```
+
+`agent-harness profiles` shows what each profile serves:
+
+```text
+llamacpp *: llama_cpp / ggml-org/Qwen3.8-27B-GGUF:Q4_K_M @ http://127.0.0.1:9931/v1
+  embed: nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0 @ http://127.0.0.1:9931/v1
+```
+
+Per provider:
+- **llama.cpp router (`llama serve --models-preset`).**
+  - Add the embedding model to the preset with `embedding = true`. The Llama app reads
+    `~/.config/llama/models.user.ini`.
+  - Allow two loaded models (`--models-max 2`).
+  - A single-model `llama-server` needs a second `--embedding` server, named by
+    `embedding_endpoint`.
+- **Ollama.** `ollama pull nomic-embed-text` on the same server.
+- **Modal.** A second deployment for embeddings, named by `embedding_endpoint`.
+
+`agent-harness doctor` also checks the embedding and guard models.
+`AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider end
+to end: smoke and benchmark entries without a `profile` follow the default.
 
 ## Ollama, llama.cpp, and Modal
 

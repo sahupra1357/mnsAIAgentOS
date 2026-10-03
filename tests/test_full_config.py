@@ -28,10 +28,15 @@ class FullConfigTests(unittest.TestCase):
     def test_profiles_default_and_switches(self) -> None:
         config = self.config
         self.assertEqual(config.default_model_profile, "llamacpp")
-        self.assertEqual(set(config.models), {"llamacpp", "ollama", "embed"})
-        self.assertEqual(config.disabled_models, ("guard", "modal"))
+        # Phase 16: each provider is self-contained; embeddings are companions, not profiles.
+        self.assertEqual(config.chat_models(), ["llamacpp", "ollama"])
+        self.assertEqual(set(config.companions), {"llamacpp.embed", "ollama.embed"})
+        self.assertEqual(config.disabled_models, ("modal",))
         self.assertEqual(dict(config.routes), {"fast": "llamacpp", "local": "ollama"})
-        self.assertEqual(config.models["llamacpp"].fallback, ("ollama",))
+        self.assertEqual(config.models["llamacpp"].fallback, ())  # no cross-provider fallback
+        self.assertEqual(config.memory.embedding_profile, "llamacpp.embed")
+        switched = load_config(FULL, environ={"AGENT_HARNESS_DEFAULT_MODEL_PROFILE": "ollama"})
+        self.assertEqual(switched.memory.embedding_profile, "ollama.embed")
         enabled = load_config(FULL, environ={"AGENT_HARNESS_MODEL__MODAL__ENABLED": "true"})
         self.assertIn("modal", enabled.models)
         self.assertEqual(enabled.routes["strong"], "modal")

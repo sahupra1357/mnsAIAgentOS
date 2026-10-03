@@ -60,6 +60,9 @@ _PROFILE_FIELDS = {
     "STRUCTURED_OUTPUT": "structured_output",
     "TOKEN_COUNTING": "token_counting",
     "ENABLED": "enabled",
+    "EMBEDDING_MODEL": "embedding_model",
+    "EMBEDDING_ENDPOINT": "embedding_endpoint",
+    "GUARD_MODEL": "guard_model",
 }
 # Marks dataclass fields that versioning.profile_sha256 skips while they hold their default.
 HASH_OMIT_DEFAULT = MappingProxyType({"hash": "omit_default"})
@@ -137,6 +140,12 @@ class ModelProfile:
     max_retry_after_seconds: float = field(default=60.0, metadata=HASH_OMIT_DEFAULT)
     structured_output: str = field(default="strict", metadata=HASH_OMIT_DEFAULT)
     token_counting: str = field(default="estimate", metadata=HASH_OMIT_DEFAULT)
+    # Self-contained providers (Phase 16): the same provider's embedding and guard models.
+    # Each becomes a hidden companion profile (``NAME.embed`` / ``NAME.guard``) that memory
+    # and the guard model use by default. ``embedding_endpoint`` defaults to ``endpoint``.
+    embedding_model: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
+    embedding_endpoint: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
+    guard_model: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
 
     def __post_init__(self) -> None:
         if not self.adapter.strip():
@@ -201,6 +210,12 @@ class ModelProfile:
             raise ConfigError(
                 f"model profile reasoning_history must be one of: {', '.join(REASONING_HISTORY_MODES)}"
             )
+        for name in ("embedding_model", "embedding_endpoint", "guard_model"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ConfigError(f"model profile {name} must be a non-empty string")
+        if self.embedding_endpoint is not None and self.embedding_model is None:
+            raise ConfigError("model profile embedding_endpoint needs embedding_model")
 
 
 def _validated_headers_env(raw: Mapping[str, str]) -> dict[str, str]:
@@ -266,8 +281,8 @@ class MemoryConfig:
             raise ConfigError("memory.backend must be 'sqlite' or 'postgres'")
         if self.search not in {"keyword", "semantic", "hybrid"}:
             raise ConfigError("memory.search must be 'keyword', 'semantic', or 'hybrid'")
-        if self.search != "keyword" and not self.embedding_profile:
-            raise ConfigError("memory.search = semantic/hybrid needs memory.embedding_profile")
+        # An empty embedding_profile with semantic/hybrid search means the default
+        # profile's embedding_model (checked in load_config, where profiles are known).
 
 
 _PERMISSION_MODES = {"default", "accept_edits", "plan", "bypass"}
@@ -730,6 +745,24 @@ class HarnessConfig:
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     # Profiles switched off with ``enabled = false``; listed, never resolved.
     disabled_models: tuple[str, ...] = ()
+    # Hidden companion profiles (Phase 16): name -> (owner profile, "embed" | "guard").
+    # They are in ``models`` so they resolve everywhere, but are not offered as chat models.
+    companions: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+
+    def chat_models(self) -> list[str]:
+        """Profile names a user can pick for runs (companions left out)."""
+
+        return [name for name in self.models if name not in self.companions]
+
+    def companion(self, profile: str, kind: str) -> str | None:
+        """The ``embed`` / ``guard`` companion of a profile or route, if it has one."""
+
+        try:
+            owner = self.resolve_model_name(profile)
+        except ConfigError:
+            return None
+        name = f"{owner}.{kind}"
+        return name if self.companions.get(name) == (owner, kind) else None
 
     def __post_init__(self) -> None:
         copied = dict(self.models)
@@ -878,18 +911,22 @@ def load_config(
     disabled = _disabled_profiles(models)
     profiles = {name: _parse_profile(name, values) for name, values in models.items()}
     profiles = _without_disabled(profiles, disabled)
+    companions = _add_companions(profiles)
 
     default = env.get("AGENT_HARNESS_DEFAULT_MODEL_PROFILE") or raw.get(
         "default_model_profile"
     )
+    if isinstance(default, str) and default in companions:
+        raise ConfigError(f"default model profile {default!r} is a companion; use {companions[default][0]!r}")
     if isinstance(default, str) and default in disabled:
         raise ConfigError(
             f"default model profile {default!r} is disabled (enabled = false); "
             "enable it or choose another default_model_profile"
         )
     if default is None:
-        if len(profiles) == 1:
-            default = next(iter(profiles))
+        chat_profiles = [name for name in profiles if name not in companions]
+        if len(chat_profiles) == 1:  # companions (NAME.embed / NAME.guard) are not candidates
+            default = chat_profiles[0]
         else:
             raise ConfigError("default_model_profile is required when multiple profiles exist")
     if not isinstance(default, str) or not default:
@@ -909,20 +946,35 @@ def load_config(
             raw_routes[key[len(_ROUTE_ENV_PREFIX) :].lower()] = value
     # A route to a disabled profile is dropped, so the route name is simply unknown.
     raw_routes = {route: target for route, target in raw_routes.items() if target not in disabled}
+    memory = _parse_section(raw, "memory", MemoryConfig)
+    guardrails = _parse_guardrails(raw.get("guardrails"))
+    default_owner = raw_routes.get(default, default)
+    if memory.search != "keyword" and not memory.embedding_profile:
+        embed = f"{default_owner}.embed"
+        if companions.get(embed) != (default_owner, "embed"):
+            raise ConfigError(
+                f"memory.search = {memory.search!r} needs memory.embedding_profile, or "
+                f"embedding_model on the default profile {default_owner!r}"
+            )
+        memory = replace(memory, embedding_profile=embed)
+    guard_companion = f"{default_owner}.guard"
+    if not guardrails.model.profile and companions.get(guard_companion) == (default_owner, "guard"):
+        # The default profile's own guard model (guard_model) is the model guard.
+        guardrails = replace(guardrails, model=replace(guardrails.model, profile=guard_companion))
     return HarnessConfig(
         models=profiles,
         default_model_profile=default,
         coding=coding,
         routes=raw_routes,
         artifacts=_parse_section(raw, "artifacts", ArtifactsConfig),
-        memory=_parse_section(raw, "memory", MemoryConfig),
+        memory=memory,
         permissions=_parse_permissions(raw.get("permissions")),
         hooks=_parse_hooks(raw.get("hooks")),
         agents=_parse_agents(raw.get("agents"), profiles, raw_routes),
         subagents=_parse_section(raw, "subagents", SubagentsConfig),
         tasks=_parse_section(raw, "tasks", TasksConfig),
         interaction=_parse_section(raw, "interaction", InteractionConfig),
-        guardrails=_parse_guardrails(raw.get("guardrails")),
+        guardrails=guardrails,
         instructions=_parse_section(raw, "instructions", InstructionsConfig),
         summarization=_parse_section(raw, "summarization", SummarizationConfig),
         context=_parse_section(raw, "context", ContextConfig),
@@ -946,7 +998,42 @@ def load_config(
         templates=_parse_section(raw, "templates", TemplatesConfig),
         plugins=_parse_section(raw, "plugins", PluginsConfig),
         disabled_models=tuple(sorted(disabled)),
+        companions=companions,
     )
+
+
+def _add_companions(profiles: dict[str, ModelProfile]) -> dict[str, tuple[str, str]]:
+    """Add ``NAME.embed`` / ``NAME.guard`` profiles for embedding_model / guard_model.
+
+    A companion is the same provider (adapter, credentials, headers, timeouts) with
+    another model: one profile serves chat, embeddings, and the guard model.
+    """
+
+    companions: dict[str, tuple[str, str]] = {}
+    for name, profile in list(profiles.items()):
+        derived = {}
+        if profile.embedding_model:
+            derived["embed"] = replace(
+                profile, model=profile.embedding_model,
+                endpoint=profile.embedding_endpoint or profile.endpoint,
+                parameters={}, fallback=(), context_window=None, token_counting="estimate",
+                pricing=None, embedding_model=None, embedding_endpoint=None, guard_model=None,
+            )
+        if profile.guard_model:
+            derived["guard"] = replace(
+                profile, model=profile.guard_model, parameters={"max_tokens": 32}, fallback=(),
+                context_window=None, token_counting="estimate", pricing=None,
+                embedding_model=None, embedding_endpoint=None, guard_model=None,
+            )
+        for kind, companion in derived.items():
+            companion_name = f"{name}.{kind}"
+            if companion_name in profiles:
+                raise ConfigError(
+                    f"profile {companion_name!r} conflicts with the {kind} companion of {name!r}"
+                )
+            profiles[companion_name] = companion
+            companions[companion_name] = (name, kind)
+    return companions
 
 
 def merge_tables(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
@@ -1397,6 +1484,9 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
         "max_retry_after_seconds",
         "structured_output",
         "token_counting",
+        "embedding_model",
+        "embedding_endpoint",
+        "guard_model",
     }
     unknown = set(raw) - allowed
     if unknown:
@@ -1456,6 +1546,9 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
             token_counting=_required_string(
                 raw.get("token_counting", "estimate"), f"models.{name}.token_counting"
             ),
+            embedding_model=raw.get("embedding_model"),
+            embedding_endpoint=raw.get("embedding_endpoint"),
+            guard_model=raw.get("guard_model"),
         )
     except (TypeError, ValueError) as exc:
         if isinstance(exc, ConfigError):

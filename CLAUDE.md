@@ -143,6 +143,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   newest turn fit (`_fitting_cap`); if nothing can be removed, the provider's error ends
   the step instead of a pointless retry. Server counting is skipped while the estimate is
   under half the limit.
+- **Companion profiles (Phase 16).** `config.models` also holds hidden `NAME.embed` / `NAME.guard`
+  profiles. Use `config.chat_models()` (not `config.models`) wherever profiles are listed or offered
+  to users. A single chat profile with companions still counts as one profile for the default.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A
@@ -501,6 +504,37 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
     pointed at `/v1`.
   - **Tests:** `tests/test_web_ui.py`. The page was also checked in a headless browser against a
     live server: chat, follow-up turns, budget panel, events, and mobile layout.
+
+**Phase 16 – Self-contained profiles** [llm-providers, model-gateway, harness-verification] — on `phase-16-self-contained-profiles`.
+One provider profile serves everything; nothing in `models.toml` depends on a second provider.
+1. Optional `ModelProfile` fields `embedding_model`, `embedding_endpoint` (default: `endpoint`), and
+   `guard_model`, with env forms `AGENT_HARNESS_MODEL__X__EMBEDDING_MODEL` etc. They are left out of
+   the profile hash while unset.
+2. Companion profiles:
+   - **What they are:** `load_config` adds `NAME.embed` / `NAME.guard` to `models`: same adapter,
+     credentials, and headers, another model.
+   - **Visibility:** they are in `HarnessConfig.companions` and hidden from
+     `chat_models()`, `profiles`, `GET /profiles`, and `/v1/models`.
+   - **Rules:** a companion cannot be the default profile, and a real profile with that name is
+     a conflict.
+3. Defaults follow the default profile (a route is resolved first):
+   - `[memory]` semantic/hybrid with an empty `embedding_profile` uses `<default>.embed`, or is
+     a `ConfigError` if that profile has no `embedding_model`.
+   - An empty `[guardrails.model] profile` uses `<default>.guard` when `guard_model` is set.
+   - The memory benchmark embeds with the profile under test (`BenchContext.embedding_profile`).
+4. The root `models.toml`:
+   - drops the `embed` and `guard` profiles and `fallback = ["ollama"]`;
+   - llama.cpp's router (models-max >= 2) serves `nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0` next
+     to the chat model;
+   - Ollama uses `nomic-embed-text`;
+   - Modal needs a second deployment named by `embedding_endpoint`.
+5. Validation follows the default profile:
+   - `[[smoke]]` / `[[benchmark]]` entries without `profile` use `default_model_profile`.
+   - Benchmark names and baselines take `{profile}`.
+   - The feature smoke name is `default`.
+   - `AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider.
+6. `doctor` also checks the profile's embedding and guard models (`companion_checks`).
+Tests: `tests/test_self_contained_profiles.py`.
 
 ## Validation
 

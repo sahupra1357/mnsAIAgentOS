@@ -187,3 +187,37 @@ Phase 4 promotes this to `Usage.cached_input_tokens`.
   events, errors, or `repr`.
 - Never contact a real server in `tests/`. Put live smoke checks behind an explicit CLI
   command (e.g. `agent-harness doctor --model-profile modal`), not in the unit suite.
+
+## Self-contained profiles (Phase 16)
+
+One profile serves chat, embeddings, and the guard model from the same provider:
+
+```toml
+[models.llamacpp]           # router: chat + embedding model side by side (models-max >= 2)
+model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
+embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"
+# embedding_endpoint = "http://127.0.0.1:8081/v1"   # single-model servers: a 2nd llama-server --embedding
+# guard_model = "..."                                # Llama Guard GGUF in the same router
+
+[models.ollama]             # one server, several model names
+embedding_model = "nomic-embed-text"
+guard_model = "llama-guard3:1b"
+
+[models.modal]              # one deployment = one model: embeddings need a second deployment
+embedding_endpoint = "https://WORKSPACE--...-embed-serve.modal.run/v1"
+```
+
+Per provider:
+- **llama.cpp router:** the preset needs a section for the embedding model with
+  `embedding = true` (the Llama app reads `~/.config/llama/models.user.ini`; the app's own
+  `models.ini` is regenerated). The router must allow two loaded models (`--models-max 2`).
+  Otherwise every embedding call unloads the chat model.
+- **Ollama:** the same server answers `/v1/embeddings` for `nomic-embed-text`.
+- **Modal / vLLM:** one deployment serves one model. Deploy a second one in vLLM's
+  embedding (pooling) mode, and check the flag for the pinned vLLM version.
+
+How it fits together:
+- **Companions:** the fields become the companions `NAME.embed` / `NAME.guard`, resolved by the
+  normal gateway (same credentials and headers).
+- **Checking:** `doctor` checks both companions.
+- **Do not add cross-provider defaults:** fallback to another provider is opt-in only.

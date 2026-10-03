@@ -401,6 +401,7 @@ class HarnessAPI:
                     "fallback": list(profile.fallback),
                 }
                 for name, profile in self._config.models.items()
+                if name not in self._config.companions
             },
             "routes": dict(self._config.routes),
         }
