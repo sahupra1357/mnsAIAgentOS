@@ -33,6 +33,12 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(set(config.companions),
                          {"llamacpp.embed", "llamacpp.guard", "ollama.embed", "ollama.guard"})
         self.assertEqual(config.guardrails.model.profile, "llamacpp.guard")  # its own Llama Guard
+        # Phase 19: the 1B guard misreads code, so its verdicts are flagged, not blocking;
+        # the ollama profile uses the 8B guard, and .env can switch the action back to block.
+        self.assertEqual(config.guardrails.model.action, "flag")
+        self.assertEqual(config.models["ollama.guard"].model, "llama-guard3:8b")
+        strict = load_config(FULL, environ={"AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION": "block"})
+        self.assertEqual(strict.guardrails.model.action, "block")
         self.assertEqual(config.disabled_models, ("modal",))
         self.assertEqual(dict(config.routes), {"fast": "llamacpp", "local": "ollama"})
         self.assertEqual(config.models["llamacpp"].fallback, ())  # no cross-provider fallback

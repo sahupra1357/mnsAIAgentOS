@@ -473,6 +473,37 @@ class ModelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished.messages[-1].content, "fine")
         self.assertEqual(finished.guarded_through, len(finished.messages) - 1)
 
+    async def test_flag_action_records_the_verdict_and_continues(self) -> None:
+        # Phase 19: small guard models misread code ("Explain repl.py" -> S1); flag keeps working.
+        model = Scripted([text("Here is the explanation.")], ["unsafe\nS1", "unsafe\nS8"])
+        orch = orchestrator(model, config=self.config(action="flag"))
+        finished = await start(orch, "Explain src/agent_harness/cli/repl.py")
+        self.assertEqual(finished.messages[-1].content, "Here is the explanation.")
+        events = await orch._store.list_events(finished.id)
+        decided = [e.payload for e in events if e.type is EventType.GUARDRAIL_DECIDED]
+        self.assertEqual([(d["stage"], d["action"], d["category"]) for d in decided],
+                         [("input", "flag", "violent_crimes"), ("output", "flag", "intellectual_property")])
+        self.assertNotIn(EventType.GUARDRAIL_REFUSED, [e.type for e in events])
+
+    async def test_flag_action_in_parallel_mode_keeps_the_answer(self) -> None:
+        model = Scripted([text("fine")], ["unsafe\nS1"], delay=0.01)
+        orch = orchestrator(model, config=self.config(check=("input",), parallel=True, action="flag"))
+        finished = await start(orch, "refactor the retry loop")
+        self.assertEqual((finished.messages[-1].content, model.cancelled), ("fine", 0))
+
+    async def test_flag_action_does_not_override_on_error_block(self) -> None:
+        model = Scripted([], ["not a verdict"])
+        config = self.config(check=("input",), on_error="block", action="flag")
+        finished = await start(orchestrator(model, config=config), "hi")
+        self.assertEqual(finished.messages[-1].content, REFUSAL)
+
+    def test_action_is_validated(self) -> None:
+        self.assertEqual(GuardrailsConfig.from_mapping({"model": {"action": "flag"}}).model.action, "flag")
+        self.assertEqual(GuardrailsConfig.from_mapping({}).model.action, "block")  # default unchanged
+        for bad in ("redact", "allow", "warn"):
+            with self.subTest(bad), self.assertRaises(GuardrailsConfigError):
+                GuardrailsConfig.from_mapping({"model": {"action": bad}})
+
 
 class DurabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_checked_messages_are_not_rechecked_after_reload(self) -> None:

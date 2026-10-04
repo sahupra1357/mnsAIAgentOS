@@ -88,6 +88,9 @@ class ModelGuardConfig:
     check: tuple[str, ...] = ("input", "output")
     on_error: str = "allow"
     parallel: bool = False
+    # "block" refuses on an unsafe verdict; "flag" records the verdict and lets the turn go on
+    # (for small guard models whose false positives would block ordinary work).
+    action: str = "block"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +129,8 @@ class GuardrailsConfig:
                 raise GuardrailsConfigError('guardrails.model.check entries must be "input" or "output"')
         if config.model.on_error not in {"allow", "block"}:
             raise GuardrailsConfigError('guardrails.model.on_error must be "allow" or "block"')
+        if config.model.action not in {"block", "flag"}:
+            raise GuardrailsConfigError('guardrails.model.action must be "block" or "flag"')
         return config
 
 
