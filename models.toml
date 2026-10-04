@@ -13,6 +13,7 @@
 #
 # The code defaults are deliberately off (opt-in); this file is how you opt in.
 
+# AGENT_HARNESS_MODEL_PROFILE (in .env or the shell) overrides this: llamacpp | ollama | modal.
 default_model_profile = "llamacpp"
 
 # Capability routes: use a route name anywhere a profile name is accepted. A route to a

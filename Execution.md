@@ -47,7 +47,14 @@ main()
 `--model-profile` accepts a profile name or a route name (`fast`, `strong`). A route is
 resolved to its profile, and the route is recorded on the run.
 
-Defaults (Phase 15a), applied in `main()` before any command runs:
+Defaults (Phase 15a, 16e), applied in `main()` before any command runs:
+- **`.env`:** when started as a program (`argv is None`), `load_dotenv()` (in `dotenv.py`)
+  reads `./.env` (or `$AGENT_HARNESS_ENV_FILE`). It sets only variables that are not
+  already set, and `AGENT_HARNESS_DOTENV=0` skips it. `agent-harness-bench` does the same.
+- **Profile switch:** `load_config()` takes `AGENT_HARNESS_MODEL_PROFILE` (then the older
+  `AGENT_HARNESS_DEFAULT_MODEL_PROFILE`, then `default_model_profile`) as the default
+  profile. That profile's companions (`NAME.embed`, `NAME.guard`) then serve memory and the
+  guard model, so one variable switches the whole provider.
 - **Implicit command:** `_with_default_command()` turns `agent-harness` (no arguments)
   into `agent-harness chat`, and `agent-harness "prompt"` (first argument not a
   subcommand) into `agent-harness run "prompt"`.

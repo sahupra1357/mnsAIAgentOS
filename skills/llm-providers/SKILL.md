@@ -233,6 +233,13 @@ Per provider:
   "Pooling type 'none' is not OAI compatible", when a chat or guard GGUF is loaded under
   the embedding model's name.
 
+Switching providers:
+- **The switch:** `AGENT_HARNESS_MODEL_PROFILE=llamacpp|ollama|modal`, normally in `.env`,
+  which the CLIs read at startup; a shell variable overrides it.
+- **Where the real values live:** endpoints with workspace names and every key belong in
+  `.env`, never in `models.toml`. For Modal these are `AGENT_HARNESS_MODEL__MODAL__ENDPOINT`,
+  `..._EMBEDDING_ENDPOINT`, `..._GUARD_ENDPOINT`, and `..._ENABLED=true`.
+
 How it fits together:
 - **Companions:** the fields become the companions `NAME.embed` / `NAME.guard`, resolved by the
   normal gateway (same credentials and headers).

@@ -21,6 +21,7 @@ from pathlib import Path
 from .application import HarnessApplication, build_application
 from .coding import CODING_AGENT_SYSTEM_PROMPT
 from .config import ConfigError, discover_config_path, load_config
+from .dotenv import load_dotenv
 from .application import open_memory_store
 from .memory import SQLiteMemoryStore
 from .domain import (
@@ -1082,6 +1083,8 @@ def _subcommand_names(parser: argparse.ArgumentParser) -> list[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if argv is None:  # started as a program (not called by a test or library): read ./.env
+        load_dotenv()
     parser = _parser()
     raw = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(_with_default_command(raw, _subcommand_names(parser)))

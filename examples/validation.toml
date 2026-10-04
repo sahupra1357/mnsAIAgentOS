@@ -39,7 +39,7 @@ min_params_b = 20
 # Entries without `profile` run on default_model_profile (llama.cpp in ../models.toml),
 # and "{profile}" in a baseline path becomes that profile, so baselines stay per provider.
 # Validate another provider end to end without editing this file:
-#   AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh
+#   AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh     (or set it in .env)
 # That profile serves everything itself: chat, embeddings (embedding_model), and the
 # guard model (guard_model), so no check here depends on a second provider.
 
@@ -205,7 +205,7 @@ max_error_rate = 0.34
 [[feature]]
 name = "core"
 description = "Agent loop, durable state, retries, budgets, runaway guards, tool runtime"
-tests = ["test_orchestrator", "test_config", "test_durability", "test_reliability", "test_runaway_guards",
+tests = ["test_orchestrator", "test_config", "test_dotenv_profile_switch", "test_durability", "test_reliability", "test_runaway_guards",
          "test_persistence", "test_store_conformance", "test_tools"]
 scenarios = ["calculator", "transient_model_failure", "unknown_tool_recovery",
              "repeated_call_refusal", "tool_calls_per_reply"]

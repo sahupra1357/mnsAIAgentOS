@@ -56,8 +56,12 @@ Rules:
     `default_model_profile` (llama.cpp). `{profile}` in a baseline path keeps baselines per
     provider.
   - **Embeddings:** the `memory` benchmark embeds with that profile's own `embedding_model`.
-  - **Another provider:** validate it with
-    `AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh`.
+  - **Another provider:** set `AGENT_HARNESS_MODEL_PROFILE` in `.env`, or for one run:
+    `AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh` (or `=modal`). That profile then
+    serves the smoke check and every benchmark, including embeddings and the guard model.
+  - **`.env`:** `scripts/validate.sh` reads `./.env`. The offline stages (static, unit,
+    scenarios) run without it (`AGENT_HARNESS_DOTENV=0`, and every `AGENT_HARNESS_*`
+    variable removed), so they behave the same on every machine.
   - **Feature name:** the feature smoke name is `default`.
 - **`humaneval` needs Docker.**
 - **The llama.cpp server's context size must match `context_window` (16384).**

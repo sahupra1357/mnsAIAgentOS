@@ -53,7 +53,21 @@ agent-harness --stream --model-profile ollama "Hello"
 ```
 
 The config file is found in this order: `--config FILE`, `$AGENT_HARNESS_CONFIG`,
-`./models.toml`, `~/.agent-harness/models.toml`. Every subcommand accepts `--config` to
+`./models.toml`, `~/.agent-harness/models.toml`.
+
+**Local settings in `.env`.** `agent-harness`, `agent-harness-bench`, and
+`scripts/validate.sh` read `./.env` at startup (`cp .env.example .env`). It holds what must
+not be committed:
+- credentials (`MODAL_LLM_API_KEY`, the Modal proxy token, `TAVILY_API_KEY`, ...);
+- real endpoints (for example `AGENT_HARNESS_MODEL__MODAL__ENDPOINT`);
+- the profile switch, `AGENT_HARNESS_MODEL_PROFILE`.
+
+How loading works:
+- **Shell wins:** variables already set in your shell win over `.env`.
+- **Other files:** `AGENT_HARNESS_ENV_FILE=path` picks another file, and
+  `AGENT_HARNESS_DOTENV=0` turns loading off.
+- **What is ignored:** `.env` and `.env.*` are gitignored; only `.env.example` is tracked.
+- **Hermetic checks:** unit tests and the offline validation stages never read it. Every subcommand accepts `--config` to
 override it. In `chat`, each message continues the same durable run; approvals and
 `ask_user` questions are asked inline; `/new`, `/status`, `/help`, and `/exit` are chat
 commands, and any other `/name` expands a prompt template. Each message gets
@@ -165,7 +179,7 @@ The endpoint can be a base ending in `/v1` or a full `/chat/completions` URL. Cr
 Configuration can also be overridden through environment variables:
 
 ```text
-AGENT_HARNESS_DEFAULT_MODEL_PROFILE
+AGENT_HARNESS_MODEL_PROFILE          # which profile serves everything (older name: AGENT_HARNESS_DEFAULT_MODEL_PROFILE)
 AGENT_HARNESS_MODEL__<PROFILE>__ADAPTER
 AGENT_HARNESS_MODEL__<PROFILE>__MODEL
 AGENT_HARNESS_MODEL__<PROFILE>__ENDPOINT
@@ -186,8 +200,23 @@ Each provider profile is self-contained:
   benchmark.
 - **Guard model:** `guard_model`, used by `[guardrails.model]`.
 
-Switching `default_model_profile` (or `AGENT_HARNESS_DEFAULT_MODEL_PROFILE`) switches all
-three; no setting points at a second provider.
+Switching the profile switches all three; no setting points at a second provider. The
+switch is one variable, normally kept in `.env`:
+
+```bash
+AGENT_HARNESS_MODEL_PROFILE=llamacpp   # or: ollama | modal
+```
+
+| `AGENT_HARNESS_MODEL_PROFILE` | Chat, embeddings, and guard model come from |
+|---|---|
+| `llamacpp` | the llama.cpp router (`:9931`) |
+| `ollama` | Ollama (`:11434`) |
+| `modal` | the three Modal deployments (endpoints in `.env`) |
+
+It overrides `default_model_profile` in `models.toml` everywhere: `agent-harness`, chat,
+`serve`, `doctor`, and the live validation stages. A shell variable overrides `.env` for one
+command: `AGENT_HARNESS_MODEL_PROFILE=ollama agent-harness "hi"`. The older name
+`AGENT_HARNESS_DEFAULT_MODEL_PROFILE` still works; the new one wins when both are set.
 
 ```toml
 [models.llamacpp]
@@ -220,7 +249,7 @@ Per provider:
     secret with `HF_TOKEN`, because the model is gated)
 
 `agent-harness doctor` also checks the embedding and guard models.
-`AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider end
+`AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider end
 to end: smoke and benchmark entries without a `profile` follow the default.
 
 ## Ollama, llama.cpp, and Modal

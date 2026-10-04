@@ -21,3 +21,6 @@ bench-results/
 .gstack/
 # Benchmark baselines are per machine and per model (scripts/validate.sh --update-baselines)
 baselines/
+# Local env variants and backups (secrets); the template stays tracked
+.env.*
+!.env.example
