@@ -136,8 +136,8 @@ max_error_rate = 0.34
 
 # Subagents: the top-level agent may only delegate (the `agent` tool) to a researcher subagent
 # that reads notes; questions have independent parts, ideally delegated in parallel. Correct
-# = every expected fact in the final answer AND at least `min_subagents` subagents ran.
-# details record subagents, max_parallel, facts_found. Synthetic data (no download).
+# = every expected fact in the final answer; how it delegated is reported, not scored
+# (details: subagents, max_parallel, facts_found). Synthetic data (no download).
 [[benchmark]]
 name = "agents"
 suite = "agents"
