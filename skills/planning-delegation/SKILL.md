@@ -8,7 +8,7 @@ description: Orchestrator-owned planning and delegation — the persisted plan (
 The model proposes; the **orchestrator owns** the plan. Plan state lives on the run and in
 events, so resume continues exactly where it stopped.
 
-## Plan model (`planning.py`, `domain.py`)
+## Plan model (`orchestration/planning.py`, `domain.py`)
 
 - `PlanStep(id, title, instructions, depends_on, agent, status, result, child_run_id,
   attempts)`.

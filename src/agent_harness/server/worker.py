@@ -30,8 +30,8 @@ from datetime import timedelta
 from uuid import uuid4
 
 from agent_harness.domain import ConcurrencyError, RunQueue, RunRecord, RunStatus, utc_now
-from agent_harness.notifications import WebhookNotifier
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.server.notifications import WebhookNotifier
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 
 
 logger = logging.getLogger(__name__)

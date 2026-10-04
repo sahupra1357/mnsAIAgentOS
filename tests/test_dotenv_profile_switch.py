@@ -11,10 +11,10 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_harness import cli
+import agent_harness.cli.main as cli
 from agent_harness.bench import cli as bench_cli
-from agent_harness.config import load_config
-from agent_harness.dotenv import load_dotenv, parse_dotenv
+from agent_harness.config.loader import load_config
+from agent_harness.config.dotenv import load_dotenv, parse_dotenv
 
 PROFILES = ('default_model_profile = "a"\n'
             '[models.a]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://a/v1"\n'

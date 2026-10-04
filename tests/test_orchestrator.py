@@ -21,7 +21,7 @@ from agent_harness.domain import (
     ToolSpec,
     Usage,
 )
-from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
+from agent_harness.orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
 
 

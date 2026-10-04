@@ -13,16 +13,16 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.api import HarnessAPI
+import agent_harness.cli.main as cli
+from agent_harness.server.api import HarnessAPI
 from agent_harness.application import build_application
-from agent_harness.artifacts import (
+from agent_harness.knowledge.artifacts import (
     READ_ARTIFACT_SPEC,
     InMemoryArtifactStore,
     LocalArtifactStore,
     read_artifact_handler,
 )
-from agent_harness.config import ConfigError, HarnessConfig, ModelProfile, load_config
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -37,14 +37,14 @@ from agent_harness.domain import (
     ToolRisk,
     ToolSpec,
 )
-from agent_harness.evals import Scenario, ScenarioError, load_scenarios, run_scenario, scenario_application
-from agent_harness.memory import (
+from agent_harness.bench.evals import Scenario, ScenarioError, load_scenarios, run_scenario, scenario_application
+from agent_harness.knowledge.memory import (
     MEMORY_SEARCH_SPEC,
     MEMORY_WRITE_SPEC,
     SQLiteMemoryStore,
     memory_tool_handlers,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
 from agent_harness.tools import ApprovalMode, DefaultToolPolicy, ToolRegistry, ToolRuntime, create_default_runtime
 

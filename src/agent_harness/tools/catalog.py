@@ -22,7 +22,7 @@ from agent_harness.domain import (
     ToolTrust,
 )
 from agent_harness.tools.registry import ToolRegistry
-from agent_harness.versioning import spec_sha256
+from agent_harness.orchestration.versioning import spec_sha256
 
 
 def spec_to_json(spec: ToolSpec) -> str:

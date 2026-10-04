@@ -97,7 +97,7 @@ from agent_harness.domain import (
 )
 from agent_harness.guardrails import Guardrails, GuardrailsConfig, GuardrailsConfigError
 from agent_harness.model_gateway import ScriptedModelClient
-from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
+from agent_harness.orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
 
 _TOP_LEVEL = {"name", "prompt", "system", "model_profile", "approve", "budget", "model", "expect",
@@ -303,7 +303,7 @@ async def scenario_application(
     """
 
     from agent_harness.application import build_application
-    from agent_harness.config import merge_tables
+    from agent_harness.config.loader import merge_tables
 
     with tempfile.TemporaryDirectory(prefix="agent-harness-scenario-") as scratch:
         root = Path(scratch)
@@ -333,7 +333,7 @@ def _settings(file: Path, raw: Any) -> OrchestratorSettings | None:
     if raw is None:
         return None
     from agent_harness.application import orchestrator_settings
-    from agent_harness.config import ConfigError, OrchestratorConfig, _parse_section
+    from agent_harness.config.loader import ConfigError, OrchestratorConfig, _parse_section
 
     try:
         return orchestrator_settings(_parse_section({"orchestrator": raw}, "orchestrator", OrchestratorConfig))
@@ -346,7 +346,7 @@ def _interaction(file: Path, raw: Any) -> dict[str, Any]:
 
     if raw is None:
         return {}
-    from agent_harness.config import ConfigError, InteractionConfig, _parse_section
+    from agent_harness.config.loader import ConfigError, InteractionConfig, _parse_section
 
     try:
         section = _parse_section({"interaction": raw}, "interaction", InteractionConfig)

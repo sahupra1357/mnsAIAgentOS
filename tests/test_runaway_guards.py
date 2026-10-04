@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 
-from agent_harness.config import ModelProfile
+from agent_harness.config.loader import ModelProfile
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -32,7 +32,7 @@ from agent_harness.model_gateway import (
     OllamaClient,
     OpenAICompatibleClient,
 )
-from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
+from agent_harness.orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
 
 ROOT = Path(__file__).resolve().parents[1]

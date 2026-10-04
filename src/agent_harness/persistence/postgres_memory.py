@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agent_harness.domain import MemoryItem, utc_now
-from agent_harness.memory import MAX_MEMORY_CHARS, memory_item_id
+from agent_harness.knowledge.memory import MAX_MEMORY_CHARS, memory_item_id
 
 from .postgres import _psycopg
 

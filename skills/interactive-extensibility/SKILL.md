@@ -40,9 +40,9 @@ Deviations from the design below:
   interrupted, but its response is discarded.
 
 6b is implemented: items 3, 5, 6, and 7.
-- `hooks.py`: `HookRunner`, `CallableHook`, `CommandHook` (argv, JSON I/O, timeout,
+- `extensions/hooks.py`: `HookRunner`, `CallableHook`, `CommandHook` (argv, JSON I/O, timeout,
   output limit), fail-closed for guarding events.
-- `permissions.py`: rule parser, `PermissionPolicy`, and the `exit_plan` spec.
+- `extensions/permissions.py`: rule parser, `PermissionPolicy`, and the `exit_plan` spec.
 - `RunRecord.mode`, `set_mode`, the `MODE_CHANGED` / `HOOK_DECIDED` events, and
   `resolve_approval(feedback=, mode=)`.
 - Pipeline in `_execute_tool`: pre_tool hook → permissions on the final arguments →
@@ -59,7 +59,7 @@ Not implemented:
 - `subagent_stop`: comes with subagents in 6c.
 
 6c is implemented: items 4 and 8.
-- `agents.py`: `SubagentDefinition`, `SubagentLimits`, the `agent` / `todo_write`
+- `orchestration/agents.py`: `SubagentDefinition`, `SubagentLimits`, the `agent` / `todo_write`
   specs, and deterministic `child_run_id`.
 - The orchestrator owns the virtual tools `agent` and `todo_write`. They go through
   hooks, permissions, and approval like other tools, then dispatch after approval.
@@ -76,12 +76,12 @@ Not implemented:
   `GET /runs/{id}`, and `/usage`.
 
 6d is implemented: items 9, 10, 11, 13, and 14.
-- `settings.py`: layers user → project → local, then enterprise last (it wins),
+- `config/settings.py`: layers user → project → local, then enterprise last (it wins),
   with provenance and `config show`.
-- `instructions.py`: instruction files, the skills index, `load_skill`, and
+- `extensions/instructions.py`: instruction files, the skills index, `load_skill`, and
   `SystemContextBuilder`, applied once in `create_run` for top-level runs.
-- `templates.py`: `/name` expansion with `$ARGUMENTS`, `$1`, and `${key}`.
-- `plugins.py`: manifest validation, install (copy; symlinks rejected), and
+- `extensions/templates.py`: `/name` expansion with `$ARGUMENTS`, `$1`, and `${key}`.
+- `extensions/plugins.py`: manifest validation, install (copy; symlinks rejected), and
   enable-by-name.
 - Config: `[instructions]`, `[skills]`, `[templates]`, `[plugins]`.
 - CLI: `templates`, `skills`, `config show`, `plugin install/list/remove`, and
@@ -94,7 +94,7 @@ never be removed.
 
 6e is implemented: item 12.
 - `ToolSpec.writes_paths` declares file-path arguments (`apply_patch` sets `path`).
-- `snapshots.py` `WorkspaceSnapshotter` stores pre-images content-addressed.
+- `orchestration/snapshots.py` `WorkspaceSnapshotter` stores pre-images content-addressed.
 - The orchestrator checkpoints `FILE_SNAPSHOT` *before* executing, so a replay never
   snapshots a post-image.
 - `rewind(run_id, to_step, confirm=)` is a dry run unless confirmed. When applied:
@@ -211,7 +211,7 @@ is deleted.
   (marked estimated), wall time versus budget, and child-run rollup.
 
 ## `ask_user` (Phase 11d)
-- `interaction.py` defines `ASK_USER_SPEC`. It is offered only with `[interaction] ask_user = true`
+- `orchestration/interaction.py` defines `ASK_USER_SPEC`. It is offered only with `[interaction] ask_user = true`
   (`AgentOrchestrator(ask_user=True)`), after `todo_write`, and is read-only, so plan mode
   and the planning phase keep it.
 - The call is validated against its schema, then `_request_approval(kind="question")` pauses

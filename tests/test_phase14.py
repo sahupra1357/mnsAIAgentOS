@@ -14,8 +14,8 @@ from typing import Any
 
 from agent_harness.bench.core import BenchContext, BenchItem
 from agent_harness.bench.suites import QaSuite, parse_verdict
-from agent_harness.config import ConfigError, HarnessConfig, ModelProfile, load_config
-from agent_harness.context import context_policy_from_config
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
+from agent_harness.orchestration.context import context_policy_from_config
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -27,11 +27,11 @@ from agent_harness.domain import (
     ToolCall,
     ToolResultStatus,
 )
-from agent_harness.evals import ScenarioError, load_scenarios, run_scenario
+from agent_harness.bench.evals import ScenarioError, load_scenarios, run_scenario
 from agent_harness.mcp.config import McpServerConfig
 from agent_harness.mcp.connection import HttpConnection
 from agent_harness.mcp.source import McpToolSource
-from agent_harness.memory import SQLiteMemoryStore
+from agent_harness.knowledge.memory import SQLiteMemoryStore
 from agent_harness.model_gateway import (
     HttpResponse,
     LlamaCppClient,
@@ -40,10 +40,10 @@ from agent_harness.model_gateway import (
     OllamaClient,
     OpenAICompatibleClient,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
-from agent_harness.semantic_memory import SemanticMemoryStore, VectorIndex
-from agent_harness.tool_sources import WebFetchSource, host_policy_from
+from agent_harness.knowledge.semantic_memory import SemanticMemoryStore, VectorIndex
+from agent_harness.tools.sources import WebFetchSource, host_policy_from
 from agent_harness.tools import ToolRegistry, ToolRuntime, create_default_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -346,7 +346,7 @@ class SemanticMemoryTests(unittest.IsolatedAsyncioTestCase):
         await self.inner.put("Cats are good pets.")
         degraded = SemanticMemoryStore(self.inner, broken_embed, VectorIndex(Path(self.directory.name) / "v.sqlite3"),
                                        model="e")
-        with self.assertLogs("agent_harness.semantic_memory", "WARNING"):
+        with self.assertLogs("agent_harness.knowledge.semantic_memory", "WARNING"):
             self.assertEqual([i.text for i in await degraded.search("cats")], ["Cats are good pets."])
             await degraded.put("Saved even when embedding fails.")
         self.assertTrue(await self.inner.search("embedding"))

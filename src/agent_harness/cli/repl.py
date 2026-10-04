@@ -14,8 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from .domain import Message, Role, RunBudget, RunRecord, RunStatus
-from .templates import expand_prompt
+from ..domain import Message, Role, RunBudget, RunRecord, RunStatus
+from ..extensions.templates import expand_prompt
 
 HELP = """commands:
   /new      start a new conversation

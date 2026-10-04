@@ -10,8 +10,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.config import ConfigError, HarnessConfig, ModelProfile, load_config
+import agent_harness.cli.main as cli
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
 from agent_harness.domain import (
     FinishReason,
     Message,

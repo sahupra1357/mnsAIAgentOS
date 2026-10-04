@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_harness.config import AgentConfig, ConfigError, HookConfig
+from agent_harness.config.loader import AgentConfig, ConfigError, HookConfig
 
 MANIFEST = "plugin.toml"
 _NAME = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")

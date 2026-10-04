@@ -1251,7 +1251,7 @@ agent-harness serve --host 127.0.0.1 --port 8000 --workers 2
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key=TOKEN)
 reply = client.chat.completions.create(model="agent-harness",
-                                       messages=[{"role": "user", "content": "Explain repl.py"}])
+                                       messages=[{"role": "user", "content": "Explain cli/repl.py"}])
 ```
 
 - **One conversation is one durable run.** Clients resend the whole history on every
@@ -1377,7 +1377,7 @@ options:
 - structured output;
 - `ask_user`.
 
-The scenarios stage of every pipeline run checks them. See `src/agent_harness/evals.py`
+The scenarios stage of every pipeline run checks them. See `src/agent_harness/bench/evals.py`
 for the file format. The command exits 1 if any scenario fails.
 
 **Model-graded answers.** For open-ended questions, the `qa` benchmark suite can ask a

@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli
+import agent_harness.cli.main as cli
 from agent_harness.application import build_application, memory_postgres_url
-from agent_harness.config import ConfigError, load_config
-from agent_harness.memory import SQLiteMemoryStore
+from agent_harness.config.loader import ConfigError, load_config
+from agent_harness.knowledge.memory import SQLiteMemoryStore
 
 POSTGRES_DSN = os.environ.get("AGENT_HARNESS_TEST_POSTGRES_DSN")
 MODEL = '[models.p]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://x/v1"\n'

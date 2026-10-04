@@ -23,11 +23,11 @@ from agent_harness.domain import (
     Role,
     RunStatus,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
-from agent_harness.redaction import RedactingRunStore, Redactor
+from agent_harness.observability.redaction import RedactingRunStore, Redactor
 from agent_harness.tools import ToolRegistry, ToolRuntime
-from agent_harness.worker import Worker
+from agent_harness.server.worker import Worker
 
 
 class Clock:
@@ -76,7 +76,7 @@ class DeadLetterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await store.claim(worker_id, 10), run_id)
             clock.now += 100
         worker = Worker(orch, store, worker_id="w", max_attempts=2)
-        with self.assertLogs("agent_harness.worker", "ERROR"):
+        with self.assertLogs("agent_harness.server.worker", "ERROR"):
             self.assertIsNone(await worker.run_once())  # the 3rd claim exceeds max_attempts
         run = await store.get_run(run_id)
         assert run is not None
@@ -97,7 +97,7 @@ class DeadLetterTests(unittest.IsolatedAsyncioTestCase):
 
         broken = Raising(models=Model(), tools=ToolRuntime(ToolRegistry()), store=store)
         worker = Worker(broken, store, worker_id="w", max_unexpected_failures=2)
-        with self.assertLogs("agent_harness.worker", "ERROR"):
+        with self.assertLogs("agent_harness.server.worker", "ERROR"):
             for _ in range(2):
                 await worker.run_once()
         run = await store.get_run(run_id)
@@ -149,7 +149,7 @@ class ReconcilerTests(unittest.IsolatedAsyncioTestCase):
         worker = Worker(orch, store, worker_id="w", stale_seconds=1)
         self.assertEqual(await worker.reconcile(), [])  # not stale yet (just updated)
         worker._stale = timedelta(seconds=-60)  # everything counts as stale now
-        with self.assertLogs("agent_harness.worker", "WARNING"):
+        with self.assertLogs("agent_harness.server.worker", "WARNING"):
             self.assertEqual(await worker.reconcile(), [orphan])
         self.assertEqual(await store.claim("w", 10), orphan)
         self.assertIsNone(await store.claim("w2", 10))  # the inline (CLI) run is never taken
@@ -170,7 +170,7 @@ class ReconcilerTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
             stop.set()
 
-        with self.assertLogs("agent_harness.worker", "WARNING"):
+        with self.assertLogs("agent_harness.server.worker", "WARNING"):
             await asyncio.wait_for(asyncio.gather(worker.run_forever(stop), stop_when_done()), 5)
 
     async def test_stores_without_support_are_skipped(self) -> None:
@@ -192,7 +192,7 @@ class CancelTests(unittest.IsolatedAsyncioTestCase):
         running = asyncio.create_task(worker.run_once())
         await asyncio.sleep(0.05)  # the model call is in flight
         await orch.cancel(run_id)
-        with self.assertLogs("agent_harness.worker", "INFO"):
+        with self.assertLogs("agent_harness.server.worker", "INFO"):
             self.assertIsNone(await asyncio.wait_for(running, 2))
         self.assertEqual(model.cancelled, 1)
         run = await store.get_run(run_id)

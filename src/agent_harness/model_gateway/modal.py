@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_harness.config import ModelProfile
+from agent_harness.config.loader import ModelProfile
 
 from .errors import ModelConfigurationError
 from .openai_compatible import OpenAICompatibleClient

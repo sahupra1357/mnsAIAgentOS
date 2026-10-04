@@ -17,10 +17,10 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.agents import AGENT_TOOL, SubagentDefinition, child_run_id
-from agent_harness.api import HarnessAPI
-from agent_harness.config import ConfigError, HarnessConfig, ModelProfile, load_config
+import agent_harness.cli.main as cli
+from agent_harness.orchestration.agents import AGENT_TOOL, SubagentDefinition, child_run_id
+from agent_harness.server.api import HarnessAPI
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -32,9 +32,9 @@ from agent_harness.domain import (
     RunStatus,
     ToolCall,
 )
-from agent_harness.interaction import ASK_USER_TOOL
+from agent_harness.orchestration.interaction import ASK_USER_TOOL
 from agent_harness.model_gateway import HttpResponse
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
 from agent_harness.tools import create_default_runtime
 

@@ -10,8 +10,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_harness.application import build_application
-from agent_harness.config import ConfigError, load_config
-from agent_harness.instructions import (
+from agent_harness.config.loader import ConfigError, load_config
+from agent_harness.extensions.instructions import (
     SystemContextBuilder,
     discover_subdirectory_instructions,
     validate_instruction_filenames,

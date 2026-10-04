@@ -19,7 +19,7 @@ from typing import Any, Mapping
 from agent_harness.coding.config import CodingAgentConfig, parse_coding_config
 from agent_harness.domain import ToolRisk
 from agent_harness.guardrails.config import GuardrailsConfig, GuardrailsConfigError
-from agent_harness.secrets import is_secret_ref
+from agent_harness.config.secrets import is_secret_ref
 from agent_harness.mcp.config import McpServerConfig
 
 
@@ -310,7 +310,7 @@ class PermissionsConfig:
     edit_tools: tuple[str, ...] = ("apply_patch",)
 
     def __post_init__(self) -> None:
-        from agent_harness.permissions import PermissionRule, PermissionRuleError
+        from agent_harness.extensions.permissions import PermissionRule, PermissionRuleError
 
         if self.mode not in _PERMISSION_MODES:
             raise ConfigError(f"permissions.mode must be one of {sorted(_PERMISSION_MODES)}")
@@ -901,7 +901,7 @@ def load_config(
     configured_path = path or env.get("AGENT_HARNESS_CONFIG")
     raw: dict[str, Any] = {}
     if layered:
-        from agent_harness.settings import SettingsError, load_layers
+        from agent_harness.config.settings import SettingsError, load_layers
 
         try:
             raw = load_layers(Path(configured_path) if configured_path else None, env).raw

@@ -8,7 +8,7 @@
 # they need; they stay off until you provide it.
 #
 #   agent-harness                      # interactive chat on the default profile
-#   agent-harness "Explain src/agent_harness/repl.py"
+#   agent-harness "Explain src/agent_harness/cli/repl.py"
 #   agent-harness profiles             # which profiles are on
 #   agent-harness config show          # every value below and where it came from
 #   scripts/validate.sh                # validate every feature (offline + live)

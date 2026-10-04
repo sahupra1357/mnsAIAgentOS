@@ -11,8 +11,8 @@ from collections.abc import Sequence
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from agent_harness import cli
-from agent_harness.config import (
+import agent_harness.cli.main as cli
+from agent_harness.config.loader import (
     ConfigError,
     HarnessConfig,
     ModelPricing,
@@ -46,7 +46,7 @@ from agent_harness.model_gateway import (
     RetryableProviderError,
 )
 from agent_harness.model_gateway.cost import estimate_cost_usd
-from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
+from agent_harness.orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
 
 

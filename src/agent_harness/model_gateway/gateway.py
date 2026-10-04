@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Mapping
 
-from agent_harness.config import HarnessConfig, ModelProfile
+from agent_harness.config.loader import HarnessConfig, ModelProfile
 from agent_harness.domain import ModelClient
 
 from .errors import ModelConfigurationError

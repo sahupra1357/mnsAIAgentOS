@@ -6,8 +6,8 @@ import unittest
 from collections import deque
 from collections.abc import Sequence
 
-from agent_harness.config import ModelProfile
-from agent_harness.context import (
+from agent_harness.config.loader import ModelProfile
+from agent_harness.orchestration.context import (
     BudgetedContextBuilder,
     ContextLimits,
     ContextPolicy,
@@ -30,7 +30,7 @@ from agent_harness.domain import (
     ToolResultStatus,
     ToolSpec,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
 
 

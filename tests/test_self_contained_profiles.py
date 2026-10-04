@@ -11,12 +11,12 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_harness import cli
+import agent_harness.cli.main as cli
 from agent_harness.bench import cli as bench_cli
-from agent_harness.config import ConfigError, load_config
+from agent_harness.config.loader import ConfigError, load_config
 from agent_harness.model_gateway import HttpResponse, ModelGateway
 from agent_harness.model_gateway.diagnostics import CheckStatus, companion_checks
-from agent_harness.versioning import profile_sha256
+from agent_harness.orchestration.versioning import profile_sha256
 
 LLAMA = ('[models.llama]\nadapter = "llama_cpp"\nmodel = "chat-model"\nendpoint = "http://router:9931/v1"\n'
          'api_key_env = "LLAMA_KEY"\n')

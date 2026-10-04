@@ -717,8 +717,8 @@ class MemorySuite:
         return items
 
     async def run(self, item: BenchItem, context: BenchContext) -> ItemResult:
-        from agent_harness.memory import MEMORY_SEARCH_SPEC, SQLiteMemoryStore, memory_tool_handlers
-        from agent_harness.semantic_memory import SemanticMemoryStore, VectorIndex
+        from agent_harness.knowledge.memory import MEMORY_SEARCH_SPEC, SQLiteMemoryStore, memory_tool_handlers
+        from agent_harness.knowledge.semantic_memory import SemanticMemoryStore, VectorIndex
 
         started = time.monotonic()
         mode = str(context.options.get("search", "hybrid"))
@@ -799,7 +799,7 @@ class AgentsSuite:
         return items
 
     async def run(self, item: BenchItem, context: BenchContext) -> ItemResult:
-        from agent_harness.agents import AGENT_TOOL, SubagentDefinition
+        from agent_harness.orchestration.agents import AGENT_TOOL, SubagentDefinition
         from agent_harness.domain import EventType, ToolRisk
 
         started = time.monotonic()

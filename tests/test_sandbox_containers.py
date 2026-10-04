@@ -21,11 +21,11 @@ from typing import Any
 
 from agent_harness.coding.guardrails import CommandGuardrails
 from agent_harness.coding.execution import CommandResult, DockerExecutionRuntime, DockerRuntimeConfig
-from agent_harness.config import ConfigError, load_config
+from agent_harness.config.loader import ConfigError, load_config
 from agent_harness.domain import FinishReason, Message, ModelRequest, ModelResponse, Role, RunStatus, ToolCall
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
-from agent_harness.runcontext import CURRENT_RUN_ID, current_run_id
+from agent_harness.orchestration.runcontext import CURRENT_RUN_ID, current_run_id
 from agent_harness.sandbox.containers import ContainerSpec, WarmContainerPool
 from agent_harness.sandbox.python_tools import SandboxConfig, SandboxedPythonSource
 from agent_harness.tools import ToolRegistry, ToolRuntime
@@ -260,7 +260,7 @@ class SandboxedToolTests(unittest.IsolatedAsyncioTestCase):
             env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(SRC), directory])}
 
             def runner(*args: str, stdin: str = "") -> Any:
-                done = subprocess.run([sys.executable, "-m", "agent_harness.sandbox_runner", *args], input=stdin,
+                done = subprocess.run([sys.executable, "-m", "agent_harness.sandbox.runner", *args], input=stdin,
                                       capture_output=True, text=True, env=env, timeout=60)
                 return json.loads(done.stdout)
 

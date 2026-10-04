@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from agent_harness.config import ConfigError, HarnessConfig, ModelProfile, load_config
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
 
 
 class ConfigTests(unittest.TestCase):

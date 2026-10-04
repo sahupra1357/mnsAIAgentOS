@@ -37,14 +37,14 @@ from agent_harness.coding.execution import (
     DockerRuntimeConfig,
     LocalProcessRuntime,
 )
-from agent_harness.config import ConfigError, load_config
-from agent_harness.context import BudgetedContextBuilder, context_policy_from_config, limits_from_profiles
+from agent_harness.config.loader import ConfigError, load_config
+from agent_harness.orchestration.context import BudgetedContextBuilder, context_policy_from_config, limits_from_profiles
 from agent_harness.domain import ModelResolver, RunBudget, TelemetrySink
-from agent_harness.telemetry import JsonLinesTelemetry
+from agent_harness.observability.telemetry import JsonLinesTelemetry
 from agent_harness.model_gateway import ModelGateway
 
 from .compare import Thresholds, compare_reports
-from agent_harness.dotenv import load_dotenv
+from agent_harness.config.dotenv import load_dotenv
 
 from .core import BenchConfigError, BenchContext, ExecutionFactory, ItemResult
 from .data import DatasetError, file_sha256
@@ -58,7 +58,7 @@ from .suites import SUITES, docker_problem
 
 ALL_STAGES = ("static", "unit", "scenarios", "smoke", "benchmarks", "gates")
 # Runs `agent-harness ARGS` the way tests do: main(argv) does not read ./.env.
-_CLI_WITHOUT_DOTENV = "import sys; from agent_harness.cli import main; sys.exit(main(sys.argv[1:]))"
+_CLI_WITHOUT_DOTENV = "import sys; from agent_harness.cli.main import main; sys.exit(main(sys.argv[1:]))"
 # Stages that need no model server (--offline keeps only these).
 OFFLINE_STAGES = ("static", "unit", "scenarios")
 

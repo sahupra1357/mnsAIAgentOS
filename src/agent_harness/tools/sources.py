@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit
 
 from agent_harness.domain import JsonObject, ToolRisk, ToolSpec, ToolTrust
-from agent_harness.secrets import describe, resolve_secret
+from agent_harness.config.secrets import describe, resolve_secret
 from agent_harness.model_gateway.transport import (
     HttpResponse,
     HttpTransport,

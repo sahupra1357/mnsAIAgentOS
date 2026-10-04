@@ -48,7 +48,7 @@ main()
 resolved to its profile, and the route is recorded on the run.
 
 Defaults (Phase 15a, 16e), applied in `main()` before any command runs:
-- **`.env`:** when started as a program (`argv is None`), `load_dotenv()` (in `dotenv.py`)
+- **`.env`:** when started as a program (`argv is None`), `load_dotenv()` (in `config/dotenv.py`)
   reads `./.env`, setting only variables that are not already set. `agent-harness-bench`
   does the same. `main([...])` (tests, the offline validation stages) never reads it.
 - **Profile switch:** `load_config()` takes `AGENT_HARNESS_MODEL_PROFILE` (else
@@ -57,13 +57,13 @@ Defaults (Phase 15a, 16e), applied in `main()` before any command runs:
 - **Implicit command:** `_with_default_command()` turns `agent-harness` (no arguments)
   into `agent-harness chat`, and `agent-harness "prompt"` (first argument not a
   subcommand) into `agent-harness run "prompt"`.
-- **Config discovery:** `discover_config_path()` (in `config.py`) resolves a missing
+- **Config discovery:** `discover_config_path()` (in `config/loader.py`) resolves a missing
   `--config` to `$AGENT_HARNESS_CONFIG`, `./models.toml`, or `~/.agent-harness/models.toml`,
   in that order. `load_config()` itself never searches.
 - **Profile switches:** `load_config()` removes profiles with `enabled = false`, drops
   routes to them, and prunes them from fallback chains (`HarnessConfig.disabled_models`).
 
-The chat flow (`repl.py`):
+The chat flow (`cli/repl.py`):
 
 ```text
 main() → _chat_command()
@@ -77,7 +77,7 @@ main() → _chat_command()
               └── _show()          # streamed text or the last answer
 ```
 
-Relevant files: `src/agent_harness/cli.py`, `src/agent_harness/repl.py`
+Relevant files: `src/agent_harness/cli/main.py`, `src/agent_harness/cli/repl.py`
 
 ## 2. Application construction
 
@@ -232,7 +232,7 @@ The orchestrator then enters its execution loop. Each iteration:
 1. Reloads the run if another process changed it (a cancel, an approval, a steer).
 2. Performs exactly one transition (`_advance`) and checkpoints it.
 
-Relevant file: `src/agent_harness/orchestrator.py`
+Relevant file: `src/agent_harness/orchestration/orchestrator.py`
 
 ## 5. Step boundary
 
@@ -383,7 +383,7 @@ Each tool call then goes through these checks, in order:
    the last non-read-only call are refused. Each reply counts once, however many duplicates
    it holds. The run fails after `max_refused_repeats` (2) refusals.
 3. **`pre_tool` hook:** it can deny the call or modify its arguments.
-4. **Permission decision** (`permissions.py`); the first match wins:
+4. **Permission decision** (`extensions/permissions.py`); the first match wins:
    1. deny rules, which always win;
    2. permission mode: `plan` refuses non-read-only tools; `bypass` and `accept_edits`
       pre-approve;
@@ -423,7 +423,7 @@ Relevant directories:
 
 - `src/agent_harness/tools`
 - `src/agent_harness/coding`
-- `src/agent_harness/permissions.py`, `src/agent_harness/hooks.py`
+- `src/agent_harness/extensions/permissions.py`, `src/agent_harness/extensions/hooks.py`
 
 ## 9. Read-only tool execution
 
@@ -680,7 +680,7 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
     steers one that is still running.
   - Approvals: read with `GET /runs/{id}/approval`, decide with `POST /runs/{id}/approval`.
   - Usage: `GET /runs/{id}/usage`.
-  - OpenAI-compatible (Phase 15d, `openai_chat.py`): `GET /v1/models` and
+  - OpenAI-compatible (Phase 15d, `server/openai_chat.py`): `GET /v1/models` and
     `POST /v1/chat/completions`. `OpenAIChat.complete()` handles one request:
 
     ```text
@@ -694,7 +694,7 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
     reply: newest answer, or pause_text(pending)
     save_conversation(digest of messages + reply, run_id)
     ```
-- **Web chat:** `GET /ui` serves `src/agent_harness/ui/index.html` (no key needed for the page;
+- **Web chat:** `GET /ui` serves `src/agent_harness/server/ui/index.html` (no key needed for the page;
   every call it makes is authenticated). It drives the same endpoints: `POST /runs`,
   `GET /runs/{id}/stream` (read with `fetch`, so the bearer header is sent), `/messages`,
   `/approval`, `/answer`, `/usage`, `/events`, `/cancel`, `/steer`.

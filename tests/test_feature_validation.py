@@ -12,12 +12,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_harness import cli
+import agent_harness.cli.main as cli
 from agent_harness.bench import cli as bench_cli
 from agent_harness.bench.core import BenchConfigError
 from agent_harness.bench.features import parse_features, select_features, uncovered
-from agent_harness.config import load_config
-from agent_harness.evals import ScenarioError, load_scenarios, run_scenario
+from agent_harness.config.loader import load_config
+from agent_harness.bench.evals import ScenarioError, load_scenarios, run_scenario
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN = ROOT / "examples" / "validation.toml"

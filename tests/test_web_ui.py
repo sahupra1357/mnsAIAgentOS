@@ -7,13 +7,13 @@ import re
 import unittest
 from pathlib import Path
 
-from agent_harness.api import HarnessAPI
-from agent_harness.config import HarnessConfig, ModelProfile
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.server.api import HarnessAPI
+from agent_harness.config.loader import HarnessConfig, ModelProfile
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
 from agent_harness.tools import ToolRegistry, ToolRuntime
 
-PAGE = Path(__file__).resolve().parents[1] / "src" / "agent_harness" / "ui" / "index.html"
+PAGE = Path(__file__).resolve().parents[1] / "src" / "agent_harness" / "server" / "ui" / "index.html"
 
 
 def api() -> HarnessAPI:

@@ -10,7 +10,7 @@ from typing import Any
 
 from agent_harness.domain import JsonObject, ToolRisk, ToolSpec, ToolTrust
 from agent_harness.model_gateway.transport import HttpTransport
-from agent_harness.secrets import describe, resolve_secret
+from agent_harness.config.secrets import describe, resolve_secret
 from agent_harness.tools.runtime import RetryableToolError, ToolRejectedError, ToolRuntime
 
 from .client import McpClient, McpTool, content_text, prompt_text, resource_text

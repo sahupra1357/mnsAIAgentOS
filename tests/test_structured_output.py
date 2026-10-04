@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.api import HarnessAPI
-from agent_harness.config import HarnessConfig, ModelProfile
+import agent_harness.cli.main as cli
+from agent_harness.server.api import HarnessAPI
+from agent_harness.config.loader import HarnessConfig, ModelProfile
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -33,9 +33,9 @@ from agent_harness.domain import (
     ToolCall,
 )
 from agent_harness.model_gateway import HttpResponse, OllamaClient, OpenAICompatibleClient
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
-from agent_harness.structured_output import SUBMIT_RESULT_TOOL, result_from_text
+from agent_harness.orchestration.structured_output import SUBMIT_RESULT_TOOL, result_from_text
 from agent_harness.tools import ToolRegistry, ToolRuntime, create_default_runtime
 from agent_harness.tools.validation import ArgumentValidationError
 

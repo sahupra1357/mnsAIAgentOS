@@ -9,7 +9,7 @@ ASGI lifespan protocol.
 Endpoints (all JSON; every route except ``/healthz`` and ``/readyz`` requires
 ``Authorization: Bearer <key>`` unless auth was explicitly disabled). Keys map to
 a principal with a tenant and a role (viewer < operator < admin; see
-``agent_harness.access``); a principal sees only its tenant's runs:
+``agent_harness.server.access``); a principal sees only its tenant's runs:
 
     GET  /ui                        built-in web chat (static page; it calls the API with your key)
     GET  /healthz                   liveness
@@ -39,7 +39,7 @@ a principal with a tenant and a role (viewer < operator < admin; see
     POST /runs/{id}/mode            {"mode": "default" | "accept_edits" | "plan" | "bypass"}
     POST /runs/{id}/rewind          {"to_step", "confirm"?}  (dry run unless confirm)
 
-OpenAI-compatible (Phase 15d; see ``agent_harness.openai_chat``), so chat clients can
+OpenAI-compatible (Phase 15d; see ``agent_harness.server.openai_chat``), so chat clients can
 use the harness as a model:
 
     GET  /v1/models                 profiles, routes, and "agent-harness" (the default)
@@ -62,12 +62,12 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs
 
-from agent_harness.artifacts import referenced_artifacts
-from agent_harness.access import Principal, PrincipalDirectory, Quota, QuotaExceeded, check_quota
-from agent_harness.notifications import notifier_from_config
-from agent_harness.streaming import StreamHub
-from agent_harness.access import Role as AccessRole
-from agent_harness.config import ConfigError, HarnessConfig
+from agent_harness.knowledge.artifacts import referenced_artifacts
+from agent_harness.server.access import Principal, PrincipalDirectory, Quota, QuotaExceeded, check_quota
+from agent_harness.server.notifications import notifier_from_config
+from agent_harness.server.streaming import StreamHub
+from agent_harness.server.access import Role as AccessRole
+from agent_harness.config.loader import ConfigError, HarnessConfig
 from agent_harness.domain import (
     ContentPart,
     ArtifactStore,
@@ -84,12 +84,12 @@ from agent_harness.domain import (
     RunStore,
     RunSummary,
 )
-from agent_harness.openai_chat import RUN_HEADER, ChatRequestError, OpenAIChat, parse_chat_request
-from agent_harness.orchestrator import AgentOrchestrator, validate_image_url
-from agent_harness.planning import plan_payload
-from agent_harness.ratelimit import RateLimiter
-from agent_harness.templates import Template, TemplateError, expand_prompt
-from agent_harness.worker import Worker, run_is_settled
+from agent_harness.server.openai_chat import RUN_HEADER, ChatRequestError, OpenAIChat, parse_chat_request
+from agent_harness.orchestration.orchestrator import AgentOrchestrator, validate_image_url
+from agent_harness.orchestration.planning import plan_payload
+from agent_harness.server.ratelimit import RateLimiter
+from agent_harness.extensions.templates import Template, TemplateError, expand_prompt
+from agent_harness.server.worker import Worker, run_is_settled
 
 
 Scope = Mapping[str, Any]
@@ -945,7 +945,7 @@ _UI_CSP = (
 
 @functools.cache
 def _ui_page() -> bytes:
-    return importlib.resources.files("agent_harness").joinpath("ui/index.html").read_bytes()
+    return importlib.resources.files("agent_harness.server").joinpath("ui/index.html").read_bytes()
 
 
 async def _send_ui(send: Send) -> None:
@@ -1069,7 +1069,7 @@ def create_api(
 ) -> HarnessAPI:
     """Build the API for a :class:`~agent_harness.application.HarnessApplication`."""
 
-    from agent_harness.access import api_keys_from_config
+    from agent_harness.server.access import api_keys_from_config
     from agent_harness.coding import CODING_AGENT_SYSTEM_PROMPT
 
     if worker_count < 0:

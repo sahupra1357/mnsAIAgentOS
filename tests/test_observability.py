@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.config import ModelProfile
+import agent_harness.cli.main as cli
+from agent_harness.config.loader import ModelProfile
 from agent_harness.domain import (
     FinishReason,
     Message,
@@ -40,9 +40,9 @@ from agent_harness.model_gateway import (
     OpenAICompatibleClient,
     ThrottlingError,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
-from agent_harness.telemetry import (
+from agent_harness.observability.telemetry import (
     JsonLinesTelemetry,
     MetricsTelemetry,
     MultiTelemetry,

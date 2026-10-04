@@ -10,10 +10,10 @@ from typing import Any
 from os import PathLike
 from pathlib import Path
 
-from .agents import SubagentDefinition, SubagentLimits
-from .artifacts import READ_ARTIFACT_SPEC, LocalArtifactStore, read_artifact_handler
+from .orchestration.agents import SubagentDefinition, SubagentLimits
+from .knowledge.artifacts import READ_ARTIFACT_SPEC, LocalArtifactStore, read_artifact_handler
 from .coding import create_coding_tool_runtime
-from .config import (
+from .config.loader import (
     AgentConfig,
     ConfigError,
     HarnessConfig,
@@ -21,7 +21,7 @@ from .config import (
     OrchestratorConfig,
     load_config,
 )
-from .instructions import (
+from .extensions.instructions import (
     Skill,
     SystemContextBuilder,
     discover_skills,
@@ -30,10 +30,10 @@ from .instructions import (
     resolve_path,
     validate_instruction_filenames,
 )
-from .plugins import Plugin, enabled_plugins
-from .snapshots import WorkspaceSnapshotter
-from .templates import Template, discover_templates
-from .context import (
+from .extensions.plugins import Plugin, enabled_plugins
+from .orchestration.snapshots import WorkspaceSnapshotter
+from .extensions.templates import Template, discover_templates
+from .orchestration.context import (
     BudgetedContextBuilder,
     ContextLimits,
     ContextPolicy,
@@ -44,20 +44,20 @@ from .context import (
 )
 from .domain import ArtifactStore, ModelResolver, PermissionMode, StreamListener, TelemetrySink
 from .guardrails import Guardrails
-from .hooks import CommandHook, HookEvent, HookRunner
-from .memory import MEMORY_SEARCH_SPEC, MEMORY_WRITE_SPEC, SQLiteMemoryStore, memory_tool_handlers
-from .permissions import PermissionPolicy
+from .extensions.hooks import CommandHook, HookEvent, HookRunner
+from .knowledge.memory import MEMORY_SEARCH_SPEC, MEMORY_WRITE_SPEC, SQLiteMemoryStore, memory_tool_handlers
+from .extensions.permissions import PermissionPolicy
 from .model_gateway import ModelGateway
-from .orchestrator import AgentOrchestrator, OrchestratorSettings
+from .orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
 from .persistence import SQLiteRunStore
 from .tools import ToolRuntime, create_default_runtime
-from .versioning import profile_sha256
+from .orchestration.versioning import profile_sha256
 from .domain import ToolRisk, ToolTrust
 from .mcp.source import McpToolSource
-from .tool_catalog import ToolCatalog
-from .tool_loading import ToolLoadingPolicy
-from .planning import PlanningPolicy
-from .tool_sources import (
+from .tools.catalog import ToolCatalog
+from .tools.loading import ToolLoadingPolicy
+from .orchestration.planning import PlanningPolicy
+from .tools.sources import (
     HttpToolSource,
     PythonToolSource,
     ToolSourceError,
@@ -65,9 +65,9 @@ from .tool_sources import (
     WebSearchSource,
     host_policy_from,
 )
-from .access import Quota
+from .server.access import Quota
 from .mcp.connection import McpError
-from .redaction import RedactingRunStore, RedactingTelemetry, Redactor
+from .observability.redaction import RedactingRunStore, RedactingTelemetry, Redactor
 from urllib.parse import urlsplit
 
 
@@ -448,7 +448,7 @@ def open_memory_store(
         vectors = base_path / config.memory.vectors if config.memory.vectors else notes
     if config.memory.search == "keyword":
         return store
-    from .semantic_memory import SemanticMemoryStore, VectorIndex
+    from .knowledge.semantic_memory import SemanticMemoryStore, VectorIndex
 
     try:
         profile = config.resolve_model_name(config.memory.embedding_profile)
