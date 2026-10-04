@@ -137,6 +137,18 @@ class HistoryTests(unittest.TestCase):
             (newer / "timings.json").write_text("not json")
             self.assertEqual(previous_timings([newer], current).stages, {})
 
+    def test_estimates_come_from_the_same_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            slow, fast, current = root / "slow", root / "fast", root / "now"
+            for run in (slow, fast, current):
+                run.mkdir()
+            (slow / "timings.json").write_text(json.dumps({"profile": "ollama", "items": {"gsm8k": 99}}))
+            (fast / "timings.json").write_text(json.dumps({"profile": "llamacpp", "items": {"gsm8k": 49}}))
+            runs = [slow, fast]  # the newest run was on another profile
+            self.assertEqual(previous_timings(runs, current, "llamacpp").items, {"gsm8k": 49.0})
+            self.assertEqual(previous_timings(runs, current, "modal").items, {})  # no history: estimating
+
 
 class PipelineTests(unittest.TestCase):
     def test_pipeline_records_durations_and_timings(self) -> None:
@@ -144,7 +156,7 @@ class PipelineTests(unittest.TestCase):
             base = Path(directory)
             (base / "evals").mkdir()
             (base / "models.toml").write_text(
-                '[models.p]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://x/v1"\n')
+                '[models.a]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://x/v1"\n')
             (base / "plan.toml").write_text('[pipeline]\nconfig = "models.toml"\nrepo = "."\noutput_dir = "out"\n'
                                             '[scenarios]\npath = "evals"\n')
             live = PipelineProgress(io.StringIO(), interactive=False)
@@ -157,6 +169,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([r.stage for r in results], ["unit", "scenarios"])
         self.assertTrue(all("duration_seconds" in row for row in summary))
         self.assertEqual(set(timings["stages"]), {"unit", "scenarios"})
+        self.assertEqual(timings["profile"], "a")  # the config's default profile
 
 
 if __name__ == "__main__":

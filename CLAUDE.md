@@ -108,6 +108,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
     duplicates get that result (`_reuse_same_reply_result`). Before this, a weak model that
     repeated a call 7 times in its first reply failed before it ever saw a refusal.
   - **Side-effect tools:** duplicates still run.
+- **Benchmark speed and estimates (Phase 16g).**
+  - **Parallel items:** gsm8k, bfcl, and humaneval run with `concurrency = 3`; the servers
+    batch concurrent requests.
+  - **Estimates:** `timings.json` records the profile, and `previous_timings(..., profile)`
+    only uses runs on the same profile.
+  - **History page:** one full-width table, with columns grouped by profile.
 - **Benchmark datasets (Phase 16f).** `scripts/fetch_datasets.sh` downloads GSM8K, a BFCL v4
   mix, and HumanEval into `datasets/` (gitignored), and the plan uses them (30/40/20 items).
   A test checks that every `../datasets/` path in the plan comes from that script.

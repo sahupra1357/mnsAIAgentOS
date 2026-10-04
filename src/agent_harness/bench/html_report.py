@@ -243,6 +243,10 @@ code { font-size: 12px; } a { color: inherit; }
          border: 1px solid currentColor; }
 .badge.pass { color: var(--pass); } .badge.fail { color: var(--fail); } .badge.skip { color: var(--skip); }
 details summary { cursor: pointer; }
+main.wide { max-width: none; }
+.scroll { overflow-x: auto; }
+.scroll > table { display: table; width: 100%; }
+.nowrap { white-space: nowrap; }
 footer { margin-top: 40px; padding-top: 12px; border-top: 1px solid var(--line); }
 </style></head><body><main>"""
 

@@ -96,7 +96,10 @@ def render_history(root: Path) -> str:
                 if column not in names:
                     names.append(column)
         rows.append((run, stages if isinstance(stages, list) else [], benchmarks))
-    header = "".join(f"<th>{escape(name)}</th>" for name in names)
+    # Group columns by profile (in first-seen order), suites alphabetical within a profile.
+    profiles = list(dict.fromkeys(name.rpartition("-")[2] for name in names))
+    names.sort(key=lambda name: (profiles.index(name.rpartition("-")[2]), name))
+    header = "".join(_column_header(name) for name in names)
     body = []
     for index, (run, stages, benchmarks) in enumerate(rows):
         failed = sum(s.get("status") == "fail" for s in stages)
@@ -121,20 +124,29 @@ def render_history(root: Path) -> str:
             cells.append(f"<td>{accuracy:.3f}{trend}{error_note}</td>")
         latest = " <span class='muted'>(latest)</span>" if index == 0 else ""
         body.append(
-            f"<tr><td><a href='runs/{escape(run.name)}/index.html'>{escape(_label(run.name))}</a>{latest}</td>"
-            f"<td>{badge}<br><span class='muted'>{passed} passed, {failed} failed</span></td>{''.join(cells)}</tr>"
+            f"<tr><td class='nowrap'><a href='runs/{escape(run.name)}/index.html'>{escape(_label(run.name))}</a>"
+            f"{latest}</td><td class='nowrap'>{badge} <span class='muted'>{passed}/{passed + failed}</span></td>"
+            f"{''.join(cells)}</tr>"
         )
     table = ("<table><thead><tr><th>Run</th><th>Result</th>" + header + "</tr></thead><tbody>"
              + ("".join(body) or "<tr><td colspan='2' class='muted'>No runs yet.</td></tr>") + "</tbody></table>")
     return "\n".join([
-        _HEAD.replace("<title>Validation report</title>", "<title>Validation history</title>"),
+        _HEAD.replace("<title>Validation report</title>", "<title>Validation history</title>")
+        .replace("<body><main>", '<body><main class="wide">'),  # the history table uses the full width
         "<header><h1>Validation history</h1>"
         f"<p class='muted'>{len(runs)} run(s), newest first. Accuracy per benchmark; the change is "
         "against the previous run that had that benchmark. Open a run for its stages, failed items, "
         "transcripts, and telemetry.</p></header>",
-        f"<section>{table}</section>",
+        f"<section class='scroll'>{table}</section>",
         "</main></body></html>",
     ])
+
+
+def _column_header(name: str) -> str:
+    suite, _, profile = name.rpartition("-")
+    if not suite:
+        return f"<th>{escape(name)}</th>"
+    return f"<th>{escape(suite)}<br><span class='muted'>{escape(profile)}</span></th>"
 
 
 def _column(report: dict[str, Any], folder: str) -> str:

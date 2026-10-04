@@ -316,6 +316,7 @@ class HistoryColumnTests(unittest.TestCase):
                     {"suite": "gsm8k", "profile": "llamacpp", "metrics": {"accuracy": 1.0, "error_rate": 0.0}}))
                 (root / "runs" / run / "pipeline-summary.json").write_text("[]")
             page = render_history(root)
-        self.assertEqual(page.count("<th>gsm8k-llamacpp</th>"), 1)
+        self.assertEqual(page.count("<th>gsm8k<br><span class='muted'>llamacpp</span></th>"), 1)
         self.assertNotIn("<th>gsm8k</th>", page)
+        self.assertIn('<main class="wide">', page)  # the history table uses the full width
         self.assertEqual(page.count("<td>1.000"), 2)  # both runs filled in the same column

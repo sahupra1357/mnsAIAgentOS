@@ -149,6 +149,12 @@ Both have commented entries at the end of `examples/validation.toml`.
   10 `parallel`, and 10 `irrelevance` items.
 - `datasets/humaneval/HumanEval.jsonl.gz`: the plan runs the first 20 problems.
 
+**Parallel items:** gsm8k, bfcl, and humaneval set `concurrency = 3`, so three items are in
+flight at once. llama.cpp parallel slots, vLLM, and SGLang batch concurrent requests on the
+GPU (continuous batching), so throughput rises about 2-3x and every item's result stays the
+same. Ollama gains only with `OLLAMA_NUM_PARALLEL` of 3 or more. The context and memory
+benchmarks stay at 1, because they fill the context window on purpose.
+
 **Why not the samples:** with the 3-item samples, a single miss moved accuracy by 33 points,
 so baselines were noise. The samples in `examples/bench/` stay for the offline self-check.
 A missing dataset fails its benchmark with `dataset not found: … (run
@@ -269,8 +275,8 @@ validate 5/6 benchmarks · 03:12 elapsed · ~06:40 left | context [######-------
 ```
 
 - **Pipeline:** the stage number and name, elapsed time, and time left. Time left comes from
-  each stage's duration in the previous run (`timings.json` in that run's folder). The first run
-  has no history and shows `estimating`.
+  each stage's duration in the previous run **on the same profile** (`timings.json` in that
+  run's folder records the profile). A provider's first run shows `estimating`.
 - **Benchmarks:** a bar of items done, and time left from the average time per item so far.
   Before the first item finishes, the previous run's average for that benchmark is used.
 - **One-command stages** (static, unit, scenarios, smoke) show a running clock. They run in a

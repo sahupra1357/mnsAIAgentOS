@@ -333,7 +333,9 @@ async def run_pipeline(
 
     ticker: asyncio.Task[None] | None = None
     if progress is not None:
-        progress.start(stages, previous_timings(all_runs(root), output_dir))
+        run_profile = _default_profile(config)  # live stages follow it; estimates must too
+        progress.timings.profile = run_profile
+        progress.start(stages, previous_timings(all_runs(root), output_dir, run_profile))
         ticker = asyncio.create_task(progress.run())
     try:
         for stage in stages:
