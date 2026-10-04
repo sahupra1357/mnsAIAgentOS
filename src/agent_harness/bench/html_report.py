@@ -16,6 +16,8 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from .progress import format_duration
+
 from .core import transcript_path
 
 
@@ -65,9 +67,12 @@ def _stages_section(stages: Sequence[Any]) -> str:
         if len(stage.detail or "") > 160:
             detail = (f"<details><summary>{escape(stage.detail[:160])}&hellip;</summary>"
                       f"<pre>{escape(stage.detail.replace(' | ', chr(10)))}</pre></details>")
+        seconds = float(getattr(stage, "duration_seconds", 0.0) or 0.0)
+        took = format_duration(seconds) if seconds else ""
         rows.append(f'<tr><td><span class="badge {escape(stage.status)}">{escape(stage.status.upper())}</span></td>'
-                    f"<td><code>{escape(stage.stage)}</code></td><td>{detail}</td></tr>")
-    return ("<section><h2>Stages</h2><table><thead><tr><th>Status</th><th>Stage</th><th>Detail</th></tr>"
+                    f"<td><code>{escape(stage.stage)}</code></td><td>{took}</td><td>{detail}</td></tr>")
+    return ("<section><h2>Stages</h2><table><thead><tr><th>Status</th><th>Stage</th><th>Took</th>"
+            "<th>Detail</th></tr>"
             f"</thead><tbody>{''.join(rows)}</tbody></table></section>")
 
 

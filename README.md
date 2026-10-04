@@ -1476,7 +1476,8 @@ scripts/validate.sh guardrails             # one feature
 scripts/validate.sh memory tools --offline # several features, no model server
 ```
 
-Baselines (`baselines/`) are local and gitignored: record your own with
+While it runs, a status line shows the stage, elapsed time, a benchmark progress bar, and
+time left (estimated from the previous run). Baselines (`baselines/`) are local and gitignored: record your own with
 `scripts/validate.sh --update-baselines`. HumanEval checks that Docker answers before it starts.
 The live stages use the repository's `models.toml` (llama.cpp default). Start
 `llama-server`/the router (and Ollama for the `ollama` and `embed` profiles) first. See

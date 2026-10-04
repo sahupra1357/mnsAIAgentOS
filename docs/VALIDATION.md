@@ -240,6 +240,28 @@ model, and quantization. Every user records their own with `scripts/validate.sh
 baseline exists yet. The command exits with 1 on any failed stage or gate, so it can
 be used in scripts and scheduled jobs.
 
+## Progress and time left
+
+In a terminal the pipeline keeps one status line at the bottom and redraws it every second:
+
+```text
+validate 5/6 benchmarks · 03:12 elapsed · ~06:40 left | context [######--------------] 1/3 ~01:20
+```
+
+- **Pipeline:** the stage number and name, elapsed time, and time left. Time left comes from
+  each stage's duration in the previous run (`timings.json` in that run's folder). The first run
+  has no history and shows `estimating`.
+- **Benchmarks:** a bar of items done, and time left from the average time per item so far.
+  Before the first item finishes, the previous run's average for that benchmark is used.
+- **One-command stages** (static, unit, scenarios, smoke) show a running clock. They run in a
+  worker thread, so the clock keeps moving.
+- **Stage results and item lines** print above the status line and include how long each took.
+- **Not a terminal** (CI, `| tee`, a log file): nothing is redrawn. A plain status line is
+  printed every 30 s.
+- **`--quiet`** turns progress off.
+- **After the run:** stage durations are kept in `pipeline-summary.json` (`duration_seconds`)
+  and in the report's "Took" column.
+
 ## Watching and debugging a run
 
 ```bash

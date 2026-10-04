@@ -119,3 +119,13 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
 - **Infrastructure errors:** never let one count as a wrong answer. Gates have `min_accuracy`
   floors so that a benchmark at 0% fails even without a baseline.
 - **Tests:** `tests/test_sandbox_failures.py` uses a fake `docker` on `PATH`.
+
+## Phase 16c: progress and time left
+
+- **`PipelineProgress`:** in a terminal it redraws one line (`\r\x1b[2K`); otherwise it logs a
+  plain line every `log_every` seconds.
+- **Run timing:** each `StageResult` gets `duration_seconds`, and `timings.json` records stage
+  totals and the mean seconds per item for the next run's estimates.
+- **Benchmarks:** `execute_benchmark(live=...)` reports items to it.
+- **Tests:** `tests/test_validation_progress.py` drives everything with a fake clock and a
+  `StringIO` stream.
