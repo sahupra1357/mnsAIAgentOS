@@ -107,6 +107,7 @@ class PipelineProgress:
         self._done = 0
         self._total = 0
         self._item_seconds: list[float] = []
+        self._last_item = self._started
         self._shown = False
         self._last_log = self._started
 
@@ -127,11 +128,12 @@ class PipelineProgress:
     def benchmark_started(self, name: str, total: int) -> None:
         self._benchmark, self._total, self._done = name, total, 0
         self._item_seconds = []
-        self._benchmark_started = self._clock()
+        self._benchmark_started = self._last_item = self._clock()
 
     def item_finished(self, done: int, total: int, seconds: float) -> None:
         self._done, self._total = done, total
         self._item_seconds.append(seconds)
+        self._last_item = self._clock()
 
     def benchmark_finished(self) -> None:
         if self._benchmark is not None and self._done:
@@ -141,17 +143,26 @@ class PipelineProgress:
     # -- estimates ----------------------------------------------------------------------
 
     def benchmark_left(self) -> float | None:
+        """Seconds left in the current benchmark; counts down between finished items.
+
+        The per-item time is fixed between completions (the mean of finished items, or the
+        previous run's mean before the first one), and the time already spent on the item
+        in progress is subtracted. It never drops below what the unstarted items need.
+        """
+
         if self._benchmark is None or self._total <= 0:
             return None
         left = self._total - self._done
+        if left <= 0:
+            return 0.0
         if self._done:
-            per_item = (self._clock() - self._benchmark_started) / self._done
+            per_item = (self._last_item - self._benchmark_started) / self._done
         elif self._benchmark in self._estimates.items:
             per_item = self._estimates.items[self._benchmark]
-            return max(0.0, per_item * self._total - (self._clock() - self._benchmark_started))
         else:
             return None
-        return per_item * left
+        in_progress = self._clock() - self._last_item
+        return max(per_item * left - in_progress, per_item * (left - 1), 0.0)
 
     def pipeline_left(self) -> float | None:
         """Seconds left for the whole run, or None without history for some stage."""
