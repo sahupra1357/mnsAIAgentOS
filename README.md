@@ -212,7 +212,12 @@ Per provider:
   - A single-model `llama-server` needs a second `--embedding` server, named by
     `embedding_endpoint`.
 - **Ollama.** `ollama pull nomic-embed-text` on the same server.
-- **Modal.** A second deployment for embeddings, named by `embedding_endpoint`.
+- **Modal.** One deployment serves one model, so the `modal` profile names three, all with
+  the same Modal auth:
+  - `examples/modal/vllm_server.py` (chat, `endpoint`)
+  - `vllm_embed_server.py` (`embedding_endpoint`)
+  - `vllm_guard_server.py` (Llama Guard, `guard_endpoint`; needs an `agent-harness-hf`
+    secret with `HF_TOKEN`, because the model is gated)
 
 `agent-harness doctor` also checks the embedding and guard models.
 `AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider end

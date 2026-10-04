@@ -518,9 +518,14 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
 
 **Phase 16 – Self-contained profiles** [llm-providers, model-gateway, harness-verification] — on `phase-16-self-contained-profiles`.
 One provider profile serves everything; nothing in `models.toml` depends on a second provider.
-1. Optional `ModelProfile` fields `embedding_model`, `embedding_endpoint` (default: `endpoint`), and
-   `guard_model`, with env forms `AGENT_HARNESS_MODEL__X__EMBEDDING_MODEL` etc. They are left out of
-   the profile hash while unset.
+1. Optional `ModelProfile` fields `embedding_model`, `embedding_endpoint`, `guard_model`, and
+   `guard_endpoint`:
+   - the endpoints default to `endpoint`;
+   - env forms are `AGENT_HARNESS_MODEL__X__EMBEDDING_MODEL` etc.;
+   - they are left out of the profile hash while unset.
+
+   Modal names three deployments: `examples/modal/vllm_server.py`, `vllm_embed_server.py`
+   (`--runner pooling`), and `vllm_guard_server.py`.
 2. Companion profiles:
    - **What they are:** `load_config` adds `NAME.embed` / `NAME.guard` to `models`: same adapter,
      credentials, and headers, another model.
