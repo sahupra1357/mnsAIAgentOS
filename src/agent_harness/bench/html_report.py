@@ -135,7 +135,7 @@ def _failures_section(benchmarks: Sequence[BenchmarkEntry], base: Path | None) -
                 f"<td><pre>{escape(_short(result.get('predicted')))}</pre></td>"
                 f"<td>{escape(_short(reason, 300))}</td><td>{link}</td></tr>"
             )
-        blocks.append(f"<h3>{escape(entry.name)} &middot; {len(failures)} failed</h3><table><thead><tr>"
+        blocks.append(f"<h3>{escape(entry.name)} &middot; {len(failures)} incorrect</h3><table><thead><tr>"
                       "<th>Item</th><th>Category</th><th>Status</th><th>Expected</th><th>Predicted</th>"
                       f"<th>Reason</th><th>Run</th></tr></thead><tbody>{''.join(rows)}</tbody></table>")
     if not blocks:

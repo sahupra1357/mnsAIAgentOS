@@ -223,6 +223,14 @@ throwaway experiments.
 
 ## Baselines and regression gates
 
+**Allowed drop matches the sample size.** One item is worth 100/n accuracy points: 3.3 for
+gsm8k (30 items), 2.5 for bfcl (40), 5 for humaneval (20), 17 for agents (6), and 33 for
+context and memory (3). Each benchmark sets `max_accuracy_drop` to allow about 1-2 items of
+normal model variation and still fail on a real regression. For example, gsm8k allows 0.07,
+so 2 extra misses pass and 3 fail. guardrails allows 0.0, because its heuristics are
+deterministic. A test requires every benchmark to set its own value. A report's "· N
+incorrect" counts wrong answers; it is not a failed gate.
+
 **Baselines are local.** `baselines/` is gitignored, because each file belongs to one machine,
 model, and quantization. Every user records their own with `scripts/validate.sh
 --update-baselines`.
