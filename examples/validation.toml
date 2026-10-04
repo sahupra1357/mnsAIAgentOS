@@ -289,4 +289,4 @@ tests = ["test_production_hardening", "test_quota_enforcement", "test_store_conf
 name = "validation"
 description = "Benchmarks, pipeline, residency, live-check suites, feature coverage"
 tests = ["test_bench", "test_pipeline_observability", "test_residency", "test_live_check_suites",
-         "test_feature_validation"]
+         "test_feature_validation", "test_validation_progress"]

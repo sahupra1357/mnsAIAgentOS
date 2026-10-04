@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import time
+import contextlib
 import functools
 import hashlib
 import json
@@ -43,8 +45,9 @@ from .compare import Thresholds, compare_reports
 from .core import BenchConfigError, BenchContext, ExecutionFactory, ItemResult
 from .data import DatasetError, file_sha256
 from .features import FeatureSelection, parse_features, select_features
-from .history import finish_run, latest_run, run_directory
+from .history import all_runs, finish_run, latest_run, run_directory
 from .html_report import BenchmarkEntry, write_html_report
+from .progress import PipelineProgress, format_duration, previous_timings, write_timings
 from .residency import ResidencyHttp, ResidencyManager, ResidencyPolicy
 from .runner import build_report, run_benchmark
 from .suites import SUITES, docker_problem
@@ -82,6 +85,7 @@ async def execute_benchmark(
     models: ModelResolver | None = None,
     quiet: bool = False,
     telemetry: TelemetrySink | None = None,
+    live: PipelineProgress | None = None,
 ) -> tuple[dict[str, Any], list[ItemResult]]:
     """Load, select, run, and report one benchmark; writes results and report."""
 
@@ -133,16 +137,29 @@ async def execute_benchmark(
 
     started = datetime.now(UTC)
 
+    if live is not None:
+        live.benchmark_started(str(spec.name or spec.suite), len(selected))
+
     def progress(result: ItemResult, done: int, total: int) -> None:
+        if live is not None:
+            live.item_finished(done, total, result.latency_seconds)
         if not quiet:
             mark = "ok " if result.correct else ("ERR" if result.error else "no ")
-            print(f"[{done}/{total}] {mark} {result.id} ({result.latency_seconds:.1f}s)", file=sys.stderr)
+            line = f"[{done}/{total}] {mark} {result.id} ({result.latency_seconds:.1f}s)"
+            if live is not None:
+                live.write(line)
+            else:
+                print(line, file=sys.stderr)
 
-    results = await run_benchmark(
-        suite, selected, context, concurrency=spec.concurrency, results_path=results_path,
-        progress=progress, retry_errors=spec.retry_errors,
-        keep_passing_transcripts=spec.transcripts == "all",
-    )
+    try:
+        results = await run_benchmark(
+            suite, selected, context, concurrency=spec.concurrency, results_path=results_path,
+            progress=progress, retry_errors=spec.retry_errors,
+            keep_passing_transcripts=spec.transcripts == "all",
+        )
+    finally:
+        if live is not None:
+            live.benchmark_finished()
     selected_profile = config.models[profile]
     report = build_report(
         suite=spec.suite,
@@ -197,6 +214,7 @@ class StageResult:
     stage: str
     status: str  # "pass" | "fail" | "skip"
     detail: str = ""
+    duration_seconds: float = 0.0
 
 
 def _run_command(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> tuple[bool, str]:
@@ -219,6 +237,7 @@ async def run_pipeline(
     telemetry_path: Path | None = None,
     resume: bool = False,
     features: Sequence[str] = (),
+    progress: PipelineProgress | None = None,
 ) -> list[StageResult]:
     """Run the plan's stages into a new timestamped folder, ``<output_dir>/runs/<time>``.
 
@@ -269,7 +288,12 @@ async def run_pipeline(
     results: list[StageResult] = []
     reports: list[tuple[BenchmarkSpec, dict[str, Any]]] = []
 
+    mark = [time.monotonic()]  # when the previous result (or this stage) started
+
     def add(result: StageResult) -> None:
+        now = time.monotonic()
+        result.duration_seconds = round(now - mark[0], 3)
+        mark[0] = now
         results.append(result)
         if on_result is not None:
             on_result(result)  # shown as it happens, not only at the end
@@ -303,10 +327,19 @@ async def run_pipeline(
         for change in residency.prepare(name):
             add(StageResult(f"residency:{name}", change.status, change.detail))
 
+    ticker: asyncio.Task[None] | None = None
+    if progress is not None:
+        progress.start(stages, previous_timings(all_runs(root), output_dir))
+        ticker = asyncio.create_task(progress.run())
     try:
         for stage in stages:
             if stage not in ALL_STAGES:
                 raise BenchConfigError(f"unknown stage {stage!r}; choose from {ALL_STAGES}")
+            if progress is not None:
+                if progress._stage is not None:
+                    progress.stage_finished(progress._stage)
+                progress.stage_started(stage)
+            mark[0] = time.monotonic()
             announce(f"== {stage}")
             if stage == "static" and selection is not None:
                 add(StageResult("static", "skip", "repo-wide; not part of a feature run"))
@@ -320,7 +353,7 @@ async def run_pipeline(
                     else:
                         add(StageResult(f"static:{tool}", "skip", f"{tool} not installed"))
                 for name, argv in checks:
-                    ok, detail = _run_command(argv, cwd=repo, env={**env, "MYPYPATH": str(src)})
+                    ok, detail = await asyncio.to_thread(_run_command, argv, cwd=repo, env={**env, "MYPYPATH": str(src)})
                     add(StageResult(f"static:{name}", "pass" if ok else "fail", detail))
             elif stage == "unit" and selection is not None:
                 if not selection.tests:
@@ -329,12 +362,12 @@ async def run_pipeline(
                 # Modules by name, imported from tests/ (as `discover -s tests` would).
                 unit_env = {**hermetic, "PYTHONPATH": os.pathsep.join(
                     filter(None, [str(repo / "tests"), hermetic.get("PYTHONPATH")]))}
-                ok, detail = _run_command(
+                ok, detail = await asyncio.to_thread(_run_command,
                     [python, "-m", "unittest", *selection.tests], cwd=repo, env=unit_env
                 )
                 add(StageResult(f"unit:{selection.label}", "pass" if ok else "fail", detail))
             elif stage == "unit":
-                ok, detail = _run_command(
+                ok, detail = await asyncio.to_thread(_run_command,
                     [python, "-m", "unittest", "discover", "-s", "tests"], cwd=repo, env=hermetic
                 )
                 add(StageResult("unit", "pass" if ok else "fail", detail))
@@ -351,7 +384,7 @@ async def run_pipeline(
                     if not targets:
                         add(StageResult(name, "skip", "no scenarios listed"))
                         continue
-                ok, detail = _run_command(
+                ok, detail = await asyncio.to_thread(_run_command,
                     [python, "-m", "agent_harness", "eval", "--config", str(scenario_config), *targets,
                      "--report", str(output_dir / "scenarios.json")],
                     cwd=repo, env=hermetic,
@@ -379,7 +412,7 @@ async def run_pipeline(
                         argv += ["--max-tokens", str(int(entry["max_tokens"]))]
                     make_room(entry.get("profile"))
                     announce(f"   doctor {smoke_profile} ...")
-                    ok, detail = _run_command(argv, cwd=repo, env=env)
+                    ok, detail = await asyncio.to_thread(_run_command, argv, cwd=repo, env=env)
                     add(StageResult(f"smoke:{smoke_profile}", "pass" if ok else "fail", detail))
             elif stage == "benchmarks":
                 entries = _selected_benchmarks(plan, selection)
@@ -391,6 +424,7 @@ async def run_pipeline(
                     announce(f"   benchmark {spec.name} ({spec.suite} on {spec.profile or 'default'}) ...")
                     try:
                         report, _ = await execute_benchmark(spec, models=models, quiet=on_progress is None,
+                                                            live=progress,
                                                             telemetry=telemetry_sink)
                     except (BenchConfigError, DatasetError, ConfigError) as exc:
                         add(StageResult(f"benchmark:{spec.name}", "fail", str(exc)))
@@ -429,7 +463,17 @@ async def run_pipeline(
     finally:
         if telemetry_sink is not None:
             telemetry_sink.close()
-    summary = [{"stage": r.stage, "status": r.status, "detail": r.detail} for r in results]
+        if progress is not None:
+            if progress._stage is not None:
+                progress.stage_finished(progress._stage)
+            if ticker is not None:
+                ticker.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ticker
+            progress.close()
+            write_timings(output_dir, progress.timings)  # the next run's estimates
+    summary = [{"stage": r.stage, "status": r.status, "detail": r.detail,
+                "duration_seconds": r.duration_seconds} for r in results]
     (output_dir / "pipeline-summary.json").write_text(json.dumps(summary, indent=2))
     write_html_report(output_dir / "index.html", results, _report_entries(plan, reports, base, config,
                                                                             output_dir), telemetry_path)
@@ -668,16 +712,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             stages = tuple(s.strip() for s in args.stages.split(",")) if args.stages else ALL_STAGES
             if args.offline:
                 stages = tuple(stage for stage in stages if stage in OFFLINE_STAGES)
+            live = None if args.quiet else PipelineProgress(sys.stderr)
+
             def show(result: StageResult) -> None:
-                print(f"[{result.status.upper():>4}] {result.stage}: {result.detail}", flush=True)
+                line = f"[{result.status.upper():>4}] {result.stage}: {result.detail}"
+                if live is not None:
+                    line += f" ({format_duration(result.duration_seconds)})"
+                    live.write(line, sys.stdout)
+                else:
+                    print(line, flush=True)
 
             def progress(message: str) -> None:
-                print(message, file=sys.stderr, flush=True)
+                if live is not None:
+                    live.write(message)
+                else:
+                    print(message, file=sys.stderr, flush=True)
 
             results = asyncio.run(run_pipeline(
                 args.plan, stages=stages, update_baselines=args.update_baselines, on_result=show,
                 on_progress=None if args.quiet else progress, telemetry_path=args.telemetry_file,
-                resume=args.resume, features=args.feature,
+                resume=args.resume, features=args.feature, progress=live,
             ))
             failed = [r for r in results if r.status == "fail"]
             print(f"stages: {len(results) - len(failed)} ok, {len(failed)} failed", file=sys.stderr)

@@ -148,6 +148,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   - Every `[[benchmark]]` needs a `baseline` path (a test enforces it).
   - HumanEval checks `docker info` before it starts, and `SandboxError` (exit 125, daemon
     messages, or a timeout with Docker down) makes an item an error, not a wrong answer.
+- **Validation progress (Phase 16c).**
+  - `bench/progress.py` (`PipelineProgress`) draws the live status line.
+  - `run_pipeline(progress=...)` runs subprocess stages with `asyncio.to_thread`, so the clock
+    keeps ticking; do not call `_run_command` directly from async code.
+  - Estimates come from the previous run's `timings.json`.
+  - Print through `progress.write()` while it is active, so lines do not tear the status line.
 - **Companion profiles (Phase 16).** `config.models` also holds hidden `NAME.embed` / `NAME.guard`
   profiles. Use `config.chat_models()` (not `config.models`) wherever profiles are listed or offered
   to users. A single chat profile with companions still counts as one profile for the default.
