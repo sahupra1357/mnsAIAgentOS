@@ -270,3 +270,53 @@ class ReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def reply(*arguments: dict, prefix: str = "c", name: str = "lookup") -> ModelResponse:
+    return ModelResponse(
+        content="",
+        finish_reason=FinishReason.TOOL_CALLS,
+        tool_calls=tuple(ToolCall(f"{prefix}{i}", name, args) for i, args in enumerate(arguments)),
+    )
+
+
+class DuplicateCallsInOneReplyTests(unittest.IsolatedAsyncioTestCase):
+    """A weak model (seen with Qwen2.5-7B on gsm8k) repeats a call many times in one reply."""
+
+    async def _run(self, responses: Sequence[ModelResponse], **settings: object):
+        model = ScriptedModel(responses)
+        tools = Tools()
+        orchestrator = AgentOrchestrator(models=Resolver(model), tools=tools, store=InMemoryRunStore(),
+                                         settings=OrchestratorSettings(**settings))
+        run = await orchestrator.create_run(model_profile="p", messages=[USER], budget=RunBudget(max_steps=20))
+        return await orchestrator.run(run.id), tools, model
+
+    async def test_duplicates_run_once_share_the_result_and_do_not_fail_the_run(self) -> None:
+        # One reply: a different call, then the same call 7 times (the gsm8k-0 transcript).
+        finished, tools, model = await self._run([reply({"q": "multiply"}, *[{"q": "subtract"}] * 7), done()])
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        # Only c0 and c1 reach the tool (prefetch and the loop share an idempotency key, which
+        # the real ToolRuntime answers from its cache); duplicates c2..c7 never do.
+        self.assertEqual({c.id for c in tools.executed}, {"c0", "c1"})
+        answers = [m for m in finished.messages if m.role is Role.TOOL]
+        self.assertEqual(len(answers), 8)  # every call gets an answer
+        reused = [m for m in answers if m.content.startswith("Same call as c1 earlier in this reply")]
+        self.assertEqual(len(reused), 6)
+        self.assertTrue(all("ok" in m.content for m in reused))
+        self.assertFalse(any(m.content.startswith("Refused") for m in answers))
+
+    async def test_repeats_across_replies_count_once_per_reply(self) -> None:
+        # Each reply holds 3 identical calls; only replies count toward the limit.
+        replies = [reply(*[{"q": 1}] * 3, prefix=f"r{n}-") for n in range(3)]
+        finished, tools, _ = await self._run([*replies, done()], max_identical_tool_calls=2, max_refused_repeats=2)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        # Replies 1 and 2 ran their first call; their duplicates and all of reply 3 did not.
+        self.assertEqual({c.id for c in tools.executed}, {"r0-0", "r1-0"})
+        refused = [m for m in finished.messages if m.role is Role.TOOL and m.content.startswith("Refused")]
+        self.assertEqual(len(refused), 1)  # one refusal for the whole third reply
+
+    async def test_a_reply_after_refusals_still_fails_the_loop(self) -> None:
+        replies = [reply({"q": 1}, prefix=f"r{n}-") for n in range(6)]
+        finished, _, _ = await self._run([*replies, done()], max_identical_tool_calls=2, max_refused_repeats=2)
+        self.assertEqual(finished.status, RunStatus.FAILED)
+        self.assertIn("repeated tool call loop", finished.error)

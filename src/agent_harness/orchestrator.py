@@ -144,6 +144,9 @@ class OrchestratorSettings:
     arguments, since the last non-read-only call) run normally; later ones are
     refused with a warning, and the run fails after ``max_refused_repeats``
     refusals. Either may be ``None`` to disable repeated-call detection.
+    Identical read-only calls within one reply run once: the duplicates get that
+    result, and a reply counts as one repeat however many duplicates it holds, so a
+    model that repeats itself in one message is not stopped before it sees a refusal.
     A reply with more than ``max_tool_calls_per_turn`` tool calls is refused as a
     whole (none of its calls run) and the model is asked again; the run fails once
     more than ``max_refused_repeats`` replies were refused this way. ``None``
@@ -2009,6 +2012,38 @@ class AgentOrchestrator:
         await self._record_tool_result(run, events, result, attempt=0)
         return True
 
+    async def _reuse_same_reply_result(
+        self,
+        run: RunRecord,
+        events: list[RunEvent],
+        call: ToolCall,
+        specs: dict[str, ToolSpec],
+    ) -> bool:
+        """Answer a read-only call repeated within one reply with its twin's result."""
+
+        twin = _same_reply_twin(run.messages, call, specs)
+        if twin is None:
+            return False
+        earlier = next(
+            (m for m in reversed(run.messages) if m.role is Role.TOOL and m.tool_call_id == twin.id),
+            None,
+        )
+        if earlier is None:
+            return False  # the twin has no result yet: run this call normally
+        result = ToolResult(
+            call_id=call.id,
+            name=call.name,
+            status=ToolResultStatus.SUCCESS,
+            output={"duplicate_of": twin.id},
+            model_message=(
+                f"Same call as {twin.id} earlier in this reply, so it was not run again. "
+                f"That call's result: {earlier.content}"
+            ),
+        )
+        self._append_tool_message(run, result)
+        await self._record_tool_result(run, events, result, attempt=0)
+        return True
+
     async def _execute_tool(
         self, run: RunRecord, events: list[RunEvent], call: ToolCall
     ) -> None:
@@ -2016,6 +2051,8 @@ class AgentOrchestrator:
         spec = specs.get(call.name)
         pending_request = _pending_tool_request(events, run.step_count, call.id)
         if spec is not None and pending_request is None:
+            if await self._reuse_same_reply_result(run, events, call, specs):
+                return
             if await self._refuse_repeated_call(run, events, call, specs):
                 return
         if spec is None:
@@ -2650,10 +2687,14 @@ class AgentOrchestrator:
         specs = self._spec_map(run)
         reads: list[tuple[ToolCall, bool]] = []
         agents: list[ToolCall] = []
+        signatures: set[str] = set()
         for call in pending:
             spec = specs.get(call.name)
             if spec is None or _pending_tool_request(events, run.step_count, call.id) is not None:
                 continue
+            if spec.risk is ToolRisk.READ_ONLY and _call_signature(call) in signatures:
+                continue  # a duplicate in this reply reuses its twin's result instead
+            signatures.add(_call_signature(call))
             permission = self._permission(spec, call, run.mode, run)
             if permission.action in {"deny", "ask"}:
                 continue
@@ -3867,15 +3908,41 @@ def _identical_prior_calls(
     )
     count = 0
     for index, message in enumerate(messages[: current + 1]):
+        counted = False  # one reply counts once, however many duplicates it holds
         for previous in message.tool_calls:
             if index == current and previous.id == call.id:
                 return count
             spec = specs.get(previous.name)
             if spec is not None and spec.risk is not ToolRisk.READ_ONLY:
                 count = 0
-            elif _call_signature(previous) == signature:
+                counted = False
+            elif _call_signature(previous) == signature and not counted:
                 count += 1
+                counted = True
     return count
+
+
+def _same_reply_twin(
+    messages: Sequence[Message], call: ToolCall, specs: dict[str, ToolSpec]
+) -> ToolCall | None:
+    """An earlier identical read-only call in the same reply as ``call``, if any."""
+
+    spec = specs.get(call.name)
+    if spec is None or spec.risk is not ToolRisk.READ_ONLY:
+        return None  # a repeated side effect may be intended: it runs normally
+    reply = next(
+        (m for m in reversed(messages) if any(offered.id == call.id for offered in m.tool_calls)),
+        None,
+    )
+    if reply is None:
+        return None
+    signature = _call_signature(call)
+    for previous in reply.tool_calls:
+        if previous.id == call.id:
+            return None
+        if _call_signature(previous) == signature:
+            return previous
+    return None
 
 
 def _call_signature(call: ToolCall) -> str:

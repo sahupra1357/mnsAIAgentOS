@@ -24,3 +24,5 @@ baselines/
 # Local env variants and backups (secrets); the template stays tracked
 .env.*
 !.env.example
+# Public benchmark datasets (scripts/fetch_datasets.sh)
+datasets/

@@ -55,3 +55,10 @@ State any atomicity guarantees required from the store and provide network-free 
 - **Parallel prefetch:** it reuses idempotency keys, so the sequential loop remains the
   only place that records events.
 
+
+## Repeated calls within one reply (Phase 16f)
+
+Identical read-only calls within one model reply execute once; later duplicates get a tool
+message reusing the first result (`_reuse_same_reply_result`, `_same_reply_twin`), and
+parallel prefetch skips them. `_identical_prior_calls` counts each reply at most once, so
+refusals are per reply. Side-effect tools are never merged.

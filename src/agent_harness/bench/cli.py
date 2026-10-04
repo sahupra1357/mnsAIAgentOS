@@ -425,6 +425,13 @@ async def run_pipeline(
                     add(StageResult("benchmarks", "skip", "no [[benchmark]] entries"))
                 for entry in entries:
                     spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
+                    missing = [path for path in (spec.data, Path(str(spec.options.get("answers", "")))
+                                                 if spec.options.get("answers") else None)
+                               if path is not None and not path.exists()]
+                    if missing:
+                        add(StageResult(f"benchmark:{spec.name}", "fail",
+                                        f"dataset not found: {missing[0]} (run scripts/fetch_datasets.sh)"))
+                        continue
                     make_room(spec.profile)
                     on_profile = spec.profile or _default_profile(config) or "default"
                     announce(f"   benchmark {spec.name} ({spec.suite} on {on_profile}) ...")

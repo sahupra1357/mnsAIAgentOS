@@ -138,3 +138,12 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
   `python -c ... main(argv)` (`_CLI_WITHOUT_DOTENV`), which does not read `.env`.
 - **Tests:** `tests/test_dotenv_profile_switch.py` covers parsing, precedence, the switch, the
   program-only loading, and the hermetic stages.
+
+## Phase 16f: real datasets and fair repeat counting
+
+- **Datasets:** `scripts/fetch_datasets.sh` builds `datasets/`, and the plan's gsm8k, bfcl, and
+  humaneval entries use it. A missing file is a clear stage failure. Keep the samples for
+  `tests/` and the offline self-check only.
+- **Repeat counting:** identical read-only calls within one reply run once and share the
+  result, and each reply counts as one repeat. `tests/test_runaway_guards.py`
+  (`DuplicateCallsInOneReplyTests`) replays the Qwen2.5-7B gsm8k transcript.

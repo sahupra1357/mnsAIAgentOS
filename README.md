@@ -1494,6 +1494,9 @@ agent-harness-bench run --suite gsm8k --data datasets/gsm8k/test.jsonl --config 
 agent-harness-bench pipeline examples/validation.toml --update-baselines
 ```
 
+**Datasets.** Run `scripts/fetch_datasets.sh` once. It downloads GSM8K, a BFCL v4 mix, and
+HumanEval into `datasets/` (gitignored), which the live benchmarks use.
+
 **Per-feature validation.** `scripts/validate.sh` is the master script. With no
 arguments it runs every stage for every feature. Name one or more features to run only
 their checks (unit-test modules, scenarios, smoke profiles, and benchmarks, as listed

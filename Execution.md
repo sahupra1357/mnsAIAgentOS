@@ -376,11 +376,14 @@ a `pre_tool` hook is configured. Events and ordering are the same as without pre
 
 Each tool call then goes through these checks, in order:
 
-1. **Repeated-call check:** more than `max_identical_tool_calls` (5) identical calls since
-   the last non-read-only call are refused. The run fails after `max_refused_repeats` (2)
-   refusals.
-2. **`pre_tool` hook:** it can deny the call or modify its arguments.
-3. **Permission decision** (`permissions.py`); the first match wins:
+1. **Duplicate in the same reply:** a read-only call identical to an earlier call in the same
+   response is not run again. It gets that call's result (`duplicate_of`), and prefetch skips
+   it too.
+2. **Repeated-call check:** more than `max_identical_tool_calls` (5) identical calls since
+   the last non-read-only call are refused. Each reply counts once, however many duplicates
+   it holds. The run fails after `max_refused_repeats` (2) refusals.
+3. **`pre_tool` hook:** it can deny the call or modify its arguments.
+4. **Permission decision** (`permissions.py`); the first match wins:
    1. deny rules, which always win;
    2. permission mode: `plan` refuses non-read-only tools; `bypass` and `accept_edits`
       pre-approve;
@@ -388,18 +391,18 @@ Each tool call then goes through these checks, in order:
    4. allow rules;
    5. otherwise the tool's risk policy (by default, `high_risk` and `destructive` tools
       ask).
-4. **Built-in tools:** the orchestrator handles these itself: `agent` (subagents),
+5. **Built-in tools:** the orchestrator handles these itself: `agent` (subagents),
    `exit_plan` (plan mode), `todo_write` (task list), `search_tools` / `load_tools`
    (dynamic loading, `TOOLS_LOADED`), and `create_plan` / `update_plan` /
    `revise_plan` (plan-and-execute). A call to a tool that exists but is not loaded
    tells the model to load it first.
-5. **File snapshot:** before a tool that writes files, the touched files are snapshotted
+6. **File snapshot:** before a tool that writes files, the touched files are snapshotted
    (`FILE_SNAPSHOT`) so the run can be rewound.
-6. **ToolRuntime:** checks the tool name, argument schema and types, required fields,
+7. **ToolRuntime:** checks the tool name, argument schema and types, required fields,
    timeout, and idempotency key. The idempotency result is stored durably, so a replay
    after a crash reuses it.
-7. **`post_tool` hook:** it can replace the result or add context.
-8. **Record the result:**
+8. **`post_tool` hook:** it can replace the result or add context.
+9. **Record the result:**
    - Output from untrusted tools (web search, HTTP tools, MCP) is wrapped in
      `<untrusted-tool-output>` tags with a note that it is data.
    - Outputs larger than the artifact threshold are stored as artifacts and referenced

@@ -142,6 +142,21 @@ Both have commented entries at the end of `examples/validation.toml`.
 
 ### Getting the datasets
 
+**Quick way:** `scripts/fetch_datasets.sh` downloads what `examples/validation.toml` uses into
+`datasets/` (gitignored). Run it once, before the first live run:
+- `datasets/gsm8k/test.jsonl`: GSM8K test split; the plan runs the first 30 problems.
+- `datasets/bfcl/mix.jsonl` and `mix_answers.jsonl`: BFCL v4, the first 20 `simple_python`,
+  10 `parallel`, and 10 `irrelevance` items.
+- `datasets/humaneval/HumanEval.jsonl.gz`: the plan runs the first 20 problems.
+
+**Why not the samples:** with the 3-item samples, a single miss moved accuracy by 33 points,
+so baselines were noise. The samples in `examples/bench/` stay for the offline self-check.
+A missing dataset fails its benchmark with `dataset not found: … (run
+scripts/fetch_datasets.sh)`. Changing the dataset or `limit` changes `same_dataset`, so
+record new baselines afterwards.
+
+The details below are for other datasets or larger runs.
+
 The harness never downloads data. Fetch the datasets yourself and point `--data` at
 the files. JSON Lines, JSON arrays, and `.gz` files are supported. Upstream file names
 and locations change between releases, so check each project's README.
