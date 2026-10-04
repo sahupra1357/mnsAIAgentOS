@@ -54,6 +54,11 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(uncovered(self.features.values(), "benchmarks",
                                    [str(e["name"]) for e in raw.get("benchmark", [])]), [])
 
+    def test_every_live_benchmark_has_a_baseline_path(self) -> None:
+        # Without `baseline`, --update-baselines has nowhere to save and gates never compare.
+        missing = [e["name"] for e in plan().get("benchmark", []) if not e.get("baseline")]
+        self.assertEqual(missing, [])
+
     def test_listed_names_exist(self) -> None:
         for feature in self.features.values():
             for module in feature.tests:
