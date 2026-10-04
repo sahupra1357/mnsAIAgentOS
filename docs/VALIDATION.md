@@ -194,6 +194,26 @@ throwaway experiments.
 
 ## Baselines and regression gates
 
+**Baselines are local.** `baselines/` is gitignored, because each file belongs to one machine,
+model, and quantization. Every user records their own with `scripts/validate.sh
+--update-baselines`.
+- **Every benchmark needs a baseline path:** each `[[benchmark]]` names a `baseline` path
+  (`{profile}` becomes the profile under test), and `tests/test_feature_validation.py` enforces
+  it.
+- **Floors without a baseline:** until a baseline exists, a gate checks only its absolute
+  thresholds. `min_accuracy` floors therefore guard benchmarks that could otherwise "pass" at 0%
+  (humaneval 0.5, guardrails 0.9, context and memory 0.66).
+
+**HumanEval and Docker.**
+- **Preflight:** before the first item, the benchmark runs `docker info` (15 s limit). If Docker
+  does not answer, the stage fails with `humaneval needs Docker: ...` instead of scoring every
+  item.
+- **Sandbox failures are errors, not wrong answers.** They count against `max_error_rate`:
+  - `docker run` exit 125 or a daemon error message;
+  - a timeout while Docker itself is unavailable.
+- **Real timeouts:** a timeout while Docker is healthy is still the generated code's fault, so it
+  counts as a wrong answer.
+
 1. Run the pipeline once and record baselines:
 
    ```bash

@@ -47,7 +47,7 @@ from .history import finish_run, latest_run, run_directory
 from .html_report import BenchmarkEntry, write_html_report
 from .residency import ResidencyHttp, ResidencyManager, ResidencyPolicy
 from .runner import build_report, run_benchmark
-from .suites import SUITES
+from .suites import SUITES, docker_problem
 
 ALL_STAGES = ("static", "unit", "scenarios", "smoke", "benchmarks", "gates")
 # Stages that need no model server (--offline keeps only these).
@@ -100,6 +100,11 @@ async def execute_benchmark(
     execution: ExecutionFactory | None = None
     if spec.suite == "humaneval":
         image = DockerRuntimeConfig(image=spec.docker_image)
+        if not spec.unsafe_local_execution:
+            # Fail the benchmark up front instead of scoring every item as a timeout.
+            problem = await docker_problem(image.docker_binary)
+            if problem is not None:
+                raise BenchConfigError(f"humaneval needs Docker: {problem}")
 
         def sandbox(workspace: Path) -> ExecutionRuntime:
             if spec.unsafe_local_execution:

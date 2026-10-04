@@ -143,6 +143,11 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   newest turn fit (`_fitting_cap`); if nothing can be removed, the provider's error ends
   the step instead of a pointless retry. Server counting is skipped while the estimate is
   under half the limit.
+- **Baselines and HumanEval (Phase 16b).**
+  - `baselines/` and `.gstack/` are gitignored; baselines are per machine.
+  - Every `[[benchmark]]` needs a `baseline` path (a test enforces it).
+  - HumanEval checks `docker info` before it starts, and `SandboxError` (exit 125, daemon
+    messages, or a timeout with Docker down) makes an item an error, not a wrong answer.
 - **Companion profiles (Phase 16).** `config.models` also holds hidden `NAME.embed` / `NAME.guard`
   profiles. Use `config.chat_models()` (not `config.models`) wherever profiles are listed or offered
   to users. A single chat profile with companions still counts as one profile for the default.
