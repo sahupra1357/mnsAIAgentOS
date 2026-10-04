@@ -59,6 +59,16 @@ class CoverageTests(unittest.TestCase):
         missing = [e["name"] for e in plan().get("benchmark", []) if not e.get("baseline")]
         self.assertEqual(missing, [])
 
+    def test_downloaded_datasets_come_from_the_fetch_script(self) -> None:
+        script = (ROOT / "scripts" / "fetch_datasets.sh").read_text(encoding="utf-8")
+        for entry in plan().get("benchmark", []):
+            for key in ("data", "answers"):
+                value = str(entry.get(key, ""))
+                if value.startswith("../datasets/"):
+                    self.assertIn(Path(value).name, script, (entry["name"], value))
+                elif value:
+                    self.assertTrue((PLAN.parent / value).is_file(), (entry["name"], value))
+
     def test_listed_names_exist(self) -> None:
         for feature in self.features.values():
             for module in feature.tests:

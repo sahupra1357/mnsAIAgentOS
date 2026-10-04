@@ -47,11 +47,15 @@ min_params_b = 20
 skip_cache = false                # (chat, tool calls, prefix cache, embeddings, guard model)
 max_tokens = 512                  # thinking models (Qwen3) need room before answering
 
+# Real datasets (scripts/fetch_datasets.sh downloads them once into datasets/, gitignored).
+# Sizes are a balance: big enough that one miss moves accuracy a few points, not 33, and
+# small enough for a local 27B model (about 20 minutes for all three). Raise `limit` for
+# release decisions. The bench/*_sample files stay for the offline harness self-check.
 [[benchmark]]
 name = "gsm8k"
 suite = "gsm8k"
-data = "bench/gsm8k_sample.jsonl"  # e.g. datasets/gsm8k/test.jsonl
-limit = 3
+data = "../datasets/gsm8k/test.jsonl"
+limit = 30
 concurrency = 1
 max_steps = 8
 baseline = "../baselines/gsm8k-{profile}.json"
@@ -62,8 +66,8 @@ max_error_rate = 0.10
 [[benchmark]]
 name = "bfcl"
 suite = "bfcl"
-data = "bench/bfcl_sample.json"            # e.g. datasets/bfcl/BFCL_v3_simple.json
-answers = "bench/bfcl_sample_answers.json" # e.g. datasets/bfcl/possible_answer/BFCL_v3_simple.json
+data = "../datasets/bfcl/mix.jsonl"             # 20 simple, 10 parallel, 10 irrelevance (BFCL v4)
+answers = "../datasets/bfcl/mix_answers.jsonl"
 baseline = "../baselines/bfcl-{profile}.json"
 [benchmark.thresholds]
 max_accuracy_drop = 0.05
@@ -83,8 +87,8 @@ min_accuracy = 0.9                # floor that applies even before a baseline ex
 [[benchmark]]
 name = "humaneval"
 suite = "humaneval"
-data = "bench/humaneval_sample.jsonl"
-limit = 3
+data = "../datasets/humaneval/HumanEval.jsonl.gz"
+limit = 20
 max_steps = 6
 baseline = "../baselines/humaneval-{profile}.json"
 [benchmark.thresholds]

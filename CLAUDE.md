@@ -100,10 +100,17 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   token prices and/or `gpu_usd_per_second × request latency`, which includes retries
   and cold start and is an upper bound under concurrency. Without `pricing`, cost stays
   unknown and `max_cost_usd` cannot trigger.
-- **Repeated-call detection (Phase 3).** More than `max_identical_tool_calls` (5)
-  identical calls since the last non-read-only call are refused, and the run fails
+- **Repeated-call detection (Phase 3, revised 16f).** More than `max_identical_tool_calls`
+  (5) identical calls since the last non-read-only call are refused, and the run fails
   after `max_refused_repeats` (2) refusals. Polling tools may need these raised, or set
   to `None`.
+  - **One reply counts once:** identical read-only calls in one reply run once, and the
+    duplicates get that result (`_reuse_same_reply_result`). Before this, a weak model that
+    repeated a call 7 times in its first reply failed before it ever saw a refusal.
+  - **Side-effect tools:** duplicates still run.
+- **Benchmark datasets (Phase 16f).** `scripts/fetch_datasets.sh` downloads GSM8K, a BFCL v4
+  mix, and HumanEval into `datasets/` (gitignored), and the plan uses them (30/40/20 items).
+  A test checks that every `../datasets/` path in the plan comes from that script.
 - **Runaway guards.** A reply with more than `max_tool_calls_per_turn` (32) tool calls is
   refused whole, and counts toward `max_refused_repeats`. Example profiles cap output with
   `parameters.max_tokens = 1024` (Ollama native: `num_predict`); an
