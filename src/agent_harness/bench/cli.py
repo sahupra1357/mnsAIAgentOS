@@ -421,7 +421,8 @@ async def run_pipeline(
                 for entry in entries:
                     spec = _spec_from_plan(entry, base=base, config=config, output_dir=output_dir)
                     make_room(spec.profile)
-                    announce(f"   benchmark {spec.name} ({spec.suite} on {spec.profile or 'default'}) ...")
+                    on_profile = spec.profile or _default_profile(config) or "default"
+                    announce(f"   benchmark {spec.name} ({spec.suite} on {on_profile}) ...")
                     try:
                         report, _ = await execute_benchmark(spec, models=models, quiet=on_progress is None,
                                                             live=progress,

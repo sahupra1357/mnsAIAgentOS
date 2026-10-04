@@ -91,9 +91,10 @@ def render_history(root: Path) -> str:
         for report_path in sorted(run.glob("*/report.json")):
             report = _read_json(report_path)
             if isinstance(report, dict):
-                benchmarks[report_path.parent.name] = report.get("metrics", {})
-                if report_path.parent.name not in names:
-                    names.append(report_path.parent.name)
+                column = _column(report, report_path.parent.name)
+                benchmarks[column] = report.get("metrics", {})
+                if column not in names:
+                    names.append(column)
         rows.append((run, stages if isinstance(stages, list) else [], benchmarks))
     header = "".join(f"<th>{escape(name)}</th>" for name in names)
     body = []
@@ -134,6 +135,19 @@ def render_history(root: Path) -> str:
         f"<section>{table}</section>",
         "</main></body></html>",
     ])
+
+
+def _column(report: dict[str, Any], folder: str) -> str:
+    """One column per suite and profile, whatever the benchmark entry was named.
+
+    Plan entries that follow the default profile are named ``gsm8k`` while older runs used
+    ``gsm8k-llamacpp``; both measured the same thing, so they share the column.
+    """
+
+    suite, profile = report.get("suite"), report.get("profile")
+    if isinstance(suite, str) and suite and isinstance(profile, str) and profile:
+        return f"{suite}-{profile}"
+    return folder
 
 
 def _label(name: str) -> str:
