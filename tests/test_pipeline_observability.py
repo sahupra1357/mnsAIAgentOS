@@ -238,7 +238,7 @@ class ObservabilityTests(unittest.TestCase):
 
             html = (out.parent / "index.html").read_text()
             self.assertIn("Validation report", html)
-            self.assertIn("gsm8k &middot; 1 failed", html)
+            self.assertIn("gsm8k &middot; 1 incorrect", html)
             self.assertIn('href="gsm8k/transcripts/gsm8k-2.json"', html)
             self.assertNotIn("<script>", html)  # the raw reply stays in the transcript, not the page
             self.assertIn("Model and tool calls", html)

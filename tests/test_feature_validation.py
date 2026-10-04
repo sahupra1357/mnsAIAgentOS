@@ -54,6 +54,13 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(uncovered(self.features.values(), "benchmarks",
                                    [str(e["name"]) for e in raw.get("benchmark", [])]), [])
 
+    def test_every_benchmark_sets_its_own_allowed_drop(self) -> None:
+        # The 0.03 default is less than one item for every benchmark here (one item is 100/n
+        # points), so a single different answer would fail the gate.
+        missing = [e["name"] for e in plan().get("benchmark", [])
+                   if "max_accuracy_drop" not in e.get("thresholds", {})]
+        self.assertEqual(missing, [])
+
     def test_every_live_benchmark_has_a_baseline_path(self) -> None:
         # Without `baseline`, --update-baselines has nowhere to save and gates never compare.
         missing = [e["name"] for e in plan().get("benchmark", []) if not e.get("baseline")]
