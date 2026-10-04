@@ -62,6 +62,11 @@ class CompanionTests(unittest.TestCase):
             config = load_config(write(directory, LLAMA + 'embedding_model = "e"\n'
                                        'embedding_endpoint = "http://embed:8081/v1"\n'), environ={})
             self.assertEqual(config.models["llama.embed"].endpoint, "http://embed:8081/v1")
+            guarded = load_config(write(directory, LLAMA + 'guard_model = "g"\n'
+                                        'guard_endpoint = "http://guard:8082/v1"\n'), environ={})
+            self.assertEqual(guarded.models["llama.guard"].endpoint, "http://guard:8082/v1")
+            with self.assertRaisesRegex(ConfigError, "needs guard_model"):
+                load_config(write(directory, LLAMA + 'guard_endpoint = "http://g/v1"\n'), environ={})
             with self.assertRaisesRegex(ConfigError, "needs embedding_model"):
                 load_config(write(directory, LLAMA + 'embedding_endpoint = "http://e/v1"\n'), environ={})
             with self.assertRaisesRegex(ConfigError, "conflicts with the embed companion"):

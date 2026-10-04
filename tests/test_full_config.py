@@ -30,7 +30,9 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(config.default_model_profile, "llamacpp")
         # Phase 16: each provider is self-contained; embeddings are companions, not profiles.
         self.assertEqual(config.chat_models(), ["llamacpp", "ollama"])
-        self.assertEqual(set(config.companions), {"llamacpp.embed", "ollama.embed"})
+        self.assertEqual(set(config.companions),
+                         {"llamacpp.embed", "llamacpp.guard", "ollama.embed", "ollama.guard"})
+        self.assertEqual(config.guardrails.model.profile, "llamacpp.guard")  # its own Llama Guard
         self.assertEqual(config.disabled_models, ("modal",))
         self.assertEqual(dict(config.routes), {"fast": "llamacpp", "local": "ollama"})
         self.assertEqual(config.models["llamacpp"].fallback, ())  # no cross-provider fallback

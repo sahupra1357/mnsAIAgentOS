@@ -82,6 +82,7 @@ from agent_harness.domain import (
     EventType,
     FinishReason,
     Message,
+    ModelRequest,
     ModelResolver,
     ModelResponse,
     PermanentModelError,
@@ -421,9 +422,16 @@ def _expectations(file: Path, raw: Any) -> Expectations:
 
 class _ScenarioModel(ScriptedModelClient):
     """Scripted completions plus deterministic local embeddings (hashed words), so
-    hybrid memory works in network-free scenarios."""
+    hybrid memory works in network-free scenarios. Guard-model checks (requests with
+    ``metadata["purpose"] == "guard"``, sent when the config's profile has a
+    ``guard_model``) are answered "safe" without using up the script."""
 
     dimensions = 64
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        if request.metadata.get("purpose") == "guard":
+            return ModelResponse(content="safe", finish_reason=FinishReason.STOP)
+        return await super().complete(request)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         vectors = []

@@ -49,37 +49,38 @@ timeout_seconds = 600
 max_retries = 1
 embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"   # same router
 # embedding_endpoint = "http://127.0.0.1:8081/v1"            # only for a separate server
-# guard_model = "QuantFactory/Llama-Guard-3-1B-GGUF:Q4_K_M"   # Llama Guard in the same router
+guard_model = "QuantFactory/Llama-Guard-3-1B-GGUF:Q4_K_M"   # Llama Guard in the same router
 # fallback = ["ollama"]          # opt-in only: crossing providers breaks "one profile"
 
 [models.llamacpp.parameters]
 temperature = 0.2
 max_tokens = 2048
 
-# Ollama: `ollama serve`, then `ollama pull qwen2.5-coder:7b` and `ollama pull nomic-embed-text`
-# (and `ollama pull llama-guard3:1b` for guard_model). One server, three model names.
+# Ollama: `ollama serve`, then `ollama pull gpt-oss:20b`, `ollama pull nomic-embed-text`, and
+# `ollama pull llama-guard3:1b`. One server, three model names: chat, embeddings, guard.
 [models.ollama]
 enabled = true
 adapter = "ollama"
-model = "qwen2.5-coder:7b"
+model = "gpt-oss:20b"
 endpoint = "http://127.0.0.1:11434/v1"
 api_mode = "native"              # sends context_window as num_ctx
 context_window = 8192
 timeout_seconds = 180
 max_retries = 1
 embedding_model = "nomic-embed-text"
-# guard_model = "llama-guard3:1b"
+guard_model = "llama-guard3:1b"
 
 [models.ollama.parameters]
 temperature = 0.2
 num_predict = 1024
 
 # Modal (vLLM or SGLang): needs MODAL_LLM_API_KEY, MODAL_PROXY_TOKEN_ID and
-# MODAL_PROXY_TOKEN_SECRET, and your workspace in the endpoint. Then enable it.
-# One deployment serves one model, so embeddings need a second deployment: a copy of
-# examples/modal/vllm_server.py with MODEL_NAME set to an embedding model and vLLM's
-# embedding (pooling) mode on (check the flag for your vLLM version), named by
-# embedding_endpoint below. Same Modal auth, so it is still the one `modal` profile.
+# MODAL_PROXY_TOKEN_SECRET, and your workspace in the endpoints. Then enable it.
+# One deployment serves one model, so the profile names three deployments, all with the
+# same Modal auth (one profile, one set of credentials):
+#   modal deploy examples/modal/vllm_server.py         # chat        -> endpoint
+#   modal deploy examples/modal/vllm_embed_server.py   # embeddings  -> embedding_endpoint
+#   modal deploy examples/modal/vllm_guard_server.py   # Llama Guard -> guard_endpoint
 [models.modal]
 enabled = false
 adapter = "modal"
@@ -92,8 +93,10 @@ cold_start_timeout_seconds = 600
 max_retries = 1
 context_window = 32768
 token_counting = "server"
-# embedding_model = "nomic-ai/nomic-embed-text-v1.5"
-# embedding_endpoint = "https://WORKSPACE--agent-harness-vllm-embed-serve.modal.run/v1"
+embedding_model = "nomic-ai/nomic-embed-text-v1.5"
+embedding_endpoint = "https://WORKSPACE--agent-harness-vllm-embed-serve.modal.run/v1"
+guard_model = "meta-llama/Llama-Guard-3-1B"
+guard_endpoint = "https://WORKSPACE--agent-harness-vllm-guard-serve.modal.run/v1"
 
 [models.modal.headers_env]
 Modal-Key = "MODAL_PROXY_TOKEN_ID"

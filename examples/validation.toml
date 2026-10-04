@@ -25,9 +25,15 @@ config = "models.toml"
 # Ollama and llama.cpp on one machine share GPU memory. With this on, large models on
 # the other local server are unloaded before each local profile runs, and restored
 # before remote profiles and at the end (see docs/VALIDATION.md).
-# [residency]
-# enabled = true
-# min_params_b = 20
+# On: llama.cpp (Qwen3.8-27B) and Ollama (gpt-oss:20b) on this machine cannot both hold
+# a large model in GPU memory. Before each local profile's smoke/benchmarks, large models
+# loaded on the *other* server are unloaded through its API (Ollama keep_alive=0, the
+# llama.cpp router's unload); everything is restored at the end. It reads only the
+# servers named by the profiles in models.toml, so switching the default profile needs
+# no change here. Remote profiles (Modal) are unaffected.
+[residency]
+enabled = true
+min_params_b = 20
 
 # --- Live checks: they follow the config's default profile ------------------------
 # Entries without `profile` run on default_model_profile (llama.cpp in ../models.toml),

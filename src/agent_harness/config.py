@@ -63,6 +63,7 @@ _PROFILE_FIELDS = {
     "EMBEDDING_MODEL": "embedding_model",
     "EMBEDDING_ENDPOINT": "embedding_endpoint",
     "GUARD_MODEL": "guard_model",
+    "GUARD_ENDPOINT": "guard_endpoint",
 }
 # Marks dataclass fields that versioning.profile_sha256 skips while they hold their default.
 HASH_OMIT_DEFAULT = MappingProxyType({"hash": "omit_default"})
@@ -142,10 +143,12 @@ class ModelProfile:
     token_counting: str = field(default="estimate", metadata=HASH_OMIT_DEFAULT)
     # Self-contained providers (Phase 16): the same provider's embedding and guard models.
     # Each becomes a hidden companion profile (``NAME.embed`` / ``NAME.guard``) that memory
-    # and the guard model use by default. ``embedding_endpoint`` defaults to ``endpoint``.
+    # and the guard model use by default. The endpoints default to ``endpoint``; providers
+    # that serve one model per deployment (Modal) name a separate one.
     embedding_model: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
     embedding_endpoint: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
     guard_model: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
+    guard_endpoint: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
 
     def __post_init__(self) -> None:
         if not self.adapter.strip():
@@ -210,12 +213,14 @@ class ModelProfile:
             raise ConfigError(
                 f"model profile reasoning_history must be one of: {', '.join(REASONING_HISTORY_MODES)}"
             )
-        for name in ("embedding_model", "embedding_endpoint", "guard_model"):
+        for name in ("embedding_model", "embedding_endpoint", "guard_model", "guard_endpoint"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ConfigError(f"model profile {name} must be a non-empty string")
         if self.embedding_endpoint is not None and self.embedding_model is None:
             raise ConfigError("model profile embedding_endpoint needs embedding_model")
+        if self.guard_endpoint is not None and self.guard_model is None:
+            raise ConfigError("model profile guard_endpoint needs guard_model")
 
 
 def _validated_headers_env(raw: Mapping[str, str]) -> dict[str, str]:
@@ -1018,12 +1023,14 @@ def _add_companions(profiles: dict[str, ModelProfile]) -> dict[str, tuple[str, s
                 endpoint=profile.embedding_endpoint or profile.endpoint,
                 parameters={}, fallback=(), context_window=None, token_counting="estimate",
                 pricing=None, embedding_model=None, embedding_endpoint=None, guard_model=None,
+                guard_endpoint=None,
             )
         if profile.guard_model:
             derived["guard"] = replace(
-                profile, model=profile.guard_model, parameters={"max_tokens": 32}, fallback=(),
+                profile, model=profile.guard_model, endpoint=profile.guard_endpoint or profile.endpoint,
+                parameters={"max_tokens": 32}, fallback=(),
                 context_window=None, token_counting="estimate", pricing=None,
-                embedding_model=None, embedding_endpoint=None, guard_model=None,
+                embedding_model=None, embedding_endpoint=None, guard_model=None, guard_endpoint=None,
             )
         for kind, companion in derived.items():
             companion_name = f"{name}.{kind}"
@@ -1487,6 +1494,7 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
         "embedding_model",
         "embedding_endpoint",
         "guard_model",
+        "guard_endpoint",
     }
     unknown = set(raw) - allowed
     if unknown:
@@ -1549,6 +1557,7 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
             embedding_model=raw.get("embedding_model"),
             embedding_endpoint=raw.get("embedding_endpoint"),
             guard_model=raw.get("guard_model"),
+            guard_endpoint=raw.get("guard_endpoint"),
         )
     except (TypeError, ValueError) as exc:
         if isinstance(exc, ConfigError):

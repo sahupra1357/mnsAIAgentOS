@@ -203,9 +203,21 @@ embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"
 embedding_model = "nomic-embed-text"
 guard_model = "llama-guard3:1b"
 
-[models.modal]              # one deployment = one model: embeddings need a second deployment
-embedding_endpoint = "https://WORKSPACE--...-embed-serve.modal.run/v1"
+[models.modal]              # one deployment = one model: three deployments, one profile
+embedding_model = "nomic-ai/nomic-embed-text-v1.5"
+embedding_endpoint = "https://WORKSPACE--agent-harness-vllm-embed-serve.modal.run/v1"
+guard_model = "meta-llama/Llama-Guard-3-1B"
+guard_endpoint = "https://WORKSPACE--agent-harness-vllm-guard-serve.modal.run/v1"
 ```
+
+Modal deploy scripts:
+- `examples/modal/vllm_embed_server.py`: uses `--runner pooling --trust-remote-code`
+  (NomicBertModel). Checked against the vLLM 0.30.0 source.
+- `examples/modal/vllm_guard_server.py`: Llama Guard 3 1B, which is gated, so the
+  `agent-harness-hf` secret must hold `HF_TOKEN`.
+
+They share the `agent-harness-llm` bearer secret and proxy auth with the chat deployment.
+Changing `models.toml` never requires a redeploy; only the model a deployment serves does.
 
 Per provider:
 - **llama.cpp router:** the preset needs a section for the embedding model with
@@ -213,8 +225,13 @@ Per provider:
   `models.ini` is regenerated). The router must allow two loaded models (`--models-max 2`).
   Otherwise every embedding call unloads the chat model.
 - **Ollama:** the same server answers `/v1/embeddings` for `nomic-embed-text`.
-- **Modal / vLLM:** one deployment serves one model. Deploy a second one in vLLM's
-  embedding (pooling) mode, and check the flag for the pinned vLLM version.
+- **Modal / vLLM:** one deployment serves one model. Use `vllm_embed_server.py` (vLLM
+  `--runner pooling`) and `vllm_guard_server.py`, named by `embedding_endpoint` and
+  `guard_endpoint`.
+- **llama.cpp preset gotcha:** each model needs its own `[org/repo:QUANT]` section header. A
+  second section with an existing header silently replaces that model. One symptom is
+  "Pooling type 'none' is not OAI compatible", when a chat or guard GGUF is loaded under
+  the embedding model's name.
 
 How it fits together:
 - **Companions:** the fields become the companions `NAME.embed` / `NAME.guard`, resolved by the
