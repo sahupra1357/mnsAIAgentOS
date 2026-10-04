@@ -42,13 +42,19 @@ def progress_bar(done: int, total: int, width: int = 20) -> str:
 
 @dataclass(slots=True)
 class Timings:
-    """What one run took: per stage, and the mean seconds per item of each benchmark."""
+    """What one run took: per stage, and the mean seconds per item of each benchmark.
+
+    ``profile`` is the model profile the run used: timings only predict runs on the same
+    profile (a local 27B model and a hosted 7B one differ by minutes per item).
+    """
 
     stages: dict[str, float] = field(default_factory=dict)
     items: dict[str, float] = field(default_factory=dict)
+    profile: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {"stages": {k: round(v, 3) for k, v in self.stages.items()},
+        return {"profile": self.profile,
+                "stages": {k: round(v, 3) for k, v in self.stages.items()},
                 "items": {k: round(v, 3) for k, v in self.items.items()}}
 
     @classmethod
@@ -65,15 +71,20 @@ class Timings:
                 return {}
             return {str(k): float(v) for k, v in value.items() if isinstance(v, (int, float))}
 
-        return cls(stages=numbers(raw.get("stages")), items=numbers(raw.get("items")))
+        profile = raw.get("profile")
+        return cls(stages=numbers(raw.get("stages")), items=numbers(raw.get("items")),
+                   profile=profile if isinstance(profile, str) else None)
 
 
-def previous_timings(runs: Sequence[Path], current: Path) -> Timings:
-    """Timings of the newest earlier run that recorded them (runs: newest first)."""
+def previous_timings(runs: Sequence[Path], current: Path, profile: str | None = None) -> Timings:
+    """Timings of the newest earlier run on the same profile (runs: newest first)."""
 
     for run in runs:
-        if run.resolve() != current.resolve() and (run / TIMINGS_FILE).exists():
-            return Timings.load(run / TIMINGS_FILE)
+        if run.resolve() == current.resolve() or not (run / TIMINGS_FILE).exists():
+            continue
+        timings = Timings.load(run / TIMINGS_FILE)
+        if profile is None or timings.profile == profile:
+            return timings
     return Timings()
 
 
@@ -89,7 +100,10 @@ class PipelineProgress:
         interval: float = 1.0,
         log_every: float = 30.0,
         width: Callable[[], int] | None = None,
+        display: bool = True,
     ) -> None:
+        # display=False: only records timings (quiet runs); output is not routed through it.
+        self.display = display
         self._stream = stream
         self.interactive = stream.isatty() if interactive is None else interactive
         self._clock = clock

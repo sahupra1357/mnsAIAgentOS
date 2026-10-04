@@ -48,15 +48,18 @@ skip_cache = false                # (chat, tool calls, prefix cache, embeddings,
 max_tokens = 512                  # thinking models (Qwen3) need room before answering
 
 # Real datasets (scripts/fetch_datasets.sh downloads them once into datasets/, gitignored).
-# Sizes are a balance: big enough that one miss moves accuracy a few points, not 33, and
-# small enough for a local 27B model (about 20 minutes for all three). Raise `limit` for
-# release decisions. The bench/*_sample files stay for the offline harness self-check.
+# Sizes are a balance: big enough that one miss moves accuracy a few points, not 33.
+# `concurrency = 3` sends three items at once: llama.cpp (parallel slots), vLLM, and SGLang
+# batch concurrent requests on the GPU, so results are unchanged and throughput rises
+# (measured: bfcl on llama.cpp, 27B on a Mac, 8:46 -> 6:00 at the same 0.950; more on vLLM).
+# Ollama only gains with OLLAMA_NUM_PARALLEL >= 3. Raise `limit` for release decisions.
+# The bench/*_sample files stay for the offline harness self-check.
 [[benchmark]]
 name = "gsm8k"
 suite = "gsm8k"
 data = "../datasets/gsm8k/test.jsonl"
 limit = 30
-concurrency = 1
+concurrency = 3
 max_steps = 8
 baseline = "../baselines/gsm8k-{profile}.json"
 [benchmark.thresholds]
@@ -68,6 +71,7 @@ name = "bfcl"
 suite = "bfcl"
 data = "../datasets/bfcl/mix.jsonl"             # 20 simple, 10 parallel, 10 irrelevance (BFCL v4)
 answers = "../datasets/bfcl/mix_answers.jsonl"
+concurrency = 3
 baseline = "../baselines/bfcl-{profile}.json"
 [benchmark.thresholds]
 max_accuracy_drop = 0.05
@@ -89,6 +93,7 @@ name = "humaneval"
 suite = "humaneval"
 data = "../datasets/humaneval/HumanEval.jsonl.gz"
 limit = 20
+concurrency = 3
 max_steps = 6
 baseline = "../baselines/humaneval-{profile}.json"
 [benchmark.thresholds]

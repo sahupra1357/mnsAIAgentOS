@@ -147,3 +147,10 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
 - **Repeat counting:** identical read-only calls within one reply run once and share the
   result, and each reply counts as one repeat. `tests/test_runaway_guards.py`
   (`DuplicateCallsInOneReplyTests`) replays the Qwen2.5-7B gsm8k transcript.
+
+## Phase 16g: parallel items, per-profile estimates
+
+- **Parallel items:** benchmarks without a context-filling purpose use `concurrency = 3`;
+  servers batch concurrent requests, so results are unchanged and throughput is higher.
+- **Estimates:** `Timings.profile` is written by every run, and estimates use only the same
+  profile's history. Without that, a slow Ollama run made a llama.cpp run show over an hour left.

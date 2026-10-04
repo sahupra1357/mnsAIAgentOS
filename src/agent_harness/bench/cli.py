@@ -18,6 +18,8 @@ import contextlib
 import functools
 import hashlib
 import json
+import math
+import io
 import os
 import shutil
 import subprocess
@@ -150,7 +152,7 @@ async def execute_benchmark(
         if not quiet:
             mark = "ok " if result.correct else ("ERR" if result.error else "no ")
             line = f"[{done}/{total}] {mark} {result.id} ({result.latency_seconds:.1f}s)"
-            if live is not None:
+            if live is not None and live.display:
                 live.write(line)
             else:
                 print(line, file=sys.stderr)
@@ -332,8 +334,15 @@ async def run_pipeline(
             add(StageResult(f"residency:{name}", change.status, change.detail))
 
     ticker: asyncio.Task[None] | None = None
-    if progress is not None:
-        progress.start(stages, previous_timings(all_runs(root), output_dir))
+    shown = progress is not None
+    if progress is None:
+        # Nothing is displayed (--quiet, library callers), but timings are still recorded
+        # so the next run on this profile can estimate its time.
+        progress = PipelineProgress(io.StringIO(), interactive=False, log_every=math.inf, display=False)
+    run_profile = _default_profile(config)  # live stages follow it; estimates must too
+    progress.timings.profile = run_profile
+    progress.start(stages, previous_timings(all_runs(root), output_dir, run_profile))
+    if shown:
         ticker = asyncio.create_task(progress.run())
     try:
         for stage in stages:
