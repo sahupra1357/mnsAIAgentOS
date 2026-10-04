@@ -129,3 +129,12 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
 - **Benchmarks:** `execute_benchmark(live=...)` reports items to it.
 - **Tests:** `tests/test_validation_progress.py` drives everything with a fake clock and a
   `StringIO` stream.
+
+## Phase 16e: `.env` and the profile switch in validation
+
+- **Live stages:** `scripts/validate.sh` reads `./.env`, so the live stages see the
+  credentials, the Modal endpoints, and `AGENT_HARNESS_MODEL_PROFILE`.
+- **Offline stages:** they drop every `AGENT_HARNESS_*` variable and set
+  `AGENT_HARNESS_DOTENV=0`, so their child processes do not re-read `.env`.
+- **Tests:** `tests/test_dotenv_profile_switch.py` covers parsing, precedence, both names of
+  the switch, the program-only loading, and the hermetic stages.

@@ -1,5 +1,5 @@
-# Select this profile by default. Override it with
-# AGENT_HARNESS_DEFAULT_MODEL_PROFILE or --model-profile.
+# Select this profile by default. Override it with AGENT_HARNESS_MODEL_PROFILE
+# (in .env or the shell; older name AGENT_HARNESS_DEFAULT_MODEL_PROFILE) or --model-profile.
 default_model_profile = "llamacpp"
 
 # Turn a profile off with `enabled = false` in its table (or

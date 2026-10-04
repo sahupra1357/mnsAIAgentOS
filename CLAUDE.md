@@ -154,6 +154,16 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
     keeps ticking; do not call `_run_command` directly from async code.
   - Estimates come from the previous run's `timings.json`.
   - Print through `progress.write()` while it is active, so lines do not tear the status line.
+- **The profile switch and `.env` (Phase 16e).**
+  - **The switch:** `AGENT_HARNESS_MODEL_PROFILE` (`PROFILE_ENV` in `config.py`) overrides
+    `default_model_profile`. The older `AGENT_HARNESS_DEFAULT_MODEL_PROFILE` is still read;
+    the new name wins.
+  - **When `.env` is read:** `dotenv.load_dotenv()` reads `./.env` only when
+    `agent-harness` or `agent-harness-bench` start as programs (`main()` with
+    `argv is None`). Shell variables win over it.
+  - **Hermetic stages:** the offline pipeline stages set `AGENT_HARNESS_DOTENV=0`.
+  - **Tests:** call `main([...])` so `.env` is never read. Real endpoints and keys belong in
+    `.env`, never in `models.toml`.
 - **Companion profiles (Phase 16).** `config.models` also holds hidden `NAME.embed` / `NAME.guard`
   profiles. Use `config.chat_models()` (not `config.models`) wherever profiles are listed or offered
   to users. A single chat profile with companions still counts as one profile for the default.
@@ -548,7 +558,7 @@ One provider profile serves everything; nothing in `models.toml` depends on a se
    - `[[smoke]]` / `[[benchmark]]` entries without `profile` use `default_model_profile`.
    - Benchmark names and baselines take `{profile}`.
    - The feature smoke name is `default`.
-   - `AGENT_HARNESS_DEFAULT_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider.
+   - `AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider.
 6. `doctor` also checks the profile's embedding and guard models (`companion_checks`).
 Tests: `tests/test_self_contained_profiles.py`.
 

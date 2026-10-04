@@ -42,6 +42,8 @@ from agent_harness.telemetry import JsonLinesTelemetry
 from agent_harness.model_gateway import ModelGateway
 
 from .compare import Thresholds, compare_reports
+from agent_harness.dotenv import load_dotenv
+
 from .core import BenchConfigError, BenchContext, ExecutionFactory, ItemResult
 from .data import DatasetError, file_sha256
 from .features import FeatureSelection, parse_features, select_features
@@ -282,6 +284,7 @@ async def run_pipeline(
     # settings files, which tests and scripted scenarios would otherwise pick up.
     # Smoke and benchmarks keep the full environment: they target the live setup.
     hermetic = {k: v for k, v in env.items() if not k.startswith("AGENT_HARNESS_")}
+    hermetic["AGENT_HARNESS_DOTENV"] = "0"  # child processes must not re-read ./.env
     hermetic["AGENT_HARNESS_USER_SETTINGS"] = os.devnull + ".agent-harness-user-settings"
     hermetic["AGENT_HARNESS_ENTERPRISE_SETTINGS"] = os.devnull + ".agent-harness-enterprise-settings"
     python = sys.executable
@@ -655,6 +658,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if argv is None:  # started as a program: read ./.env (credentials, the profile switch)
+        load_dotenv()
     args = _parser().parse_args(argv)
     try:
         if args.command == "suites":
