@@ -93,6 +93,7 @@ data = "bench/context_sample.jsonl"
 limit = 3
 concurrency = 1
 max_steps = 3
+baseline = "../baselines/context-{profile}.json"
 [benchmark.options]
 turns = 48
 chars_per_turn = 1500
@@ -109,6 +110,7 @@ data = "bench/memory_sample.jsonl"
 limit = 3
 concurrency = 1
 max_steps = 6
+baseline = "../baselines/memory-{profile}.json"
 [benchmark.options]
 search = "hybrid"
 [benchmark.thresholds]
