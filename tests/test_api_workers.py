@@ -12,9 +12,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from agent_harness import cli
-from agent_harness.api import HarnessAPI
-from agent_harness.config import HarnessConfig, ModelProfile
+import agent_harness.cli.main as cli
+from agent_harness.server.api import HarnessAPI
+from agent_harness.config.loader import HarnessConfig, ModelProfile
 from agent_harness.domain import (
     FinishReason,
     JsonObject,
@@ -27,10 +27,10 @@ from agent_harness.domain import (
     ToolRisk,
     ToolSpec,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.tools import ApprovalMode, DefaultToolPolicy, ToolRegistry, ToolRuntime
-from agent_harness.worker import Worker
+from agent_harness.server.worker import Worker
 
 
 TOKEN = "test-token-0123456789"
@@ -258,7 +258,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
 
         worker = Worker(harness.orchestrator, harness.store, worker_id="slow", lease_seconds=30, sleep=expire_lease)
-        with self.assertLogs("agent_harness.worker", level="WARNING") as logs:
+        with self.assertLogs("agent_harness.server.worker", level="WARNING") as logs:
             self.assertIsNone(await worker.run_once())
         self.assertIn("lost lease", logs.output[0])
         self.assertEqual(await harness.store.claim("rescuer", 30), run.id)
@@ -277,7 +277,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("store unavailable")
 
         worker = Worker(Broken(), store, worker_id="w", max_unexpected_failures=3)  # type: ignore[arg-type]
-        with self.assertLogs("agent_harness.worker", level="ERROR"):
+        with self.assertLogs("agent_harness.server.worker", level="ERROR"):
             for _ in range(3):
                 self.assertIsNone(await worker.run_once())
         self.assertIsNone(await store.claim("w2", 30))

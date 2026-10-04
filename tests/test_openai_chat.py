@@ -9,8 +9,8 @@ from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from agent_harness.api import HarnessAPI
-from agent_harness.config import HarnessConfig, ModelProfile
+from agent_harness.server.api import HarnessAPI
+from agent_harness.config.loader import HarnessConfig, ModelProfile
 from agent_harness.domain import (
     FinishReason,
     JsonObject,
@@ -23,18 +23,18 @@ from agent_harness.domain import (
     ToolRisk,
     ToolSpec,
 )
-from agent_harness.openai_chat import (
+from agent_harness.server.openai_chat import (
     ChatRequestError,
     ChatTurn,
     conversation_key,
     decision_from_text,
     parse_chat_request,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
-from agent_harness.streaming import StreamHub
+from agent_harness.server.streaming import StreamHub
 from agent_harness.tools import ApprovalMode, DefaultToolPolicy, ToolRegistry, ToolRuntime
-from agent_harness.worker import Worker
+from agent_harness.server.worker import Worker
 
 TOKEN = "test-token-0123456789"
 DEPLOY = ToolSpec(name="deploy", description="deploy", input_schema={"type": "object"},
@@ -164,7 +164,7 @@ class ParsingTests(unittest.TestCase):
 
     def test_answer_is_only_from_the_newest_turn(self) -> None:
         from agent_harness.domain import Message, RunRecord
-        from agent_harness.openai_chat import answer_text
+        from agent_harness.server.openai_chat import answer_text
 
         run = RunRecord(id="r", model_profile="p", messages=[
             Message(Role.USER, "a"), Message(Role.ASSISTANT, "first answer"),

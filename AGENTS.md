@@ -38,16 +38,24 @@ API / CLI → Application services → Domain contracts
 ```text
 src/agent_harness/
   domain.py              Shared domain values and protocols
-  orchestrator.py        Durable execution state machine
-  config.py              Environment/config-file loading
+  application.py         Composition root: builds a runnable harness from config
+  orchestration/         Durable run loop: orchestrator, plans, subagents, context, output
+  config/                models.toml loading, layered settings, .env, secret references
   model_gateway/         Model routing and provider adapters
-  tools/                 Tool contracts, registry, policies, implementations
+  tools/                 Tool contracts, registry, policies, catalog, sources, loading
+  mcp/                   MCP client (stdio and streamable HTTP) as a tool source
   coding/                Workspace-safe coding tools and execution backends
+  sandbox/               Warm per-run containers and the in-container tool runner
+  extensions/            Hooks, permission rules, plugins, templates, instruction files
+  guardrails/            Input, output, and tool-output guards
+  knowledge/             Long-term memory and artifact storage
   persistence/           Run/event store implementations
-  api.py                 Optional HTTP entrypoint
-  cli.py                 Local operator entrypoint
+  observability/         Telemetry and redaction
+  server/                HTTP API, OpenAI-compatible chat, web UI, auth, workers
+  cli/                   Local operator entrypoint and chat REPL
+  bench/                 Validation pipeline, benchmarks, scenario evaluations
 tests/                    Network-free unit and integration tests
-examples/                 Small runnable configurations and examples
+examples/                 Reference configurations and examples (not loaded by the root config)
 ```
 
 ## Project-Local Skills

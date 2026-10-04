@@ -37,6 +37,7 @@ any of this.
 ## Hard rules for this repo
 
 - **Never delete or rename existing files, tests, docs, or skills.** Extend instead.
+  (Exception: the user asked for the Phase 18 package regrouping, which moved modules.)
   The original code was produced by Codex; preserve it and its tests.
 - Plan before coding when the user asks for a plan; do not edit `src/` or `tests/`
   until they approve.
@@ -66,19 +67,29 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 
 ## Where things are
 
-| Concern                         | File(s)                                              |
-|---------------------------------|------------------------------------------------------|
-| Domain values & protocols       | `src/agent_harness/domain.py`                        |
-| State machine, budgets, resume  | `src/agent_harness/orchestrator.py`                  |
-| TOML/env config, `ModelProfile` | `src/agent_harness/config.py`                        |
-| Adapter registry                | `src/agent_harness/model_gateway/gateway.py`         |
-| OpenAI-compatible adapter       | `src/agent_harness/model_gateway/openai_compatible.py` |
-| HTTP boundary (fakeable)        | `src/agent_harness/model_gateway/transport.py`       |
-| Tool runtime/policy/validation  | `src/agent_harness/tools/`                           |
-| Coding tools + Docker sandbox   | `src/agent_harness/coding/`                          |
-| SQLite / memory stores          | `src/agent_harness/persistence/`                     |
-| Composition root                | `src/agent_harness/application.py`                   |
-| CLI                             | `src/agent_harness/cli.py`                           |
+| Concern                           | File(s)                                                 |
+|-----------------------------------|---------------------------------------------------------|
+| Domain values & protocols         | `src/agent_harness/domain.py`                           |
+| Composition root                  | `src/agent_harness/application.py`                      |
+| State machine, budgets, resume    | `src/agent_harness/orchestration/orchestrator.py`       |
+| Plans, subagents, context, output | `src/agent_harness/orchestration/`                      |
+| TOML/env config, `ModelProfile`   | `src/agent_harness/config/loader.py`                    |
+| Layered settings, .env, secrets   | `src/agent_harness/config/`                             |
+| Adapter registry                  | `src/agent_harness/model_gateway/gateway.py`            |
+| OpenAI-compatible adapter         | `src/agent_harness/model_gateway/openai_compatible.py`  |
+| HTTP boundary (fakeable)          | `src/agent_harness/model_gateway/transport.py`          |
+| Tool runtime/policy/validation    | `src/agent_harness/tools/`                              |
+| Tool catalog, sources, loading    | `src/agent_harness/tools/{catalog,sources,loading}.py`  |
+| MCP client                        | `src/agent_harness/mcp/`                                |
+| Coding tools + Docker sandbox     | `src/agent_harness/coding/, src/agent_harness/sandbox/` |
+| Hooks, permissions, plugins       | `src/agent_harness/extensions/`                         |
+| Guardrails                        | `src/agent_harness/guardrails/`                         |
+| Memory, artifacts                 | `src/agent_harness/knowledge/`                          |
+| SQLite / memory stores            | `src/agent_harness/persistence/`                        |
+| Telemetry, redaction              | `src/agent_harness/observability/`                      |
+| HTTP API, /v1 chat, /ui, workers  | `src/agent_harness/server/`                             |
+| CLI and chat REPL                 | `src/agent_harness/cli/`                                |
+| Validation, benchmarks, evals     | `src/agent_harness/bench/`                              |
 
 ## Known pitfalls in the current code
 
@@ -188,7 +199,7 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   - Estimates come from the previous run's `timings.json`.
   - Print through `progress.write()` while it is active, so lines do not tear the status line.
 - **The profile switch and `.env` (Phase 16e).**
-  - **The switch:** `AGENT_HARNESS_MODEL_PROFILE` (`PROFILE_ENV` in `config.py`) overrides
+  - **The switch:** `AGENT_HARNESS_MODEL_PROFILE` (`PROFILE_ENV` in `config/loader.py`) overrides
     `default_model_profile`. It is the only name; the older `AGENT_HARNESS_DEFAULT_MODEL_PROFILE`
     was removed at the user's request.
   - **When `.env` is read:** `dotenv.load_dotenv()` reads `./.env` only when
@@ -281,7 +292,7 @@ and add network-free tests. Each item's details are in the skill in brackets.
    checkpoints only the final assembled response.
 4. Add observability: structured JSON logs, per-step trace/span IDs, and a metrics
    hook; OpenTelemetry exporter as an optional extra.
-5. Add an HTTP API (`api.py`): create/get/cancel/resume runs, list events, approve or
+5. Add an HTTP API (`server/api.py`): create/get/cancel/resume runs, list events, approve or
    deny, and SSE event stream; server framework as an optional extra.
 6. Add workers and a queue: lease-based claim of queued runs in SQLite so several
    workers can process runs safely; heartbeat and lease expiry → resume.
@@ -397,7 +408,7 @@ Order matters: 6.1 is the foundation for most of the rest.
    `docker exec`, removed when the run ends (or after `max_lifetime_seconds`).
    `[coding.docker] mode = "per_run"`; sandboxed Python tools
    (`[[tools]] kind = "python", sandbox = "container"`) run in the run's container via
-   `agent_harness.sandbox_runner`. The current run is a context variable (`runcontext.py`).
+   `agent_harness.sandbox.runner`. The current run is a context variable (`orchestration/runcontext.py`).
 4. Memory backends: `[memory] backend = "sqlite" | "postgres"` (Postgres full-text search);
    `agent-harness memory migrate --from sqlite:PATH` copies every note.
 
@@ -459,7 +470,7 @@ All of Phase 12 is implemented. The `/ui` chat page is deferred.
 2. Deadlines for paused runs: `[interaction] approval_timeout_seconds`, `question_timeout_seconds`,
    `on_timeout = deny|cancel|fail`; `expire_pending_input()`, worker reconcile, CLI `expire`.
 3. API rate limits: `[api] rate_limit_per_minute`, `rate_limit_burst` (token bucket per key, 429 +
-   Retry-After; `ratelimit.py`).
+   Retry-After; `server/ratelimit.py`).
 4. Per-user quotas: `[user_quotas]` (+ `[user_quotas.users.NAME]`), reserved with the tenant quota;
    stores gain `user_usage` and `reserve(..., end_user=)` (SQLite migration 7, Postgres 4).
 Also `[orchestrator]` (all `OrchestratorSettings`) and `AGENT_HARNESS_SET__SECTION__KEY` overrides.
@@ -473,7 +484,7 @@ Also `[orchestrator]` (all `OrchestratorSettings`) and `AGENT_HARNESS_SET__SECTI
    `error = "context_overflow"`, `expect.event_payloads`; new examples in `examples/evals/`.
 4. `qa` suite `match = "judge"` (`judge_profile`, `judge_max_tokens`, per-record `rubric`).
 5. `[memory] search = keyword|semantic|hybrid`, `embedding_profile`, `vectors`;
-   `semantic_memory.py`, client `embed()`, CLI `memory reindex`.
+   `knowledge/semantic_memory.py`, client `embed()`, CLI `memory reindex`.
 6. MCP `resources` / `prompts` (read-only `server__mcp_*` tools) and `list_changed` re-sync.
 7. `[web_fetch]`: text of one page; private addresses refused; redirects re-checked per hop.
 Live checks (on `phase-14b-live-checks`): bench suites `context` (overflows a small window with
@@ -537,8 +548,8 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
   7. The plan's live config is the root `models.toml`, with llama.cpp smoke and gsm8k/bfcl/guardrails/
      humaneval/context/memory benchmarks. `[scenarios] config = "models.toml"` keeps bare scenarios
      on `examples/models.toml`.
-- **15d OpenAI-compatible chat endpoint** (`phase-15d-openai-chat`) — implemented in `openai_chat.py`,
-  routed by `api.py`:
+- **15d OpenAI-compatible chat endpoint** (`phase-15d-openai-chat`) — implemented in `server/openai_chat.py`,
+  routed by `server/api.py`:
   - **Endpoints:** `GET /v1/models` lists `agent-harness` (the default profile), every profile, and
     every route. `POST /v1/chat/completions` handles JSON and SSE `chat.completion.chunk` replies.
   - **Conversation mapping:** a new optional `ConversationStore` protocol (`find_conversation`,
@@ -553,7 +564,7 @@ defaults, so existing tests, version hashes, and the prefix cache are unaffected
   - **Tests:** `tests/test_openai_chat.py` (8 cases with in-process workers), a store conformance
     case, and a worker regression test.
 - **15e Built-in web UI** (`phase-15e-web-ui`) — implemented. `GET /ui` (and `/` → 307 `/ui`) serves
-  `src/agent_harness/ui/index.html`:
+  `src/agent_harness/server/ui/index.html`:
   - **Packaging:** vanilla JS, no build step. It ships as `[tool.setuptools.package-data]` and
     is read with `importlib.resources` and cached per process (restart `serve` after editing it).
   - **Headers:** CSP `default-src 'none'; connect-src 'self'; frame-ancestors 'none'`.
@@ -624,6 +635,18 @@ Tests: `tests/test_self_contained_profiles.py`.
 6. Still off because they need something outside the harness: Modal and Postgres. The guard model
    was already on. Known issue: Llama Guard 3 1B (llama.cpp) can block benign coding prompts
    as `violent_crimes`.
+
+**Phase 18 – Package layout** — on `phase-18-package-layout` (stacked on Phase 17)
+The 37 top-level modules were regrouped into packages, at the user's request, with every import
+and path updated (no compatibility aliases): `config/` (loader, settings, dotenv, secrets),
+`orchestration/` (orchestrator, planning, agents, interaction, structured_output, context,
+snapshots, runcontext, versioning), `extensions/` (hooks, permissions, plugins, templates,
+instructions), `tools/` (+ catalog, loading, sources), `sandbox/runner.py`, `knowledge/` (memory,
+semantic_memory, artifacts), `server/` (api, openai_chat, access, ratelimit, streaming,
+notifications, worker, `ui/`), `observability/` (telemetry, redaction), `cli/` (main, repl),
+`bench/evals.py`. `domain.py` and `application.py` stay at the top. Entry point:
+`agent_harness.cli.main:main`; tests import the CLI as `import agent_harness.cli.main as cli`.
+An installed `agent-harness` script must be reinstalled (`pip install -e .`).
 
 ## Validation
 

@@ -9,10 +9,10 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from agent_harness.api import HarnessAPI
+from agent_harness.server.api import HarnessAPI
 from agent_harness.application import build_application
-from agent_harness.artifacts import InMemoryArtifactStore
-from agent_harness.config import HarnessConfig, ModelProfile
+from agent_harness.knowledge.artifacts import InMemoryArtifactStore
+from agent_harness.config.loader import HarnessConfig, ModelProfile
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -26,9 +26,9 @@ from agent_harness.domain import (
     ToolRisk,
     ToolSpec,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
-from agent_harness.snapshots import WorkspaceSnapshotter
+from agent_harness.orchestration.snapshots import WorkspaceSnapshotter
 from agent_harness.tools import ApprovalMode, DefaultToolPolicy, ToolRegistry, ToolRuntime
 
 WRITE = ToolSpec(

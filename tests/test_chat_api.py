@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness.api import HarnessAPI
-from agent_harness.config import ConfigError, HarnessConfig, ModelProfile, load_config
+from agent_harness.server.api import HarnessAPI
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -33,12 +33,12 @@ from agent_harness.domain import (
     RunStatus,
     ToolCall,
 )
-from agent_harness.notifications import WebhookNotifier, notifier_from_config
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.server.notifications import WebhookNotifier, notifier_from_config
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
-from agent_harness.streaming import StreamHub
+from agent_harness.server.streaming import StreamHub
 from agent_harness.tools import ToolRegistry, ToolRuntime
-from agent_harness.worker import Worker
+from agent_harness.server.worker import Worker
 
 TOKEN = "test-token-0123456789"
 
@@ -322,7 +322,7 @@ class WebhookTests(unittest.IsolatedAsyncioTestCase):
             sleeps.append(seconds)
 
         notifier = WebhookNotifier("https://hooks.example.com/x", post=failing, retries=2, sleep=sleep)
-        with self.assertLogs("agent_harness.notifications", "WARNING"):
+        with self.assertLogs("agent_harness.server.notifications", "WARNING"):
             self.assertFalse(await notifier.notify(self.run_record(RunStatus.COMPLETED)))
         self.assertEqual((len(attempts), sleeps), (3, [0.5, 1.0]))
 
@@ -340,7 +340,7 @@ class WebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(s["run_id"], s["status"]) for s in sent], [(run.id, "completed")])
 
     def test_from_config(self) -> None:
-        from agent_harness.config import NotificationsConfig
+        from agent_harness.config.loader import NotificationsConfig
 
         config = mock.Mock(notifications=NotificationsConfig())
         self.assertIsNone(notifier_from_config(config))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from agent_harness.config import HarnessConfig, ModelProfile
+from agent_harness.config.loader import HarnessConfig, ModelProfile
 from agent_harness.domain import (
     FinishReason,
     Message,

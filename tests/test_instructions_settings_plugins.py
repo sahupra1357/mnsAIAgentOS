@@ -13,18 +13,18 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_harness import cli
+import agent_harness.cli.main as cli
 from agent_harness.application import build_application
-from agent_harness.config import ConfigError, load_config
+from agent_harness.config.loader import ConfigError, load_config
 from agent_harness.domain import FinishReason, Message, ModelRequest, ModelResponse, Role
-from agent_harness.hooks import HookEvent, HookInput
-from agent_harness.instructions import SystemContext, SystemContextBuilder, discover_skills, load_instructions
+from agent_harness.extensions.hooks import HookEvent, HookInput
+from agent_harness.extensions.instructions import SystemContext, SystemContextBuilder, discover_skills, load_instructions
 from agent_harness.model_gateway import HttpResponse
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
-from agent_harness.plugins import install_plugin, load_plugin
-from agent_harness.settings import load_layers, render_effective
-from agent_harness.templates import TemplateError, discover_templates, expand_prompt
+from agent_harness.extensions.plugins import install_plugin, load_plugin
+from agent_harness.config.settings import load_layers, render_effective
+from agent_harness.extensions.templates import TemplateError, discover_templates, expand_prompt
 from agent_harness.tools import create_default_runtime
 
 MODEL = '[models.p]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://x/v1"\n'

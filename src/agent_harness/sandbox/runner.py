@@ -1,7 +1,7 @@
 """Runs inside a sandbox container: list or call the tools of a Python tool module.
 
-    python -m agent_harness.sandbox_runner list MODULE:FUNCTION
-    python -m agent_harness.sandbox_runner call MODULE:FUNCTION TOOL   (JSON arguments on stdin)
+    python -m agent_harness.sandbox.runner list MODULE:FUNCTION
+    python -m agent_harness.sandbox.runner call MODULE:FUNCTION TOOL   (JSON arguments on stdin)
 
 Prints one JSON document on stdout: a list of tool specs, or
 ``{"ok": output}`` / ``{"error": message}``. Only the standard library and the
@@ -17,7 +17,7 @@ import json
 import sys
 from typing import Any
 
-from agent_harness.tool_catalog import spec_to_json
+from agent_harness.tools.catalog import spec_to_json
 
 
 class _Collector:

@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.config import ConfigError, ModelProfile, load_config
-from agent_harness.context import BudgetedContextBuilder, limits_from_profiles
+import agent_harness.cli.main as cli
+from agent_harness.config.loader import ConfigError, ModelProfile, load_config
+from agent_harness.orchestration.context import BudgetedContextBuilder, limits_from_profiles
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -33,10 +33,10 @@ from agent_harness.domain import (
 )
 from agent_harness.model_gateway import HttpResponse, HttpStreamResponse, OllamaClient, OpenAICompatibleClient
 from agent_harness.model_gateway.openai_compatible import split_think_tags
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import SQLiteRunStore
 from agent_harness.tools import ToolRegistry, ToolRuntime
-from agent_harness.versioning import profile_sha256
+from agent_harness.orchestration.versioning import profile_sha256
 
 
 def profile(**overrides: object) -> ModelProfile:

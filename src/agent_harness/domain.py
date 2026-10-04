@@ -813,7 +813,7 @@ class ContextOverflowError(PermanentModelError):
 
 
 class QuotaExceededError(HarnessError):
-    """A tenant may not start or continue work now (see ``agent_harness.access``)."""
+    """A tenant may not start or continue work now (see ``agent_harness.server.access``)."""
 
 
 class ConcurrencyError(HarnessError):

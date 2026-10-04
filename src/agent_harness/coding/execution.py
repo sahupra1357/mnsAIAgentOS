@@ -174,7 +174,7 @@ class DockerExecutionRuntime:
         if relative.parts:
             container_cwd += "/" + relative.as_posix()
         if self.config.mode == "per_run":
-            from agent_harness.runcontext import current_run_id
+            from agent_harness.orchestration.runcontext import current_run_id
 
             return await self.pool.exec(
                 current_run_id(), self.container_spec(), normalized, workdir=container_cwd,

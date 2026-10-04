@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_harness.application import build_application
-from agent_harness.config import ConfigError, load_config
+from agent_harness.config.loader import ConfigError, load_config
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -28,9 +28,9 @@ from agent_harness.domain import (
     ToolRisk,
     ToolSpec,
 )
-from agent_harness.hooks import CallableHook, CommandHook, HookEvent, HookInput, HookOutcome, HookRunner
-from agent_harness.orchestrator import AgentOrchestrator
-from agent_harness.permissions import (
+from agent_harness.extensions.hooks import CallableHook, CommandHook, HookEvent, HookInput, HookOutcome, HookRunner
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
+from agent_harness.extensions.permissions import (
     EXIT_PLAN_TOOL,
     PermissionPolicy,
     PermissionRule,
@@ -442,7 +442,7 @@ class CommandHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty.decision, "allow")
 
     async def test_errors(self) -> None:
-        from agent_harness.hooks import HookError
+        from agent_harness.extensions.hooks import HookError
 
         for script, message in (
             ("import sys; sys.exit(3)", "exited with 3"),

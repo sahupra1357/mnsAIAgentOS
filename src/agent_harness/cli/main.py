@@ -18,29 +18,29 @@ from dataclasses import replace
 from collections.abc import Sequence
 from pathlib import Path
 
-from .application import HarnessApplication, build_application
-from .coding import CODING_AGENT_SYSTEM_PROMPT
-from .config import ConfigError, discover_config_path, load_config
-from .dotenv import load_dotenv
-from .application import open_memory_store
-from .memory import SQLiteMemoryStore
-from .domain import (
+from ..application import HarnessApplication, build_application
+from ..coding import CODING_AGENT_SYSTEM_PROMPT
+from ..config.loader import ConfigError, discover_config_path, load_config
+from ..config.dotenv import load_dotenv
+from ..application import open_memory_store
+from ..knowledge.memory import SQLiteMemoryStore
+from ..domain import (
     ContentPart, HarnessError, Message, Role, RunBudget, RunQuery, RunRecord, RunStatus, StreamListener, utc_now,
 )
-from .model_gateway import ModelGateway, StdlibHttpTransport
-from .model_gateway.diagnostics import CheckStatus, companion_checks, diagnose
-from .api import create_api
-from .instructions import resolve_path
-from .plugins import install_plugin, installed_plugins
-from .settings import SettingsError, load_layers, render_effective
-from .templates import expand_prompt
+from ..model_gateway import ModelGateway, StdlibHttpTransport
+from ..model_gateway.diagnostics import CheckStatus, companion_checks, diagnose
+from ..server.api import create_api
+from ..extensions.instructions import resolve_path
+from ..extensions.plugins import install_plugin, installed_plugins
+from ..config.settings import SettingsError, load_layers, render_effective
+from ..extensions.templates import expand_prompt
 from .repl import ChatOptions, ChatSession, TerminalIO
-from .evals import load_scenarios, run_scenario, scenario_application, summarize
-from .telemetry import JsonLinesTelemetry
-from .notifications import notifier_from_config
-from .streaming import StreamHub
-from .worker import Worker
-from .artifacts import LocalArtifactStore, referenced_artifacts
+from ..bench.evals import load_scenarios, run_scenario, scenario_application, summarize
+from ..observability.telemetry import JsonLinesTelemetry
+from ..server.notifications import notifier_from_config
+from ..server.streaming import StreamHub
+from ..server.worker import Worker
+from ..knowledge.artifacts import LocalArtifactStore, referenced_artifacts
 
 
 _CONFIG_HELP = (
@@ -790,7 +790,7 @@ async def _skills_command(args: argparse.Namespace) -> int:
 
 
 def _config_command(args: argparse.Namespace) -> int:
-    from agent_harness.config import apply_set_overrides, set_override_keys
+    from agent_harness.config.loader import apply_set_overrides, set_override_keys
 
     settings = load_layers(args.config, os.environ)
     settings.raw = apply_set_overrides(settings.raw, os.environ)
@@ -837,7 +837,7 @@ def _open_memory_spec(spec: str, config_path: Path) -> Any:
         url = os.environ.get(value)
         if not url:
             raise ValueError(f"environment variable {value!r} (a postgresql:// URL) is not set")
-        from .persistence.postgres_memory import PostgresMemoryStore
+        from ..persistence.postgres_memory import PostgresMemoryStore
 
         return PostgresMemoryStore(url)
     raise ValueError("a memory location looks like sqlite:PATH or postgres:ENV_VAR")

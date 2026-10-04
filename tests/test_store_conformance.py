@@ -147,7 +147,7 @@ class StoreContract:
         self.assertFalse(entries["b"].available)  # kept, but no longer provided
 
     def test_reservations_are_atomic_and_released(self) -> None:
-        from agent_harness.access import Grant
+        from agent_harness.server.access import Grant
 
         async def body() -> None:
             since = utc_now() - timedelta(days=1)

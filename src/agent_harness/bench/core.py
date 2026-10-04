@@ -27,7 +27,7 @@ from agent_harness.domain import (
     ToolExecutor,
     utc_now,
 )
-from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
+from agent_harness.orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
 
 

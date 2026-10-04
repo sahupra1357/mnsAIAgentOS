@@ -16,7 +16,7 @@ from unittest import mock
 from agent_harness.bench.cli import run_pipeline
 from agent_harness.bench.core import BenchConfigError
 from agent_harness.bench.residency import ResidencyManager, ResidencyPolicy, _params_b
-from agent_harness.config import ModelProfile
+from agent_harness.config.loader import ModelProfile
 
 OLLAMA = "http://127.0.0.1:11434"
 ROUTER = "http://127.0.0.1:9931"

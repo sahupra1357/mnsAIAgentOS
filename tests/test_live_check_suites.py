@@ -9,7 +9,7 @@ from typing import Any
 
 from agent_harness.bench.core import BenchConfigError, BenchContext, BenchItem
 from agent_harness.bench.suites import SUITES, ContextSuite, MemorySuite, filler_text
-from agent_harness.context import BudgetedContextBuilder, ContextLimits
+from agent_harness.orchestration.context import BudgetedContextBuilder, ContextLimits
 from agent_harness.domain import ContextOverflowError, FinishReason, ModelRequest, ModelResponse, ToolCall
 
 ROOT = Path(__file__).resolve().parents[1]

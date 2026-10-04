@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.agents import AGENT_TOOL, TODO_TOOL, SubagentDefinition, SubagentLimits, child_run_id
+import agent_harness.cli.main as cli
+from agent_harness.orchestration.agents import AGENT_TOOL, TODO_TOOL, SubagentDefinition, SubagentLimits, child_run_id
 from agent_harness.application import build_application
-from agent_harness.config import ConfigError
+from agent_harness.config.loader import ConfigError
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -33,9 +33,9 @@ from agent_harness.domain import (
     ToolSpec,
     Usage,
 )
-from agent_harness.hooks import CallableHook, HookEvent, HookOutcome, HookRunner
+from agent_harness.extensions.hooks import CallableHook, HookEvent, HookOutcome, HookRunner
 from agent_harness.model_gateway import HttpResponse
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.tools import ApprovalMode, DefaultToolPolicy, ToolRegistry, ToolRuntime
 

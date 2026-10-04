@@ -12,10 +12,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from agent_harness.access import Quota
-from agent_harness.api import HarnessAPI
+from agent_harness.server.access import Quota
+from agent_harness.server.api import HarnessAPI
 from agent_harness.application import orchestrator_settings, user_quotas_from_config
-from agent_harness.config import ConfigError, HarnessConfig, ModelProfile, load_config
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
 from agent_harness.domain import (
     ContextOverflowError,
     EventType,
@@ -33,18 +33,18 @@ from agent_harness.domain import (
     Usage,
     utc_now,
 )
-from agent_harness.interaction import ASK_USER_TOOL
+from agent_harness.orchestration.interaction import ASK_USER_TOOL
 from agent_harness.model_gateway import (
     HttpResponse,
     OpenAICompatibleClient,
     ProviderContextOverflowError,
     ProviderError,
 )
-from agent_harness.orchestrator import AgentOrchestrator, OrchestratorSettings
+from agent_harness.orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
-from agent_harness.ratelimit import RateLimiter
+from agent_harness.server.ratelimit import RateLimiter
 from agent_harness.tools import ToolRegistry, ToolRuntime, create_default_runtime
-from agent_harness.worker import Worker
+from agent_harness.server.worker import Worker
 
 PROFILE = ModelProfile(adapter="openai_compatible", model="m", endpoint="http://x/v1")
 
@@ -449,7 +449,7 @@ class ConfigTests(unittest.TestCase):
         from contextlib import redirect_stdout
         from unittest import mock
 
-        from agent_harness import cli
+        import agent_harness.cli.main as cli
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "models.toml"

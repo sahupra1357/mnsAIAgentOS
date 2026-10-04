@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 
-from agent_harness.config import ModelProfile
+from agent_harness.config.loader import ModelProfile
 from agent_harness.domain import (
     ContextWindowExceededError,
     HarnessError,

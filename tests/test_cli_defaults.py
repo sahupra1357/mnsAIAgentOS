@@ -14,8 +14,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.config import ConfigError, discover_config_path, load_config
+import agent_harness.cli.main as cli
+from agent_harness.config.loader import ConfigError, discover_config_path, load_config
 from agent_harness.domain import (
     FinishReason,
     JsonObject,
@@ -27,11 +27,11 @@ from agent_harness.domain import (
     ToolRisk,
     ToolSpec,
 )
-from agent_harness.interaction import ASK_USER_TOOL
+from agent_harness.orchestration.interaction import ASK_USER_TOOL
 from agent_harness.model_gateway import HttpResponse
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
-from agent_harness.repl import ChatOptions, ChatSession
+from agent_harness.cli.repl import ChatOptions, ChatSession
 from agent_harness.tools import ApprovalMode, DefaultToolPolicy, ToolRegistry, ToolRuntime
 
 PROFILE = '[models.{name}]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://x/v1"\n'

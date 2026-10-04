@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_harness.config import ModelPricing
+from agent_harness.config.loader import ModelPricing
 from agent_harness.domain import Usage
 
 

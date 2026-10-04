@@ -23,8 +23,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.config import ConfigError, ModelProfile, load_config
+import agent_harness.cli.main as cli
+from agent_harness.config.loader import ConfigError, ModelProfile, load_config
 from agent_harness.domain import (
     ContentPart,
     FinishReason,
@@ -37,8 +37,8 @@ from agent_harness.model_gateway import HttpResponse, OllamaClient, OpenAICompat
 from agent_harness.model_gateway.diagnostics import CheckStatus, diagnose
 from agent_harness.model_gateway.errors import ModelConfigurationError, ThrottlingError
 from agent_harness.model_gateway.openai_compatible import parse_retry_after
-from agent_harness.orchestrator import validate_image_url
-from agent_harness.versioning import profile_sha256
+from agent_harness.orchestration.orchestrator import validate_image_url
+from agent_harness.orchestration.versioning import profile_sha256
 
 PNG = "data:image/png;base64," + base64.b64encode(b"\x89PNG fake").decode()
 
@@ -198,7 +198,7 @@ class ImageTests(unittest.TestCase):
                 validate_image_url(bad)
 
     def test_images_persist_and_count_in_context(self) -> None:
-        from agent_harness.context import IMAGE_TOKENS, BudgetedContextBuilder, ContextLimits
+        from agent_harness.orchestration.context import IMAGE_TOKENS, BudgetedContextBuilder, ContextLimits
         from agent_harness.persistence import SQLiteRunStore
         from agent_harness.domain import RunRecord, RunEvent, EventType
 
@@ -315,13 +315,13 @@ class BenchResumeTests(unittest.TestCase):
 
 class ArtifactAccessTests(unittest.IsolatedAsyncioTestCase):
     async def test_artifacts_are_scoped_to_runs_the_principal_owns(self) -> None:
-        from agent_harness.access import ApiKey, PrincipalDirectory, sha256_hex
-        from agent_harness.access import Role as AccessRole
-        from agent_harness.api import HarnessAPI
-        from agent_harness.artifacts import InMemoryArtifactStore
-        from agent_harness.config import HarnessConfig
+        from agent_harness.server.access import ApiKey, PrincipalDirectory, sha256_hex
+        from agent_harness.server.access import Role as AccessRole
+        from agent_harness.server.api import HarnessAPI
+        from agent_harness.knowledge.artifacts import InMemoryArtifactStore
+        from agent_harness.config.loader import HarnessConfig
         from agent_harness.domain import EventType, RunEvent
-        from agent_harness.orchestrator import AgentOrchestrator
+        from agent_harness.orchestration.orchestrator import AgentOrchestrator
         from agent_harness.persistence import InMemoryRunStore
         from agent_harness.tools import ToolRegistry, ToolRuntime
 
@@ -365,7 +365,7 @@ class ArtifactAccessTests(unittest.IsolatedAsyncioTestCase):
 
 class GcTests(unittest.TestCase):
     def test_gc_removes_old_unreferenced_artifacts_only(self) -> None:
-        from agent_harness.artifacts import LocalArtifactStore
+        from agent_harness.knowledge.artifacts import LocalArtifactStore
         from agent_harness.domain import EventType, RunEvent, RunRecord
         from agent_harness.persistence import SQLiteRunStore
 
@@ -406,7 +406,7 @@ class GcTests(unittest.TestCase):
 
 class EvalRunnerTests(unittest.TestCase):
     def test_new_scenario_keys(self) -> None:
-        from agent_harness.evals import ScenarioError, load_scenarios, run_scenario
+        from agent_harness.bench.evals import ScenarioError, load_scenarios, run_scenario
         from agent_harness.tools import create_default_runtime
 
         examples = Path(__file__).resolve().parents[1] / "examples" / "evals"

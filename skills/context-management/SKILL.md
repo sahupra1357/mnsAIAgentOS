@@ -51,7 +51,7 @@ prefix, so the context view must keep its prefix stable:
 - `domain.py`: `ContextView` (messages + stats), the `ContextBuilder` protocol, and
   `ContextWindowExceededError` (a `PermanentModelError`, so the run fails with an event
   and no retry).
-- `context.py`:
+- `orchestration/context.py`:
   - `FullHistoryContextBuilder` (the orchestrator default).
   - `BudgetedContextBuilder` (limits per profile, plus a `ContextPolicy`).
   - `limits_from_profiles` (`context_window`, with reserve = `parameters.max_tokens`
@@ -85,7 +85,7 @@ prefix, so the context view must keep its prefix stable:
   - `FullHistoryContextBuilder` and profiles without limits ignore it.
 - **Protocol:** `ContextBuilder` is unchanged. The orchestrator passes `summary=` only
   when the run has one, so custom builders keep working until summarization is used.
-- **`ContextSummarizer` (context.py):** builds the summary request. It uses a system
+- **`ContextSummarizer` (orchestration/context.py):** builds the summary request. It uses a system
   prompt, a rendered transcript with the previous summary folded in, and no tools.
   - Each message is capped, and the whole transcript is bounded by
     `summary_input_chars(limits)` (75% of the summarizing profile's usable window) or

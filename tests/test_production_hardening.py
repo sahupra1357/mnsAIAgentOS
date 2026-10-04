@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli
-from agent_harness.access import (
+import agent_harness.cli.main as cli
+from agent_harness.server.access import (
     ApiKey,
     PrincipalDirectory,
     Quota,
@@ -25,9 +25,9 @@ from agent_harness.access import (
     check_quota,
     sha256_hex,
 )
-from agent_harness.api import HarnessAPI
+from agent_harness.server.api import HarnessAPI
 from agent_harness.application import build_application, open_run_store
-from agent_harness.config import ConfigError, HarnessConfig, ModelProfile, load_config
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -45,11 +45,11 @@ from agent_harness.domain import (
 )
 from agent_harness.mcp import McpError
 from agent_harness.model_gateway import HttpResponse
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
-from agent_harness.redaction import MASK, RedactingRunStore, RedactingTelemetry, Redactor
-from agent_harness.secrets import is_secret_ref, resolve_secret
-from agent_harness.tool_sources import WebSearchSource, host_policy_from
+from agent_harness.observability.redaction import MASK, RedactingRunStore, RedactingTelemetry, Redactor
+from agent_harness.config.secrets import is_secret_ref, resolve_secret
+from agent_harness.tools.sources import WebSearchSource, host_policy_from
 from agent_harness.tools import ToolRegistry, ToolRuntime, create_default_runtime
 
 HERMETIC = {

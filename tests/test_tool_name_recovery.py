@@ -6,14 +6,14 @@ import json
 import unittest
 from collections import deque
 
-from agent_harness.agents import SubagentDefinition
-from agent_harness.config import ModelProfile
+from agent_harness.orchestration.agents import SubagentDefinition
+from agent_harness.config.loader import ModelProfile
 from agent_harness.domain import (
     FinishReason, Message, ModelRequest, ModelResponse, Role, ToolCall, ToolRisk, ToolSpec,
 )
 from agent_harness.model_gateway import HttpResponse, OpenAICompatibleClient
 from agent_harness.model_gateway.tool_names import recover_tool_names
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
 from agent_harness.tools import ToolRegistry, ToolRuntime
 

@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from agent_harness.application import build_application
-from agent_harness.config import ModelProfile
+from agent_harness.config.loader import ModelProfile
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -30,10 +30,10 @@ from agent_harness.domain import (
     Usage,
 )
 from agent_harness.model_gateway import HttpResponse, OpenAICompatibleClient
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.tools import ToolRegistry, ToolRuntime
-from agent_harness.versioning import profile_sha256, sha256_of, tools_sha256
+from agent_harness.orchestration.versioning import profile_sha256, sha256_of, tools_sha256
 
 
 SEND = ToolSpec(

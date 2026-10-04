@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness.config import ConfigError, HarnessConfig, ModelPricing, ModelProfile, load_config
+from agent_harness.config.loader import ConfigError, HarnessConfig, ModelPricing, ModelProfile, load_config
 from agent_harness.domain import (
     ContextWindowExceededError,
     FinishReason,
@@ -36,7 +36,7 @@ from agent_harness.model_gateway import (
     classify_litellm_error,
 )
 from agent_harness.model_gateway.diagnostics import CheckStatus, diagnose
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
 from agent_harness.tools import create_default_runtime
 

@@ -5,7 +5,7 @@ the ``agent_harness`` package are mounted read-only into a container with no
 network (unless ``network = true``), a read-only root, dropped capabilities,
 and CPU/memory/process limits. Tool definitions are discovered inside a
 one-shot container (``tools sync``) and cached in the catalog; each call runs
-in the run's warm container through ``agent_harness.sandbox_runner``.
+in the run's warm container through ``agent_harness.sandbox.runner``.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from typing import Any
 
 import agent_harness
 from agent_harness.domain import JsonObject, ToolSpec
-from agent_harness.runcontext import current_run_id
-from agent_harness.tool_catalog import spec_from_json
+from agent_harness.orchestration.runcontext import current_run_id
+from agent_harness.tools.catalog import spec_from_json
 from agent_harness.tools.runtime import PermanentToolError, RetryableToolError, ToolRejectedError, ToolRuntime
 
 from .containers import ContainerSpec, WarmContainerPool
@@ -91,7 +91,7 @@ class SandboxedPythonSource:
     async def discover(self) -> list[ToolSpec]:
         result = await self._pool.exec(
             None, self.container_spec(),
-            ["python", "-m", "agent_harness.sandbox_runner", "list", self.config.module],
+            ["python", "-m", "agent_harness.sandbox.runner", "list", self.config.module],
             timeout_seconds=self.config.discover_timeout_seconds, max_output_bytes=_MAX_OUTPUT,
             env=self._env(),
         )
@@ -121,7 +121,7 @@ class SandboxedPythonSource:
         async def call(arguments: JsonObject) -> JsonObject:
             result = await self._pool.exec(
                 current_run_id(), container,
-                ["python", "-m", "agent_harness.sandbox_runner", "call", self.config.module, spec.name],
+                ["python", "-m", "agent_harness.sandbox.runner", "call", self.config.module, spec.name],
                 timeout_seconds=deadline, max_output_bytes=_MAX_OUTPUT,
                 stdin=json.dumps(arguments).encode("utf-8"), env=self._env(),
             )

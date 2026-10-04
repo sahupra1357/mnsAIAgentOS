@@ -19,14 +19,14 @@ litellm = ["litellm>=1.50,<2"]
 postgres = ["psycopg[binary]>=3.1,<4"]
 
 [project.scripts]
-agent-harness = "agent_harness.cli:main"
+agent-harness = "agent_harness.cli.main:main"
 agent-harness-bench = "agent_harness.bench.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-agent_harness = ["ui/*.html"]
+agent_harness = ["server/ui/*.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

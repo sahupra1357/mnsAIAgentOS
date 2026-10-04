@@ -14,7 +14,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from agent_harness.redaction import BUILT_IN_PATTERNS
+from agent_harness.observability.redaction import BUILT_IN_PATTERNS
 
 
 @dataclass(frozen=True, slots=True)

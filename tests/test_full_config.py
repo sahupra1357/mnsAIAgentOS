@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_harness.application import build_application
-from agent_harness.config import load_config
+from agent_harness.config.loader import load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 FULL = ROOT / "models.toml"
@@ -114,7 +114,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(ignored.stdout.split(), [])  # exit 1 and no output: none is ignored
 
     def test_notifications_dormant_until_env_sets_the_url(self) -> None:
-        from agent_harness.notifications import notifier_from_config
+        from agent_harness.server.notifications import notifier_from_config
 
         self.assertIsNone(notifier_from_config(self.config))
         url = "https://hooks.example.com/agent-harness"

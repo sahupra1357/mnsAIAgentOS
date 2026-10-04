@@ -15,7 +15,7 @@ from agent_harness.domain import (
     ToolSpec,
 )
 from agent_harness.model_gateway import ScriptedModelClient
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore
 from agent_harness.tools import (
     RetryableToolError,

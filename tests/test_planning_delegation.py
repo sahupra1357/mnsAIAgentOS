@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from agent_harness.agents import SubagentDefinition, SubagentLimits
+from agent_harness.orchestration.agents import SubagentDefinition, SubagentLimits
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -26,10 +26,10 @@ from agent_harness.domain import (
     ToolSpec,
     Usage,
 )
-from agent_harness.hooks import CallableHook, HookEvent, HookRunner
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.extensions.hooks import CallableHook, HookEvent, HookRunner
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
-from agent_harness.planning import PLANNER_INSTRUCTIONS, PlanningPolicy, parse_steps
+from agent_harness.orchestration.planning import PLANNER_INSTRUCTIONS, PlanningPolicy, parse_steps
 from agent_harness.tools import ToolRegistry, ToolRuntime, create_default_runtime
 
 Handler = Callable[[ModelRequest], Awaitable[ModelResponse]]
@@ -530,7 +530,7 @@ class AutoPlanningTests(unittest.IsolatedAsyncioTestCase):
 
 class PlanningModeConfigTests(unittest.TestCase):
     def test_modes(self) -> None:
-        from agent_harness.config import ConfigError, PlanningConfig
+        from agent_harness.config.loader import ConfigError, PlanningConfig
 
         self.assertEqual(PlanningConfig().effective_mode, "off")
         self.assertEqual(PlanningConfig(enabled=True).effective_mode, "always")  # older switch
@@ -544,7 +544,7 @@ class PlanningModeConfigTests(unittest.TestCase):
         from types import SimpleNamespace
 
         from agent_harness.application import _planning
-        from agent_harness.config import PlanningConfig
+        from agent_harness.config.loader import PlanningConfig
 
         cases = {"off": (False, False), "always": (True, False), "auto": (False, True)}
         for mode, expected in cases.items():

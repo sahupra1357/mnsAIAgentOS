@@ -16,8 +16,8 @@ from typing import Any
 from unittest import mock
 
 from agent_harness.application import build_application
-from agent_harness.config import ConfigError
-from agent_harness.context import BudgetedContextBuilder, ContextLimits, ContextSummarizer
+from agent_harness.config.loader import ConfigError
+from agent_harness.orchestration.context import BudgetedContextBuilder, ContextLimits, ContextSummarizer
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -41,11 +41,11 @@ from agent_harness.mcp import (
 )
 from agent_harness.mcp.schema import SchemaNormalizationError
 from agent_harness.model_gateway import HttpResponse
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
-from agent_harness.tool_catalog import ToolCatalog, spec_from_json, spec_to_json
-from agent_harness.tool_loading import ToolLoadingPolicy, search
-from agent_harness.tool_sources import HttpToolSource, WebSearchSource, host_policy_from
+from agent_harness.tools.catalog import ToolCatalog, spec_from_json, spec_to_json
+from agent_harness.tools.loading import ToolLoadingPolicy, search
+from agent_harness.tools.sources import HttpToolSource, WebSearchSource, host_policy_from
 from agent_harness.tools import ToolRegistry, ToolRuntime, create_default_runtime
 
 FAKE_SERVER = Path(__file__).resolve().parent / "fixtures" / "fake_mcp_server.py"

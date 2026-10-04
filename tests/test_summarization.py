@@ -12,8 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_harness.application import build_application
-from agent_harness.config import ConfigError, load_config
-from agent_harness.context import (
+from agent_harness.config.loader import ConfigError, load_config
+from agent_harness.orchestration.context import (
     BudgetedContextBuilder,
     ContextLimits,
     ContextPolicy,
@@ -37,8 +37,8 @@ from agent_harness.domain import (
     ToolSpec,
     Usage,
 )
-from agent_harness.hooks import CallableHook, HookEvent, HookOutcome, HookRunner
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.extensions.hooks import CallableHook, HookEvent, HookOutcome, HookRunner
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 
 SYSTEM = Message(role=Role.SYSTEM, content="You are a careful agent.")

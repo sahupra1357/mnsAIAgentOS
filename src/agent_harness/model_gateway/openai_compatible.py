@@ -9,12 +9,12 @@ import json
 import os
 import random
 import time
-from agent_harness.secrets import resolve_secret
+from agent_harness.config.secrets import resolve_secret
 
 from dataclasses import replace
 from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Mapping, Sequence
 
-from agent_harness.config import ModelProfile
+from agent_harness.config.loader import ModelProfile
 from agent_harness.domain import (
     FinishReason,
     Message,

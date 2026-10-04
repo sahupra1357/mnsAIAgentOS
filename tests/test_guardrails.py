@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_harness.application import build_application
-from agent_harness.config import ConfigError, load_config
+from agent_harness.config.loader import ConfigError, load_config
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -44,8 +44,8 @@ from agent_harness.guardrails.detectors import (
     detect_prompt_extraction,
     detect_secrets,
 )
-from agent_harness.interaction import ASK_USER_TOOL
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.interaction import ASK_USER_TOOL
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.tools import ApprovalMode, DefaultToolPolicy, ToolRegistry, ToolRuntime
 

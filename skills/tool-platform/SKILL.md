@@ -11,7 +11,7 @@ startup. A run records the exact tool versions it used.
 
 ## Model
 
-- **ToolSource** (`tool_sources.py`): a named provider of tools.
+- **ToolSource** (`tools/sources.py`): a named provider of tools.
   - `python`: `module = "pkg.mod:register"`. The function receives a `ToolRegistrar`
     and registers `(ToolSpec, handler)` pairs.
   - `http`: a declarative JSON-over-HTTP tool: URL, method, headers from env or secrets,
@@ -19,7 +19,7 @@ startup. A run records the exact tool versions it used.
   - `web_search`: the built-in Tavily search. The key comes from `api_key_env`, never
     from config text.
   - `mcp`: see below.
-- **ToolCatalog** (`tool_catalog.py`): the table `tool_catalog` in the run store
+- **ToolCatalog** (`tools/catalog.py`): the table `tool_catalog` in the run store
   (SQLite and Postgres). It holds one row per tool: `name, source, source_kind, spec_json,
   spec_sha256, trust, enabled, first_seen, last_seen`.
   - **Startup sync:** `sync()` upserts what the sources provide.
@@ -110,7 +110,7 @@ in the orchestrator, where the tool message is built, so every source is covered
   - read-only root, dropped capabilities, and CPU, memory, and process limits;
   - the host user id;
   - `env = [...]` passes named variables.
-- **Discovery:** `tools sync` runs `python -m agent_harness.sandbox_runner list MOD:FUNC` in a
+- **Discovery:** `tools sync` runs `python -m agent_harness.sandbox.runner list MOD:FUNC` in a
   one-shot container, and the specs are cached in the catalog (like MCP).
 - **Calls:** each call runs `sandbox_runner call MOD:FUNC TOOL` in the **run's warm container**,
   with the arguments on stdin and `{"ok": ...}` or `{"error": ...}` on stdout.

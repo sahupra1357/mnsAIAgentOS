@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from agent_harness.agents import (
+from agent_harness.orchestration.agents import (
     AGENT_TOOL,
     TODO_SPEC,
     TODO_TOOL,
@@ -25,16 +25,16 @@ from agent_harness.agents import (
     child_run_id,
     parse_todos,
 )
-from agent_harness.runcontext import CURRENT_RUN_ID
-from agent_harness.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
-from agent_harness.context import (
+from agent_harness.orchestration.runcontext import CURRENT_RUN_ID
+from agent_harness.server.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
+from agent_harness.orchestration.context import (
     ContextPolicy,
     ContextSummarizer,
     FullHistoryContextBuilder,
     estimate_tokens,
     fit_to_tokens,
 )
-from agent_harness.planning import (
+from agent_harness.orchestration.planning import (
     AUTO_CREATE_PLAN_SPEC,
     CREATE_PLAN,
     CREATE_PLAN_SPEC,
@@ -53,7 +53,7 @@ from agent_harness.planning import (
     truncate_result,
     with_step,
 )
-from agent_harness.tool_loading import (
+from agent_harness.tools.loading import (
     LOAD_TOOLS_SPEC,
     META_TOOLS,
     SEARCH_TOOLS,
@@ -61,17 +61,17 @@ from agent_harness.tool_loading import (
     ToolLoadingPolicy,
     search as search_tool_specs,
 )
-from agent_harness.instructions import SystemContext
-from agent_harness.hooks import HookEvent, HookInput, HookResult, HookRunner
-from agent_harness.permissions import (
+from agent_harness.extensions.instructions import SystemContext
+from agent_harness.extensions.hooks import HookEvent, HookInput, HookResult, HookRunner
+from agent_harness.extensions.permissions import (
     EXIT_PLAN_SPEC,
     EXIT_PLAN_TOOL,
     PermissionDecision,
     PermissionPolicy,
 )
-from agent_harness.telemetry import NoopTelemetry, sanitize_attributes
-from agent_harness.versioning import spec_sha256, system_prompt_sha256, tools_sha256
-from agent_harness.structured_output import (
+from agent_harness.observability.telemetry import NoopTelemetry, sanitize_attributes
+from agent_harness.orchestration.versioning import spec_sha256, system_prompt_sha256, tools_sha256
+from agent_harness.orchestration.structured_output import (
     MAX_OUTPUT_REPAIRS,
     SUBMIT_RESULT_TOOL,
     check_output_schema,
@@ -81,7 +81,7 @@ from agent_harness.structured_output import (
     submit_result_spec,
 )
 from agent_harness.tools.validation import ArgumentValidationError, validate_arguments
-from agent_harness.interaction import ASK_USER_SPEC, ASK_USER_TOOL
+from agent_harness.orchestration.interaction import ASK_USER_SPEC, ASK_USER_TOOL
 from agent_harness.guardrails import GuardDecision, Guardrails
 from agent_harness.domain import (
     ContentPart,

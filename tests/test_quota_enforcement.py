@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from agent_harness.access import Quota
+from agent_harness.server.access import Quota
 from agent_harness.domain import (
     EventType,
     FinishReason,
@@ -23,7 +23,7 @@ from agent_harness.domain import (
     ToolCall,
     Usage,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.tools import create_default_runtime
 

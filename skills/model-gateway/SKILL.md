@@ -17,7 +17,7 @@ payload unchanged. The OpenAI-compatible adapter maps them to `response_format`
 (`json_schema`, strict) and `tool_choice` (a named tool becomes
 `{"type": "function", "function": {"name": ...}}`); native Ollama maps the schema to
 `format` and has no `tool_choice`. The orchestrator uses them for runs with an
-`output_schema` (see `structured_output.py`) and validates results itself, because servers
+`output_schema` (see `orchestration/structured_output.py`) and validates results itself, because servers
 enforce both loosely.
 
 Gateway behaviour per profile (Phase 12d):

@@ -1,6 +1,6 @@
 ---
 name: harness-operations
-description: Production features around the core loop — durable tool idempotency, prompt/config versioning, token streaming, structured logs/tracing/metrics, the HTTP API, queue workers with leases, artifact storage, long-term memory, and the evaluation runner. Use when working on any Phase 4 item or on api.py, workers, telemetry, or memory.
+description: Production features around the core loop — durable tool idempotency, prompt/config versioning, token streaming, structured logs/tracing/metrics, the HTTP API, queue workers with leases, artifact storage, long-term memory, and the evaluation runner. Use when working on any Phase 4 item or on server/api.py, workers, telemetry, or memory.
 ---
 
 # Harness Operations (Phase 4)
@@ -16,7 +16,7 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
   - `IdempotencyStore` protocol in `domain.py`, implemented by both run stores
     (SQLite table `tool_results`).
   - `ToolRuntime(idempotency_store=...)` / `attach_idempotency_store`.
-  - `versioning.py` hashes; `create_run(versions=...)`; `CONFIG_DRIFT` event.
+  - `orchestration/versioning.py` hashes; `create_run(versions=...)`; `CONFIG_DRIFT` event.
   - `Usage.cached_input_tokens`.
 - Deviation from item 1 as written: the result is stored in its own transaction
   immediately after the handler succeeds, not in the checkpoint transaction. The runtime,
@@ -26,7 +26,7 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
 - 4b is implemented: items 3 and 4.
   - `domain.py`: `TelemetryRecord`/`TelemetrySink`, `ModelStreamEvent`/
     `StreamListener`.
-  - `telemetry.py`: sinks `Noop`, `JsonLines`, `Metrics` (cache-hit rate),
+  - `observability/telemetry.py`: sinks `Noop`, `JsonLines`, `Metrics` (cache-hit rate),
     `Multi`, and `OpenTelemetry` (lazy `opentelemetry-api`, `[otel]` extra).
   - The orchestrator emits an `event` record for every persisted event, plus
     `model_call` and `tool_call` records with durations. Emission is guarded, so it
@@ -39,18 +39,18 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
 - 4c is implemented: items 5 and 6.
   - `RunQueue` protocol with enqueue/claim/renew/release, implemented by both stores.
     SQLite: a `run_queue` table, with claims inside `BEGIN IMMEDIATE`.
-  - `worker.py`: `Worker` with a heartbeat. A lost lease cancels local execution.
+  - `server/worker.py`: `Worker` with a heartbeat. A lost lease cancels local execution.
     Unsettled runs are requeued; poison runs are dropped after N failures.
-  - `api.py`: framework-free ASGI `HarnessAPI` with bearer auth, whose lifespan hosts
+  - `server/api.py`: framework-free ASGI `HarnessAPI` with bearer auth, whose lifespan hosts
     workers, and `create_api(app)`.
   - CLI: `serve` (uvicorn, `[api]` extra) and `worker`.
 - 4d is implemented: items 7, 8, and 9.
-  - `artifacts.py`: content-addressed `LocalArtifactStore` and the `read_artifact`
+  - `knowledge/artifacts.py`: content-addressed `LocalArtifactStore` and the `read_artifact`
     tool. The orchestrator offloads tool results above the threshold, keeping a
     preview in the message and `artifact_id` in the event.
-  - `memory.py`: `SQLiteMemoryStore` (FTS5 with a quoted-terms query, LIKE fallback,
+  - `knowledge/memory.py`: `SQLiteMemoryStore` (FTS5 with a quoted-terms query, LIKE fallback,
     namespaces, dedupe) and the `memory_search` / `memory_write` tools.
-  - `evals.py`: TOML scenarios (scripted or `--live`), assertions, JSON report.
+  - `bench/evals.py`: TOML scenarios (scripted or `--live`), assertions, JSON report.
   - CLI: `eval`.
   - Config: `[artifacts]` and `[memory]` sections.
 
@@ -86,7 +86,7 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
   emit a cache-hit-rate metric (`cached_input_tokens / input_tokens`) per run and per
   profile. An unknown count stays unknown; never report it as 0.
 
-## 5. HTTP API (`api.py`)
+## 5. HTTP API (`server/api.py`)
 - Endpoints: `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` (and SSE
   stream), `POST /runs/{id}/resume`, `POST /runs/{id}/cancel`,
   `GET /runs/{id}/approval`, `POST /runs/{id}/approval` (`allow|deny`, `call_id`),
@@ -176,9 +176,9 @@ the feature is not configured.
 
 - **Where it lives:**
   - storage migrations and the Postgres store: `persistence/`;
-  - principals, roles, and quotas: `access.py`;
-  - secret references: `secrets.py`;
-  - redaction: `redaction.py`;
+  - principals, roles, and quotas: `server/access.py`;
+  - secret references: `config/secrets.py`;
+  - redaction: `observability/redaction.py`;
   - the egress host policy: `tool_sources.host_policy_from`.
 - **Docs:** see `skills/production-hardening/SKILL.md` and `docs/DEPLOYMENT.md`.
 - **Adding a store method:** add it to `tests/test_store_conformance.py` and implement it in
@@ -206,7 +206,7 @@ the feature is not configured.
 
 ## Phase 15d–e: chat clients and web UI (implemented)
 
-- **OpenAI-compatible surface** (`api.py`, same server and auth):
+- **OpenAI-compatible surface** (`server/api.py`, same server and auth):
   - `GET /v1/models` lists profiles and routes.
   - `POST /v1/chat/completions` runs the agent and returns `chat.completion`, or with
     `stream: true` returns `chat.completion.chunk` SSE frames built from `StreamHub` previews.
@@ -231,7 +231,7 @@ the feature is not configured.
 - **Tests:** an ASGI test client against a scripted model covers streaming frames, mapping,
   approval via chat text, and auth. No network.
 - **15d as built:**
-  - **Module:** `openai_chat.py`, with `OpenAIChat` built by `HarnessAPI.__init__`.
+  - **Module:** `server/openai_chat.py`, with `OpenAIChat` built by `HarnessAPI.__init__`.
   - **Optional store capability:** `ConversationStore` (`getattr` checks, so stores without it
     simply never continue by digest).
   - **Reply text:** `answer_text` reads only messages after the newest user message.
@@ -240,7 +240,7 @@ the feature is not configured.
     streams SSE) kept 3 turns on one run.
   - **Workers:** `Worker` re-enqueues a run that was reopened while it still held the queue row.
 - **15e as built:**
-  - **Page:** `ui/index.html` is served by `_send_ui` in `api.py`. `_ui_page` is
+  - **Page:** `server/ui/index.html` is served by `_send_ui` in `server/api.py`. `_ui_page` is
     `functools.cache`d, so restart `serve` after editing it.
   - **Rendering:** DOM building with `textContent` only. Code fences become `<pre>` and
     backticks become `<code>`.

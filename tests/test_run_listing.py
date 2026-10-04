@@ -16,11 +16,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from agent_harness import cli
-from agent_harness.access import ApiKey, PrincipalDirectory, sha256_hex
-from agent_harness.access import Role as AccessRole
-from agent_harness.api import HarnessAPI
-from agent_harness.config import HarnessConfig, ModelProfile
+import agent_harness.cli.main as cli
+from agent_harness.server.access import ApiKey, PrincipalDirectory, sha256_hex
+from agent_harness.server.access import Role as AccessRole
+from agent_harness.server.api import HarnessAPI
+from agent_harness.config.loader import HarnessConfig, ModelProfile
 from agent_harness.domain import (
     EventType,
     Message,
@@ -31,7 +31,7 @@ from agent_harness.domain import (
     RunStatus,
     utc_now,
 )
-from agent_harness.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import AgentOrchestrator
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.persistence.listing import decode_cursor, encode_cursor, summarize_run
 from agent_harness.tools import ToolRegistry, ToolRuntime
