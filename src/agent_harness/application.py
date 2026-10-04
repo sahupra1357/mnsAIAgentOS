@@ -559,8 +559,10 @@ def _load_tool_sources(
 
 def _planning(config: HarnessConfig) -> PlanningPolicy:
     try:
+        mode = config.planning.effective_mode
         return PlanningPolicy(
-            enabled=config.planning.enabled,
+            enabled=mode == "always",
+            auto=mode == "auto",
             max_plan_steps=config.planning.max_plan_steps,
             max_replans=config.planning.max_replans,
         )

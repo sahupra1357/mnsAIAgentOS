@@ -2,8 +2,10 @@
 #
 # `agent-harness` with no --config finds this file when run from the repository
 # root (see README "Quick Start"). Relative paths below resolve against this file's
-# directory. Features that need something outside the harness are listed at the end,
-# with what they need; they stay off until you provide it.
+# directory. Live files (agents, hooks, skills, templates, tools) are in .agent-harness/;
+# nothing here is loaded from examples/, which is reference only (Phase 17).
+# Features that need something outside the harness are listed at the end, with what
+# they need; they stay off until you provide it.
 #
 #   agent-harness                      # interactive chat on the default profile
 #   agent-harness "Explain src/agent_harness/repl.py"
@@ -159,14 +161,14 @@ edit_tools = ["apply_patch"]
 name = "audit-pre-tool"
 event = "pre_tool"
 matcher = "*"
-command = ["python3", "examples/hooks/audit_hook.py"]
+command = ["python3", ".agent-harness/hooks/audit_hook.py"]
 timeout_seconds = 10
 
 [[hooks]]
 name = "audit-post-tool"
 event = "post_tool"
 matcher = "*"
-command = ["python3", "examples/hooks/audit_hook.py"]
+command = ["python3", ".agent-harness/hooks/audit_hook.py"]
 timeout_seconds = 10
 
 [interaction]
@@ -186,28 +188,30 @@ max_per_run = 6
 [[agents]]
 name = "researcher"
 description = "Answers one question about the codebase by searching and reading files. Read-only."
-prompt_file = "examples/agents/researcher.md"
+prompt_file = ".agent-harness/agents/researcher.md"
 tools = ["read_file", "search_files", "search_documentation"]
 max_steps = 12
 
 [[agents]]
 name = "reviewer"
 description = "Reviews the current uncommitted changes and reports real problems, most severe first. Read-only."
-prompt_file = "examples/agents/reviewer.md"
+prompt_file = ".agent-harness/agents/reviewer.md"
 tools = ["git_status", "git_diff", "read_file", "search_files"]
 max_steps = 12
 
 [[agents]]
 name = "test-runner"
 description = "Runs the test suite and explains any failures with their likely cause. Cannot edit files."
-prompt_file = "examples/agents/test-runner.md"
+prompt_file = ".agent-harness/agents/test-runner.md"
 tools = ["run_tests", "read_file", "search_files"]
 max_steps = 8
 
-# Plan-and-execute is a run mode, not a tool: `agent-harness run --plan "..."` (or
-# `chat --plan`). enabled = true would plan every run, which is slow for chat.
+# Plan-and-execute. mode = "auto": the model is offered create_plan and calls it only for
+# multi-step work; that run then plans and the orchestrator drives it step by step.
+# Questions and one-step tasks answer directly (no extra model call). `--plan` still
+# forces planning for one run; "always" plans every run, "off" only `--plan` runs.
 [planning]
-enabled = false
+mode = "auto"
 max_plan_steps = 20
 max_replans = 2
 
@@ -219,21 +223,39 @@ subdirectories = true
 
 [skills]
 enabled = true
-paths = ["examples/skills"]
+paths = [".agent-harness/skills"]
 
 [templates]
-paths = ["examples/templates"]   # /review FILE, /explain TOPIC
+paths = [".agent-harness/templates"]   # /review FILE, /explain TOPIC
 
+# Plugins bundle templates, skills, subagents, and hooks. security-review adds the
+# security-auditor subagent, the secrets-scan skill, /audit, and a hook that refuses
+# network commands (curl, wget, ssh, ...) in run_command. More: `agent-harness plugin
+# install DIR`, then list the plugin here.
 [plugins]
 directory = ".agent-harness/plugins"
-enabled = []                     # `agent-harness plugin install DIR`, then list it here
+enabled = ["security-review"]
 
 # --- Tools: sources, web, memory, artifacts, dynamic loading --------------------
+# In-process Python tools (word_count).
 [[tools]]
 name = "text-tools"
 kind = "python"
-module = "example_tools:register"
-path = "examples/tools"
+module = "text_tools:register"
+path = ".agent-harness/tools"
+
+# Sandboxed Python tools (json_check): run in a warm per-run container with no network,
+# a read-only mount of the module, and resource limits. Meant for internal tools only:
+# keep network = false (inside the container [network] allowed_hosts does not apply).
+# Discovered at startup (sync_on_start); needs Docker, like [coding].
+[[tools]]
+name = "json-tools"
+kind = "python"
+module = "json_tools:register"
+path = ".agent-harness/sandbox_tools"
+sandbox = "container"
+image = "python:3.12-slim"
+network = false
 
 # Declarative HTTP tool; its output is untrusted data (guardrails taint mode applies).
 [[tools]]
@@ -244,12 +266,26 @@ url = "https://api.github.com/repos/octocat/hello-world"
 description = "Fetch public metadata of the example GitHub repository."
 input_schema = { type = "object", properties = {} }
 
+# Excalidraw MCP server (remote, streamable HTTP). Its host is in [network] allowed_hosts.
+# Tools are named excalidraw__read_me and excalidraw__create_view; the server's widget-only
+# tools are not offered. Output is untrusted data. It is an MCP App: clients with a widget
+# renderer draw the diagram; here the model gets the text result only. A server that is
+# down keeps the tools from its last sync (`agent-harness tools sync`).
+[[mcp_servers]]
+name = "excalidraw"
+transport = "http"
+url = "https://mcp.excalidraw.com/mcp"
+tools = ["read_me", "create_view"]
+read_only = ["read_me", "create_view"]
+sync_on_start = true
+
 [web_fetch]
 enabled = true
 max_chars = 20000
 
-# Tavily web search. The key is read from TAVILY_API_KEY at call time; without it the
-# tool returns an error to the model. `agent-harness tools disable web_search` hides it.
+# Tavily web search, called from the harness process (egress allowlist applies; results
+# are untrusted, so guardrails scan them and taint mode applies). The key is read from
+# TAVILY_API_KEY (.env) at call time; without it the tool returns an error to the model. `agent-harness tools disable web_search` hides it.
 [web_search]
 enabled = true
 api_key_env = "TAVILY_API_KEY"
@@ -272,7 +308,7 @@ threshold_bytes = 16384
 mode = "dynamic"
 core = ["read_file", "search_files", "search_documentation", "apply_patch", "run_tests",
         "run_command", "git_status", "git_diff", "memory_search", "memory_write",
-        "load_skill", "web_fetch"]
+        "load_skill", "web_fetch", "web_search"]
 max_loaded = 30
 search_limit = 8
 
@@ -303,7 +339,7 @@ taint = true                     # side-effect tools need approval after untrust
 [network]
 restrict_egress = true
 allowed_hosts = ["api.tavily.com", "api.github.com", "github.com", "raw.githubusercontent.com",
-                 "docs.python.org", "pypi.org", "en.wikipedia.org"]
+                 "docs.python.org", "pypi.org", "en.wikipedia.org", "mcp.excalidraw.com"]
 
 [redaction]
 enabled = true
@@ -323,30 +359,37 @@ cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localh
 rate_limit_per_minute = 240
 rate_limit_burst = 40
 
+# API keys for `agent-harness serve` (REST API, /v1 chat, /ui). Only the variable's NAME
+# is here; each user puts their own value (at least 16 characters) in .env. Add one
+# entry per person or client to give each a tenant and role (viewer | operator | admin);
+# the CLI does not use keys.
+[[api.keys]]
+name = "me"
+tenant = "default"
+role = "admin"
+key_env = "AGENT_HARNESS_API_KEY"
+
+# Webhooks when runs pause or finish (sent by workers). Dormant while the URL is empty;
+# set it in .env: AGENT_HARNESS_SET__NOTIFICATIONS__WEBHOOK_URL="https://..."
+[notifications]
+webhook_url = ""
+# secret_env = "AGENT_HARNESS_WEBHOOK_SECRET"  # signs each POST; once named, it must be set
+
 # --- Needs something outside the harness (off until you provide it) ------------
-# Per-tenant API keys (the key lives in the environment, at least 16 characters):
-# [[api.keys]]
-# name = "me"
-# tenant = "default"
-# role = "admin"
-# key_env = "AGENT_HARNESS_API_KEY"
 #
-# Webhooks when runs pause or finish:
-# [notifications]
-# webhook_url = "https://hooks.example.com/agent-harness"
-# secret_env = "AGENT_HARNESS_WEBHOOK_SECRET"
-#
-# MCP server over stdio (needs Node.js / npx):
+# Another MCP server over stdio (needs Node.js / npx). A stdio server is a host
+# subprocess with your permissions and network; [network] does not restrict it:
 # [[mcp_servers]]
 # name = "filesystem"
 # command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "./docs"]
 # read_only = ["read_file", "read_text_file", "list_directory", "search_files", "get_file_info"]
 # sync_on_start = true
 #
-# Llama Guard classifier: set guard_model on the default profile; it is then used
-# automatically ([guardrails.model] profile defaults to that profile's guard model).
+# Llama Guard classifier: already on. The default profile's guard_model is used for
+# input and output ([guardrails.model] defaults). To tune it:
 # [guardrails.model]
 # check = ["input", "output"]
+# on_error = "allow"             # or "block" when the guard model fails
 #
 # Postgres storage (needs the [postgres] extra and a server):
 # [storage]

@@ -29,6 +29,9 @@ class PlanningPolicy:
     enabled: bool = False  # default for new top-level runs; runs can opt in or out
     max_plan_steps: int = 20
     max_replans: int = 2
+    # Planning mode "auto": runs that do not plan are offered create_plan, and calling it
+    # switches the run to plan-and-execute. The model decides; no extra model call.
+    auto: bool = False
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_plan_steps <= 100:
@@ -77,6 +80,17 @@ CREATE_PLAN_SPEC = ToolSpec(
         "additionalProperties": False,
     },
     risk=ToolRisk.READ_ONLY,
+)
+
+# create_plan as offered in planning mode "auto": the same tool, described as optional.
+AUTO_CREATE_PLAN_SPEC = replace(
+    CREATE_PLAN_SPEC,
+    description=(
+        "Optional. For a task with several dependent steps (many files, tools, or subagents), "
+        "call this first with a goal and concrete steps; the orchestrator then runs the plan step "
+        "by step. Give each step an id, a title, instructions, and depends_on; set agent to "
+        "delegate a step to that subagent. Do not use it for questions or one-step tasks."
+    ),
 )
 
 UPDATE_PLAN_SPEC = ToolSpec(
