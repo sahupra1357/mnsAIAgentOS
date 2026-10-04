@@ -39,6 +39,7 @@ from .errors import (
     ThrottlingError,
     context_overflow_error,
 )
+from .tool_names import recover_tool_names
 from .transport import (
     HttpResponse,
     HttpTransport,
@@ -121,7 +122,7 @@ class OpenAICompatibleClient:
                     async with asyncio.timeout(timeout):
                         response = await self._transport.post_json(url, payload, headers, timeout)
                 self._raise_for_status(response)
-                normalized = self._normalize(response)
+                normalized = recover_tool_names(self._normalize(response), request.tools)
                 self._warm = True
                 normalized = self._with_cost(normalized, self._monotonic() - started)
                 if retried:
@@ -228,7 +229,8 @@ class OpenAICompatibleClient:
             raise MalformedResponseError(f"malformed model stream: {exc}") from exc
         finally:
             await slot.__aexit__(None, None, None)
-        response = self._normalize_raw(accumulator.as_completion(), streamed.headers)
+        response = recover_tool_names(
+            self._normalize_raw(accumulator.as_completion(), streamed.headers), request.tools)
         self._warm = True
         yield ModelStreamEvent(response=self._with_cost(response, self._monotonic() - started))
 

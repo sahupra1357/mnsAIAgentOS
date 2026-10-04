@@ -2012,6 +2012,16 @@ class AgentOrchestrator:
         await self._record_tool_result(run, events, result, attempt=0)
         return True
 
+    def _unknown_tool_message(self, run: RunRecord, call: ToolCall, specs: dict[str, ToolSpec]) -> str:
+        """Say what exists, so the model can correct the call instead of giving up."""
+
+        offered = sorted(specs)
+        if call.name in self._agents and AGENT_TOOL in specs:
+            return (f"Unknown tool: {call.name}. {call.name} is a subagent, not a tool: call the "
+                    f'{AGENT_TOOL} tool with {{"agent": "{call.name}", "task": "<what it should do>"}}.')
+        listed = ", ".join(offered[:40]) + (" ..." if len(offered) > 40 else "")
+        return f"Unknown tool: {call.name}. Available tools: {listed}."
+
     async def _reuse_same_reply_result(
         self,
         run: RunRecord,
@@ -2067,7 +2077,7 @@ class AgentOrchestrator:
                 model_message=(
                     f"The tool {call.name} is not loaded. Call load_tools with names=[\"{call.name}\"] first."
                     if unloaded
-                    else f"Unknown tool: {call.name}"
+                    else self._unknown_tool_message(run, call, specs)
                 ),
             )
             self._append_tool_message(run, result)
