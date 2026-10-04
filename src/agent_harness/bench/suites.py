@@ -759,8 +759,104 @@ class MemorySuite:
                                              "searched": "memory_search" in outcome.tool_calls})
 
 
+class AgentsSuite:
+    """Delegation to subagents: the top-level agent can only use the ``agent`` tool.
+
+    Each item has notes, a question with independent parts, and the expected facts. The
+    parent must delegate to the ``researcher`` subagent, which can list and read the notes
+    (in parallel when it calls ``agent`` several times in one reply), then combine the
+    answers. An item is correct when the final answer contains every expected fact and at
+    least ``min_subagents`` subagents ran. Details record subagents, parallelism, and tokens.
+    """
+
+    name = "agents"
+    description = "Subagents: delegate independent parts to a researcher subagent, then combine the answers."
+    system_prompt = (
+        "You coordinate other agents. You cannot read the notes yourself: use the agent tool to "
+        "delegate each independent part of the question to the researcher subagent. Delegate "
+        "independent parts in the same reply so they run in parallel. Then combine the answers. "
+        "End your reply with a line of the form 'Final answer: <answer>'."
+    )
+    researcher_prompt = (
+        "Answer the task from the notes. Use list_notes to see what exists and read_note to read a "
+        "note. Reply with the fact asked for and the note it came from; do not guess."
+    )
+
+    def load(self, path: str | Path, options: Mapping[str, Any]) -> list[BenchItem]:
+        items = []
+        for index, record in enumerate(load_records(path)):
+            notes, question, answer = record.get("notes"), record.get("question"), record.get("answer")
+            if isinstance(answer, str):
+                answer = [answer]
+            if (not isinstance(notes, dict) or not notes
+                    or not all(isinstance(k, str) and isinstance(v, str) for k, v in notes.items())
+                    or not isinstance(question, str) or not isinstance(answer, list)
+                    or not answer or not all(isinstance(a, str) and a for a in answer)):
+                raise DatasetError(f"agents record {index} needs notes (name -> text), question, and answer")
+            minimum = record.get("min_subagents", 1)
+            if not isinstance(minimum, int) or minimum < 1:
+                raise DatasetError(f"agents record {index}: min_subagents must be a positive integer")
+            items.append(BenchItem(str(record.get("id", f"agents-{index}")),
+                                   {"notes": notes, "question": question, "min_subagents": minimum},
+                                   answer, str(record.get("category", "default"))))
+        return items
+
+    async def run(self, item: BenchItem, context: BenchContext) -> ItemResult:
+        from agent_harness.agents import AGENT_TOOL, SubagentDefinition
+        from agent_harness.domain import EventType, ToolRisk
+
+        started = time.monotonic()
+        notes: Mapping[str, str] = item.input["notes"]
+        runtime = ToolRuntime(ToolRegistry())
+
+        async def list_notes(arguments: Mapping[str, Any]) -> dict[str, Any]:
+            return {"notes": sorted(notes)}
+
+        async def read_note(arguments: Mapping[str, Any]) -> dict[str, Any]:
+            name = str(arguments.get("name", ""))
+            if name not in notes:
+                return {"error": f"no note named {name!r}", "notes": sorted(notes)}
+            return {"name": name, "text": notes[name]}
+
+        runtime.register(ToolSpec(name="list_notes", description="List the names of the notes.",
+                                  input_schema={"type": "object", "properties": {}},
+                                  risk=ToolRisk.READ_ONLY), list_notes)
+        runtime.register(ToolSpec(name="read_note", description="Read one note by name.",
+                                  input_schema={"type": "object", "required": ["name"],
+                                                "properties": {"name": {"type": "string"}}},
+                                  risk=ToolRisk.READ_ONLY), read_note)
+        researcher = SubagentDefinition(
+            name="researcher", description="Finds one fact in the notes and reports it with its source.",
+            prompt=self.researcher_prompt, tools=("list_notes", "read_note"), max_steps=6,
+        )
+        outcome = await context.run_agent(
+            [Message(Role.SYSTEM, self.system_prompt), Message(Role.USER, item.input["question"])],
+            runtime, subagents=(researcher,), allowed_tools=(AGENT_TOOL,),
+        )
+        started_events = [e for e in outcome.events if e.type is EventType.SUBAGENT_STARTED]
+        per_step: dict[int, int] = {}
+        for event in started_events:
+            per_step[event.step] = per_step.get(event.step, 0) + 1
+        subagents = len(started_events)
+        found = [fact for fact in item.expected if normalize_answer(fact) in normalize_answer(outcome.output)]
+        enough = subagents >= item.input["min_subagents"]
+        correct = len(found) == len(item.expected) and enough
+        reason = "" if correct else (
+            f"missing {sorted(set(item.expected) - set(found))}" if len(found) != len(item.expected)
+            else f"only {subagents} subagent(s); expected at least {item.input['min_subagents']}")
+        result = _result_from_outcome(item, outcome, started, correct=correct,
+                                      expected="; ".join(item.expected), predicted=outcome.output.strip()[-200:])
+        result.details.update({
+            "subagents": subagents,
+            "max_parallel": max(per_step.values(), default=0),
+            "facts_found": len(found),
+            "reason": reason,
+        })
+        return result
+
+
 SUITES: dict[str, Suite] = {
     suite.name: suite
     for suite in (Gsm8kSuite(), QaSuite(), BfclSuite(), HumanEvalSuite(), GuardrailsSuite(), ContextSuite(),
-                  MemorySuite())
+                  MemorySuite(), AgentsSuite())
 }

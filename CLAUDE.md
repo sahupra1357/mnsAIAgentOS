@@ -108,6 +108,15 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
     duplicates get that result (`_reuse_same_reply_result`). Before this, a weak model that
     repeated a call 7 times in its first reply failed before it ever saw a refusal.
   - **Side-effect tools:** duplicates still run.
+- **Subagent benchmark (Phase 16h).** The `agents` suite measures delegation with a live
+  model:
+  - **Setup:** the parent run is limited to the `agent` tool
+    (`run_agent(subagents=..., allowed_tools=("agent",))`), and the `researcher` subagent reads
+    synthetic notes.
+  - **Scoring:** the answer must contain all expected facts, and at least `min_subagents`
+    subagents must run.
+  - **Where it runs:** it is part of the `subagents-planning` feature, with baselines
+    `agents-{profile}`.
 - **Benchmark speed and estimates (Phase 16g).**
   - **Parallel items:** gsm8k, bfcl, and humaneval run with `concurrency = 3`; the servers
     batch concurrent requests.

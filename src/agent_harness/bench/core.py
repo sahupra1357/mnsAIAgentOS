@@ -117,9 +117,14 @@ class BenchContext:
     embedding_profile: str | None = None
 
     async def run_agent(
-        self, messages: Sequence[Message], tools: ToolExecutor, *, budget: RunBudget | None = None
+        self, messages: Sequence[Message], tools: ToolExecutor, *, budget: RunBudget | None = None,
+        subagents: Sequence[Any] = (), allowed_tools: Sequence[str] | None = None,
     ) -> AgentOutcome:
-        """Run the real orchestrator (retries, fallback, context, hooks-free) once."""
+        """Run the real orchestrator (retries, fallback, context, hooks-free) once.
+
+        ``subagents`` (``SubagentDefinition``) offers the ``agent`` tool; ``allowed_tools``
+        limits the top-level run's own tools (subagents keep theirs).
+        """
 
         store = InMemoryRunStore()
         orchestrator = AgentOrchestrator(
@@ -129,9 +134,11 @@ class BenchContext:
             settings=self.settings,
             context=self.context,
             telemetry=self.telemetry,
+            subagents=subagents,
         )
         run = await orchestrator.create_run(
-            model_profile=self.profile, messages=list(messages), budget=budget or self.budget
+            model_profile=self.profile, messages=list(messages), budget=budget or self.budget,
+            allowed_tools=allowed_tools,
         )
         finished = await orchestrator.run(run.id)
         events = await store.list_events(run.id)

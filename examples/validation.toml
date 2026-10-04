@@ -134,6 +134,20 @@ search = "hybrid"
 min_accuracy = 0.66
 max_error_rate = 0.34
 
+# Subagents: the top-level agent may only delegate (the `agent` tool) to a researcher subagent
+# that reads notes; questions have independent parts, ideally delegated in parallel. Correct
+# = every expected fact in the final answer AND at least `min_subagents` subagents ran.
+# details record subagents, max_parallel, facts_found. Synthetic data (no download).
+[[benchmark]]
+name = "agents"
+suite = "agents"
+data = "bench/agents_sample.jsonl"
+max_steps = 8
+baseline = "../baselines/agents-{profile}.json"
+[benchmark.thresholds]
+min_accuracy = 0.66
+max_error_rate = 0.34
+
 # --- Earlier examples, kept for reference (enable any by removing the comments) ------
 # Pinning a profile compares providers side by side in one run (each still self-contained):
 # [[smoke]]
@@ -258,8 +272,9 @@ scenarios = ["ask_user", "question_deadline", "structured_output", "ask_user_ful
 [[feature]]
 name = "subagents-planning"
 description = "Subagents, task lists, plans, plan-and-execute, parallel delegation"
-tests = ["test_subagents_tasks", "test_planning_delegation", "test_example_subagents"]
+tests = ["test_subagents_tasks", "test_planning_delegation", "test_example_subagents", "test_agents_suite"]
 scenarios = ["subagent_delegation", "task_tracking"]
+benchmarks = ["agents"]
 
 [[feature]]
 name = "extensibility"

@@ -82,3 +82,16 @@ Use scripted models:
 - **Parallel reads:** prefetch runs calls concurrently, and is skipped when a `pre_tool`
   hook exists.
 - **Resume:** a plan interrupted mid-step resumes correctly.
+
+## Live delegation benchmark (Phase 16h)
+
+`agent-harness-bench run --suite agents --data examples/bench/agents_sample.jsonl` (also the
+`agents` entry of the validation plan) measures how well a real model delegates:
+- **Setup:** the top-level run may only call `agent`, and a `researcher` subagent reads the
+  notes.
+- **Scoring:** the answer must contain every expected fact, and at least `min_subagents` must
+  run.
+- **Details:** `subagents`, `max_parallel` (subagents started in the same step), and
+  `facts_found`.
+- **Tests:** `tests/test_agents_suite.py` uses a content-driven scripted model, because parallel
+  children make reply order nondeterministic.

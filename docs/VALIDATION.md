@@ -123,6 +123,7 @@ is lenient. `judge_max_tokens` (default 1024) leaves room for thinking models. T
 is stored in each item's `details.judge`.
 
 | `context` | Context handling past the window: trimming, `token_counting = "server"` (`context_capped` events), overflow recovery. The fact to recall sits in the newest part of a long conversation | Synthetic (no download): `examples/bench/context_sample.jsonl` | `{"needle", "question", "answer", "filler": "prose" \| "json" \| "code"}` |
+| `agents` | Subagents: the top-level agent can only use the `agent` tool, so it must delegate each independent part of the question to a `researcher` subagent (which reads notes), ideally in parallel, and then combine the answers. Correct means every expected fact is in the answer and at least `min_subagents` subagents ran; details record `subagents` and `max_parallel` | Synthetic: `examples/bench/agents_sample.jsonl` | `{"notes": {name: text}, "question", "answer": [facts], "min_subagents"}` |
 | `memory` | Long-term memory: notes are saved (and embedded), then found with `memory_search` using different wording | Synthetic: `examples/bench/memory_sample.jsonl` | `{"notes": [...], "question", "answer"}` |
 
 List the suites with `agent-harness-bench suites`.
