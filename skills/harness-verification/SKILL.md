@@ -106,3 +106,16 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
     deterministic `embed()`, so hybrid memory works offline. Do not give `ScriptedModelClient`
     itself an `embed()`; other tests rely on it lacking one.
   - When adding a test module or scenario, add it to a `[[feature]]` in the same change.
+
+## Phase 16b: honest benchmark failures
+
+- **Sandbox failures:** `bench/suites.py` has `docker_problem()` (a bounded `docker info`) and
+  `SandboxError`.
+  - `_raise_for_sandbox_failure` checks only results from a `DockerExecutionRuntime`, so local
+    execution and test doubles are never classified.
+  - Exit 125 or daemon text is an error; a timeout is an error only when Docker is unavailable.
+- **Preflight:** `execute_benchmark` runs the same preflight for humaneval and raises
+  `BenchConfigError`, which stops the benchmark.
+- **Infrastructure errors:** never let one count as a wrong answer. Gates have `min_accuracy`
+  floors so that a benchmark at 0% fails even without a baseline.
+- **Tests:** `tests/test_sandbox_failures.py` uses a fake `docker` on `PATH`.

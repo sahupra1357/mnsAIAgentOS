@@ -18,3 +18,6 @@ bench-results/
 # Local harness state (hook audit log, artifacts, installed plugins)
 .agent-harness/
 .DS_Store
+.gstack/
+# Benchmark baselines are per machine and per model (scripts/validate.sh --update-baselines)
+baselines/

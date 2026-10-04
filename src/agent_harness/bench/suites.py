@@ -32,6 +32,7 @@ use each benchmark's official evaluator on the saved predictions.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
@@ -455,6 +456,59 @@ def extract_code(text: str) -> str:
     return max(blocks, key=len) if blocks else text
 
 
+class SandboxError(RuntimeError):
+    """The code sandbox (Docker) failed; the item is an error, not a wrong answer."""
+
+
+# docker run exits 125 when the daemon or the run itself failed (not the program).
+_DOCKER_FAILURE_EXIT = 125
+_DOCKER_FAILURE_TEXT = re.compile(
+    r"Cannot connect to the Docker daemon|error during connect|Error response from daemon|"
+    r"docker: .*(?:error|denied)|Unable to find image|pull access denied",
+    re.IGNORECASE,
+)
+
+
+async def docker_problem(binary: str = "docker", timeout_seconds: float = 15.0) -> str | None:
+    """Why Docker cannot run sandboxes right now (``None`` when ``docker info`` answers)."""
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            binary, "info", "--format", "{{.ServerVersion}}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        return f"cannot start {binary!r}: {exc}"
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        return f"`{binary} info` did not answer within {timeout_seconds:.0f}s (is the daemon stuck?)"
+    if process.returncode != 0 or not stdout.strip():
+        detail = (stderr or stdout).decode("utf-8", "replace").strip().splitlines()
+        return f"`{binary} info` failed: {detail[-1] if detail else f'exit {process.returncode}'}"
+    return None
+
+
+async def _raise_for_sandbox_failure(result: Any, runtime: Any) -> None:
+    """Docker sandbox failures are errors: they say nothing about the generated code."""
+
+    from agent_harness.coding.execution import DockerExecutionRuntime
+
+    if not isinstance(runtime, DockerExecutionRuntime):
+        return  # local execution (or a test double): exit codes are the program's own
+    if result.exit_code == _DOCKER_FAILURE_EXIT or (
+        result.exit_code != 0 and _DOCKER_FAILURE_TEXT.search(result.stderr or "")
+    ):
+        raise SandboxError(f"sandbox failed (exit {result.exit_code}): {(result.stderr or '').strip()[-300:]}")
+    if result.timed_out:
+        # A stuck daemon also looks like a timeout; only a healthy Docker makes it the code's fault.
+        problem = await docker_problem(runtime.config.docker_binary)
+        if problem is not None:
+            raise SandboxError(f"sandbox timed out and Docker is unavailable: {problem}")
+
+
 class HumanEvalSuite:
     name = "humaneval"
     description = "Python function synthesis; generated code runs in the sandbox against tests."
@@ -493,6 +547,7 @@ class HumanEvalSuite:
             (workspace / "solution.py").write_text(program, encoding="utf-8")
             runtime = context.execution(workspace)
             result = await runtime.run(["python3", "solution.py"], cwd=workspace, timeout_seconds=timeout)
+        await _raise_for_sandbox_failure(result, runtime)
         passed = result.exit_code == 0 and not result.timed_out
         failure = "" if passed else ("timed out" if result.timed_out else result.stderr.strip()[-500:])
         return _result_from_outcome(

@@ -71,6 +71,7 @@ data = "bench/guardrails_sample.jsonl"
 baseline = "../baselines/guardrails.json"
 [benchmark.thresholds]
 max_accuracy_drop = 0.0
+min_accuracy = 0.9                # floor that applies even before a baseline exists
 
 # Coding path: generated code runs in Docker without network (needs a Docker daemon).
 [[benchmark]]
@@ -81,7 +82,8 @@ limit = 3
 max_steps = 6
 baseline = "../baselines/humaneval-{profile}.json"
 [benchmark.thresholds]
-max_error_rate = 0.34
+max_error_rate = 0.34             # sandbox (Docker) failures count as errors, not wrong answers
+min_accuracy = 0.5                # floor that applies even before a baseline exists
 
 # Context handling past the window: filler (JSON, code, prose) overflows the profile's
 # context_window (16384 in models.toml), exercising trimming, server token counting
@@ -268,7 +270,7 @@ benchmarks = ["memory"]
 [[feature]]
 name = "coding"
 description = "Workspace-safe coding tools, Docker sandbox, warm per-run containers, rewind"
-tests = ["test_coding", "test_sandbox_containers", "test_rewind"]
+tests = ["test_coding", "test_sandbox_containers", "test_rewind", "test_sandbox_failures"]
 scenarios = ["plan_mode_then_edit"]
 benchmarks = ["humaneval"]
 
