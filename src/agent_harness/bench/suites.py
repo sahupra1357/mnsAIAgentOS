@@ -765,8 +765,8 @@ class AgentsSuite:
     Each item has notes, a question with independent parts, and the expected facts. The
     parent must delegate to the ``researcher`` subagent, which can list and read the notes
     (in parallel when it calls ``agent`` several times in one reply), then combine the
-    answers. An item is correct when the final answer contains every expected fact and at
-    least ``min_subagents`` subagents ran. Details record subagents, parallelism, and tokens.
+    answers. An item is correct when the final answer contains every expected fact; how it
+    delegated is reported, not scored (details: subagents, max_parallel, facts_found).
     """
 
     name = "agents"
@@ -793,11 +793,8 @@ class AgentsSuite:
                     or not isinstance(question, str) or not isinstance(answer, list)
                     or not answer or not all(isinstance(a, str) and a for a in answer)):
                 raise DatasetError(f"agents record {index} needs notes (name -> text), question, and answer")
-            minimum = record.get("min_subagents", 1)
-            if not isinstance(minimum, int) or minimum < 1:
-                raise DatasetError(f"agents record {index}: min_subagents must be a positive integer")
             items.append(BenchItem(str(record.get("id", f"agents-{index}")),
-                                   {"notes": notes, "question": question, "min_subagents": minimum},
+                                   {"notes": notes, "question": question},
                                    answer, str(record.get("category", "default"))))
         return items
 
@@ -839,11 +836,8 @@ class AgentsSuite:
             per_step[event.step] = per_step.get(event.step, 0) + 1
         subagents = len(started_events)
         found = [fact for fact in item.expected if normalize_answer(fact) in normalize_answer(outcome.output)]
-        enough = subagents >= item.input["min_subagents"]
-        correct = len(found) == len(item.expected) and enough
-        reason = "" if correct else (
-            f"missing {sorted(set(item.expected) - set(found))}" if len(found) != len(item.expected)
-            else f"only {subagents} subagent(s); expected at least {item.input['min_subagents']}")
+        correct = len(found) == len(item.expected)
+        reason = "" if correct else f"missing {sorted(set(item.expected) - set(found))}"
         result = _result_from_outcome(item, outcome, started, correct=correct,
                                       expected="; ".join(item.expected), predicted=outcome.output.strip()[-200:])
         result.details.update({

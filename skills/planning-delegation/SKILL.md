@@ -89,8 +89,8 @@ Use scripted models:
 `agents` entry of the validation plan) measures how well a real model delegates:
 - **Setup:** the top-level run may only call `agent`, and a `researcher` subagent reads the
   notes.
-- **Scoring:** the answer must contain every expected fact, and at least `min_subagents` must
-  run.
+- **Scoring:** the answer must contain every expected fact. Delegation style is reported,
+  not scored.
 - **Details:** `subagents`, `max_parallel` (subagents started in the same step), and
   `facts_found`.
 - **Tests:** `tests/test_agents_suite.py` uses a content-driven scripted model, because parallel

@@ -53,7 +53,6 @@ class AgentsSuiteTests(unittest.IsolatedAsyncioTestCase):
     def test_registered_and_sample_loads(self) -> None:
         self.assertIs(type(SUITES["agents"]), AgentsSuite)
         self.assertEqual(len(self.items), 6)
-        self.assertEqual(self.item.input["min_subagents"], 2)
         self.assertEqual(self.item.expected, ["Priya", "9200"])
 
     async def test_parallel_delegation_is_correct_and_recorded(self) -> None:
@@ -62,6 +61,22 @@ class AgentsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual((result.details["subagents"], result.details["max_parallel"]), (2, 2))
         self.assertEqual(result.details["facts_found"], 2)
+
+    async def test_one_subagent_for_both_parts_is_still_correct(self) -> None:
+        # Delegation style is reported, not scored: right facts from one subagent pass.
+        class OneChild(Model):
+            async def complete(self, request: ModelRequest) -> ModelResponse:
+                tools = {spec.name for spec in request.tools}
+                if "agent" in tools and request.messages[-1].role is Role.USER:
+                    return ModelResponse(finish_reason=FinishReason.TOOL_CALLS, tool_calls=(
+                        ToolCall("a1", "agent", {"agent": "researcher", "task": "billing owner and search port"}),))
+                if "agent" in tools:
+                    return ModelResponse(content="Priya owns billing; search uses 9200.", finish_reason=FinishReason.STOP)
+                return await super().complete(request)
+
+        result = await AgentsSuite().run(self.item, BenchContext(models=OneChild(), profile="p"))
+        self.assertTrue(result.correct, result.details)
+        self.assertEqual(result.details["subagents"], 1)
 
     async def test_answering_without_delegating_is_wrong(self) -> None:
         result = await AgentsSuite().run(self.item, BenchContext(models=Model(delegate=False), profile="p"))
@@ -75,7 +90,7 @@ class AgentsSuiteTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "bad.jsonl")
             for record in ({"notes": {}, "question": "q", "answer": "a"},
-                           {"notes": {"a": "b"}, "question": "q", "answer": "a", "min_subagents": 0}):
+                           {"notes": {"a": "b"}, "question": "q", "answer": []}):
                 path.write_text(json.dumps(record) + "\n")
                 with self.subTest(record=record), self.assertRaises(DatasetError):
                     AgentsSuite().load(path, {})

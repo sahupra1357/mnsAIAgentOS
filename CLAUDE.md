@@ -113,8 +113,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   - **Setup:** the parent run is limited to the `agent` tool
     (`run_agent(subagents=..., allowed_tools=("agent",))`), and the `researcher` subagent reads
     synthetic notes.
-  - **Scoring:** the answer must contain all expected facts, and at least `min_subagents`
-    subagents must run.
+  - **Scoring:** the answer must contain all expected facts. How the model delegated
+    (`subagents`, `max_parallel`) is reported but not scored; the user dropped the
+    `min_subagents` requirement.
   - **Where it runs:** it is part of the `subagents-planning` feature, with baselines
     `agents-{profile}`.
 - **Benchmark speed and estimates (Phase 16g).**
