@@ -71,11 +71,22 @@ class EstimateTests(unittest.TestCase):
         self.assertAlmostEqual(live.pipeline_left(), max(40 + 80, 100) - 40 + 1)
         line = live.render()
         self.assertIn("gsm8k [#######-------------] 1/3 ~01:20", line)
+        # While item 2 runs the estimate counts down, never up ...
+        previous = live.benchmark_left()
+        for _ in range(30):
+            clock.now += 1
+            current = live.benchmark_left()
+            self.assertLess(current, previous)
+            previous = current
+        self.assertAlmostEqual(previous, 80 - 30)
+        # ... and a slow item stops it at what the unstarted item still needs (1 x 40 s).
+        clock.now += 60
+        self.assertAlmostEqual(live.benchmark_left(), 40)
         live.item_finished(3, 3, 1)
         live.benchmark_finished()
         live.stage_finished("benchmarks")
         self.assertEqual(live.timings.stages["unit"], 4)
-        self.assertAlmostEqual(live.timings.items["gsm8k"], 40 / 3)
+        self.assertAlmostEqual(live.timings.items["gsm8k"], (40 + 30 + 60) / 3)
 
     def test_long_lines_are_cut_to_the_terminal(self) -> None:
         live, _ = progress(Clock(), interactive=True, width=30)
