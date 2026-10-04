@@ -281,13 +281,19 @@ class OpenAICompatibleClient:
 
         if not texts:
             return []
+        timeout = self._profile.timeout_seconds
+        cold_start = self._cold_start_timeout()
+        if not self._warm and cold_start is not None:
+            # The first request after scale-to-zero waits for the model to load (as completions do).
+            timeout = max(timeout, cold_start)
         response = await self._transport.post_json(
             f"{self.api_base_url()}/embeddings",
             {"model": self._profile.model, "input": list(texts)},
             self.request_headers(),
-            self._profile.timeout_seconds,
+            timeout,
         )
         self._raise_for_status(response)
+        self._warm = True
         try:
             raw = json.loads(response.body)
             rows = sorted(raw["data"], key=lambda row: int(row.get("index", 0)))

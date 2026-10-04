@@ -125,6 +125,27 @@ class GatewayAndDoctorTests(unittest.TestCase):
                          [("embeddings", CheckStatus.OK), ("guard model", CheckStatus.OK)])
         self.assertEqual(transport.calls[-1][1]["model"], "guard")
 
+    def test_embeddings_wait_for_a_cold_start_once(self) -> None:
+        # A scaled-to-zero Modal embedding app loads its model on the first request.
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config(write(directory, (
+                '[models.modal]\nadapter = "modal"\nmodel = "chat"\nendpoint = "https://chat.example/v1"\n'
+                'timeout_seconds = 120\ncold_start_timeout_seconds = 600\nembedding_model = "embedder"\n'
+                'embedding_endpoint = "https://embed.example/v1"\napi_key_env = "MODAL_KEY"\n'
+                '[models.modal.headers_env]\nModal-Key = "MK"\nModal-Secret = "MS"\n')), environ={})
+        timeouts: list[float] = []
+
+        class Timing(Transport):
+            async def post_json(self, url, payload, headers, timeout_seconds):
+                timeouts.append(timeout_seconds)
+                return await super().post_json(url, payload, headers, timeout_seconds)
+
+        env = {"MODAL_KEY": "k", "MK": "id", "MS": "secret"}
+        client = ModelGateway(config, transport=Timing(), environ=env).resolve("modal.embed")
+        asyncio.run(client.embed(["a"]))
+        asyncio.run(client.embed(["b"]))
+        self.assertEqual(timeouts, [600, 120])
+
     def test_profiles_command_shows_companions_under_their_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = write(directory, LLAMA + 'embedding_model = "embedder"\n')
