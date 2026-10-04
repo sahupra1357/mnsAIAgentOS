@@ -134,7 +134,7 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
 
 - **Live stages:** `scripts/validate.sh` reads `./.env`, so the live stages see the
   credentials, the Modal endpoints, and `AGENT_HARNESS_MODEL_PROFILE`.
-- **Offline stages:** they drop every `AGENT_HARNESS_*` variable and set
-  `AGENT_HARNESS_DOTENV=0`, so their child processes do not re-read `.env`.
-- **Tests:** `tests/test_dotenv_profile_switch.py` covers parsing, precedence, both names of
-  the switch, the program-only loading, and the hermetic stages.
+- **Offline stages:** they drop every `AGENT_HARNESS_*` variable and run scenarios with
+  `python -c ... main(argv)` (`_CLI_WITHOUT_DOTENV`), which does not read `.env`.
+- **Tests:** `tests/test_dotenv_profile_switch.py` covers parsing, precedence, the switch, the
+  program-only loading, and the hermetic stages.

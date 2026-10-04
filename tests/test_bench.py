@@ -265,7 +265,7 @@ profile = "ollama"
             seen[" ".join(argv[1:4])] = dict(env)
             return True, "ok"
 
-        overrides = {"AGENT_HARNESS_DEFAULT_MODEL_PROFILE": "ollama",
+        overrides = {"AGENT_HARNESS_MODEL_PROFILE": "ollama",
                      "AGENT_HARNESS_MODEL__OLLAMA__MODEL": "gpt-oss:20b",
                      "AGENT_HARNESS_USER_SETTINGS": "/home/me/settings.toml"}
         with tempfile.TemporaryDirectory() as directory, \
@@ -275,7 +275,7 @@ profile = "ollama"
             self.assertEqual(os.environ["AGENT_HARNESS_MODEL__OLLAMA__MODEL"], "gpt-oss:20b")  # caller untouched
         self.assertEqual(len(seen), 2)
         for env in seen.values():
-            self.assertNotIn("AGENT_HARNESS_DEFAULT_MODEL_PROFILE", env)
+            self.assertNotIn("AGENT_HARNESS_MODEL_PROFILE", env)
             self.assertNotIn("AGENT_HARNESS_MODEL__OLLAMA__MODEL", env)
             self.assertFalse(Path(env["AGENT_HARNESS_USER_SETTINGS"]).exists())
             self.assertFalse(Path(env["AGENT_HARNESS_ENTERPRISE_SETTINGS"]).exists())

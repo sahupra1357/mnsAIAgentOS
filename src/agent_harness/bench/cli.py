@@ -55,6 +55,8 @@ from .runner import build_report, run_benchmark
 from .suites import SUITES, docker_problem
 
 ALL_STAGES = ("static", "unit", "scenarios", "smoke", "benchmarks", "gates")
+# Runs `agent-harness ARGS` the way tests do: main(argv) does not read ./.env.
+_CLI_WITHOUT_DOTENV = "import sys; from agent_harness.cli import main; sys.exit(main(sys.argv[1:]))"
 # Stages that need no model server (--offline keeps only these).
 OFFLINE_STAGES = ("static", "unit", "scenarios")
 
@@ -284,7 +286,6 @@ async def run_pipeline(
     # settings files, which tests and scripted scenarios would otherwise pick up.
     # Smoke and benchmarks keep the full environment: they target the live setup.
     hermetic = {k: v for k, v in env.items() if not k.startswith("AGENT_HARNESS_")}
-    hermetic["AGENT_HARNESS_DOTENV"] = "0"  # child processes must not re-read ./.env
     hermetic["AGENT_HARNESS_USER_SETTINGS"] = os.devnull + ".agent-harness-user-settings"
     hermetic["AGENT_HARNESS_ENTERPRISE_SETTINGS"] = os.devnull + ".agent-harness-enterprise-settings"
     python = sys.executable
@@ -388,7 +389,8 @@ async def run_pipeline(
                         add(StageResult(name, "skip", "no scenarios listed"))
                         continue
                 ok, detail = await asyncio.to_thread(_run_command,
-                    [python, "-m", "agent_harness", "eval", "--config", str(scenario_config), *targets,
+                    # main([...]) never reads ./.env, so scripted scenarios stay hermetic.
+                    [python, "-c", _CLI_WITHOUT_DOTENV, "eval", "--config", str(scenario_config), *targets,
                      "--report", str(output_dir / "scenarios.json")],
                     cwd=repo, env=hermetic,
                 )

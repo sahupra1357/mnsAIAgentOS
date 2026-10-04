@@ -156,12 +156,15 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   - Print through `progress.write()` while it is active, so lines do not tear the status line.
 - **The profile switch and `.env` (Phase 16e).**
   - **The switch:** `AGENT_HARNESS_MODEL_PROFILE` (`PROFILE_ENV` in `config.py`) overrides
-    `default_model_profile`. The older `AGENT_HARNESS_DEFAULT_MODEL_PROFILE` is still read;
-    the new name wins.
+    `default_model_profile`. It is the only name; the older `AGENT_HARNESS_DEFAULT_MODEL_PROFILE`
+    was removed at the user's request.
   - **When `.env` is read:** `dotenv.load_dotenv()` reads `./.env` only when
     `agent-harness` or `agent-harness-bench` start as programs (`main()` with
     `argv is None`). Shell variables win over it.
-  - **Hermetic stages:** the offline pipeline stages set `AGENT_HARNESS_DOTENV=0`.
+  - **Hermetic stages:** the offline pipeline stages strip `AGENT_HARNESS_*`, and run
+    scenarios through `main([...])` (`_CLI_WITHOUT_DOTENV`), which never reads `.env`.
+  - **No knobs:** there are no `.env` options (no alternate file, no off switch); `.env` is the
+    driver.
   - **Tests:** call `main([...])` so `.env` is never read. Real endpoints and keys belong in
     `.env`, never in `models.toml`.
 - **Companion profiles (Phase 16).** `config.models` also holds hidden `NAME.embed` / `NAME.guard`
