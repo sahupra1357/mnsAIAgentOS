@@ -300,3 +300,22 @@ class ObservabilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HistoryColumnTests(unittest.TestCase):
+    def test_runs_before_and_after_default_following_names_share_a_column(self) -> None:
+        import json as _json
+        from agent_harness.bench.history import render_history
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for run, folder in (("2026-10-01_10-00-00", "gsm8k-llamacpp"), ("2026-10-03_10-00-00", "gsm8k")):
+                out = root / "runs" / run / folder
+                out.mkdir(parents=True)
+                (out / "report.json").write_text(_json.dumps(
+                    {"suite": "gsm8k", "profile": "llamacpp", "metrics": {"accuracy": 1.0, "error_rate": 0.0}}))
+                (root / "runs" / run / "pipeline-summary.json").write_text("[]")
+            page = render_history(root)
+        self.assertEqual(page.count("<th>gsm8k-llamacpp</th>"), 1)
+        self.assertNotIn("<th>gsm8k</th>", page)
+        self.assertEqual(page.count("<td>1.000"), 2)  # both runs filled in the same column
