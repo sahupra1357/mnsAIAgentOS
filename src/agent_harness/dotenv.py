@@ -1,15 +1,11 @@
-"""Load a local ``.env`` file into the environment (stdlib only).
+"""Load ``./.env`` into the environment (stdlib only).
 
 ``agent-harness`` and ``agent-harness-bench`` (and so ``scripts/validate.sh``) call
-:func:`load_dotenv` when they start as programs, so settings that must stay off git live
-in ``.env``: credentials, Modal endpoints, and the profile switch
-``AGENT_HARNESS_MODEL_PROFILE``. Rules:
-
-* the file is ``$AGENT_HARNESS_ENV_FILE`` or ``./.env``; a missing file is fine;
-* variables already set in the environment win, so
-  ``AGENT_HARNESS_MODEL_PROFILE=modal scripts/validate.sh`` overrides ``.env`` for one run;
-* ``AGENT_HARNESS_DOTENV=0`` turns loading off (the offline validation stages set it, so
-  they stay hermetic; unit tests never call the program entry points).
+:func:`load_dotenv` when they start as programs. ``.env`` holds what must stay off git:
+credentials, real endpoints, and the profile switch ``AGENT_HARNESS_MODEL_PROFILE``.
+Variables already set in the environment win, so ``AGENT_HARNESS_MODEL_PROFILE=modal
+scripts/validate.sh`` overrides ``.env`` for one run. Tests and the offline validation
+stages call ``main([...])``, which never reads it.
 
 Format: ``KEY=value`` lines, optional ``export`` prefix, ``#`` comments, values in single
 quotes (literal) or double quotes (``\\n``, ``\\"``, ``\\\\`` escapes); an unquoted value
@@ -23,8 +19,6 @@ import re
 from collections.abc import MutableMapping
 from pathlib import Path
 
-DOTENV_SWITCH = "AGENT_HARNESS_DOTENV"
-DOTENV_FILE = "AGENT_HARNESS_ENV_FILE"
 _KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -58,14 +52,11 @@ def load_dotenv(
     path: str | os.PathLike[str] | None = None,
     environ: MutableMapping[str, str] | None = None,
 ) -> list[str]:
-    """Set variables from the file that are not set yet; return the names that were set."""
+    """Set variables from ``.env`` (default ``./.env``) that are not set yet; return their names."""
 
     env = os.environ if environ is None else environ
-    if env.get(DOTENV_SWITCH, "").strip().lower() in {"0", "false", "no", "off"}:
-        return []
-    target = Path(path or env.get(DOTENV_FILE) or Path.cwd() / ".env").expanduser()
     try:
-        text = target.read_text(encoding="utf-8")
+        text = Path(path or Path.cwd() / ".env").read_text(encoding="utf-8")
     except (FileNotFoundError, IsADirectoryError):
         return []
     added = []

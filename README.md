@@ -62,12 +62,9 @@ not be committed:
 - real endpoints (for example `AGENT_HARNESS_MODEL__MODAL__ENDPOINT`);
 - the profile switch, `AGENT_HARNESS_MODEL_PROFILE`.
 
-How loading works:
-- **Shell wins:** variables already set in your shell win over `.env`.
-- **Other files:** `AGENT_HARNESS_ENV_FILE=path` picks another file, and
-  `AGENT_HARNESS_DOTENV=0` turns loading off.
-- **What is ignored:** `.env` and `.env.*` are gitignored; only `.env.example` is tracked.
-- **Hermetic checks:** unit tests and the offline validation stages never read it. Every subcommand accepts `--config` to
+Variables already set in your shell win over `.env`. `.env` and `.env.*` are gitignored
+(only `.env.example` is tracked), and unit tests and the offline validation stages never
+read it. Every subcommand accepts `--config` to
 override it. In `chat`, each message continues the same durable run; approvals and
 `ask_user` questions are asked inline; `/new`, `/status`, `/help`, and `/exit` are chat
 commands, and any other `/name` expands a prompt template. Each message gets
@@ -179,7 +176,7 @@ The endpoint can be a base ending in `/v1` or a full `/chat/completions` URL. Cr
 Configuration can also be overridden through environment variables:
 
 ```text
-AGENT_HARNESS_MODEL_PROFILE          # which profile serves everything (older name: AGENT_HARNESS_DEFAULT_MODEL_PROFILE)
+AGENT_HARNESS_MODEL_PROFILE          # which profile serves everything (chat, embeddings, guard)
 AGENT_HARNESS_MODEL__<PROFILE>__ADAPTER
 AGENT_HARNESS_MODEL__<PROFILE>__MODEL
 AGENT_HARNESS_MODEL__<PROFILE>__ENDPOINT
@@ -215,8 +212,7 @@ AGENT_HARNESS_MODEL_PROFILE=llamacpp   # or: ollama | modal
 
 It overrides `default_model_profile` in `models.toml` everywhere: `agent-harness`, chat,
 `serve`, `doctor`, and the live validation stages. A shell variable overrides `.env` for one
-command: `AGENT_HARNESS_MODEL_PROFILE=ollama agent-harness "hi"`. The older name
-`AGENT_HARNESS_DEFAULT_MODEL_PROFILE` still works; the new one wins when both are set.
+command: `AGENT_HARNESS_MODEL_PROFILE=ollama agent-harness "hi"`.
 
 ```toml
 [models.llamacpp]

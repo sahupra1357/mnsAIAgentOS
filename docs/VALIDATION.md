@@ -60,8 +60,9 @@ Rules:
     `AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh` (or `=modal`). That profile then
     serves the smoke check and every benchmark, including embeddings and the guard model.
   - **`.env`:** `scripts/validate.sh` reads `./.env`. The offline stages (static, unit,
-    scenarios) run without it (`AGENT_HARNESS_DOTENV=0`, and every `AGENT_HARNESS_*`
-    variable removed), so they behave the same on every machine.
+    scenarios) run without it: every `AGENT_HARNESS_*` variable is removed, and scenarios
+    call the CLI as `main([...])`, which never reads `.env`. So they behave the same on
+    every machine.
   - **Feature name:** the feature smoke name is `default`.
 - **`humaneval` needs Docker.**
 - **The llama.cpp server's context size must match `context_window` (16384).**

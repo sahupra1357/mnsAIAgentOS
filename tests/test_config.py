@@ -44,7 +44,7 @@ api_key_env = "HOSTED_API_KEY"
     def test_environment_can_define_profile_without_file(self) -> None:
         config = load_config(
             environ={
-                "AGENT_HARNESS_DEFAULT_MODEL_PROFILE": "fast",
+                "AGENT_HARNESS_MODEL_PROFILE": "fast",
                 "AGENT_HARNESS_MODEL__FAST__ADAPTER": "openai_compatible",
                 "AGENT_HARNESS_MODEL__FAST__MODEL": "small-model",
                 "AGENT_HARNESS_MODEL__FAST__ENDPOINT": "http://localhost:9000/v1",

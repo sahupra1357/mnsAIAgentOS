@@ -33,10 +33,8 @@ SUPPORTED_API_MODES = frozenset({"openai", "native"})
 # Adapters that can reach hosted providers without an explicit endpoint URL.
 ENDPOINT_OPTIONAL_ADAPTERS = frozenset({"litellm"})
 _ENV_PREFIX = "AGENT_HARNESS_MODEL__"
-# Which profile serves everything; overrides default_model_profile. The second name is the
-# original one, kept working (the new one wins when both are set).
+# Which profile serves everything (chat, embeddings, guard); overrides default_model_profile.
 PROFILE_ENV = "AGENT_HARNESS_MODEL_PROFILE"
-LEGACY_PROFILE_ENV = "AGENT_HARNESS_DEFAULT_MODEL_PROFILE"
 _ROUTE_ENV_PREFIX = "AGENT_HARNESS_ROUTE__"
 # AGENT_HARNESS_SET__SECTION__KEY=value sets any table value (e.g. orchestrator.max_model_attempts).
 _SET_ENV_PREFIX = "AGENT_HARNESS_SET__"
@@ -923,9 +921,8 @@ def load_config(
     companions = _add_companions(profiles)
 
     # AGENT_HARNESS_MODEL_PROFILE is the one switch: that profile serves chat, embeddings,
-    # and the guard model. AGENT_HARNESS_DEFAULT_MODEL_PROFILE is the older name (still read).
-    default = (env.get(PROFILE_ENV) or env.get(LEGACY_PROFILE_ENV)
-               or raw.get("default_model_profile"))
+    # and the guard model.
+    default = env.get(PROFILE_ENV) or raw.get("default_model_profile")
     if isinstance(default, str) and default in companions:
         raise ConfigError(f"default model profile {default!r} is a companion; use {companions[default][0]!r}")
     if isinstance(default, str) and default in disabled:

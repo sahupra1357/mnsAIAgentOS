@@ -37,7 +37,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(dict(config.routes), {"fast": "llamacpp", "local": "ollama"})
         self.assertEqual(config.models["llamacpp"].fallback, ())  # no cross-provider fallback
         self.assertEqual(config.memory.embedding_profile, "llamacpp.embed")
-        switched = load_config(FULL, environ={"AGENT_HARNESS_DEFAULT_MODEL_PROFILE": "ollama"})
+        switched = load_config(FULL, environ={"AGENT_HARNESS_MODEL_PROFILE": "ollama"})
         self.assertEqual(switched.memory.embedding_profile, "ollama.embed")
         enabled = load_config(FULL, environ={"AGENT_HARNESS_MODEL__MODAL__ENABLED": "true"})
         self.assertIn("modal", enabled.models)

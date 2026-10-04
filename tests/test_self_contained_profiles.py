@@ -96,7 +96,7 @@ class DefaultsTests(unittest.TestCase):
             config = load_config(path, environ={})
             self.assertEqual((config.memory.embedding_profile, config.guardrails.model.profile),
                              ("llama.embed", "llama.guard"))
-            other = load_config(path, environ={"AGENT_HARNESS_DEFAULT_MODEL_PROFILE": "local"})  # a route
+            other = load_config(path, environ={"AGENT_HARNESS_MODEL_PROFILE": "local"})  # a route
             self.assertEqual((other.memory.embedding_profile, other.guardrails.model.profile),
                              ("ollama.embed", ""))  # ollama has no guard_model: no model guard
             explicit = load_config(path, environ={"AGENT_HARNESS_SET__MEMORY__EMBEDDING_PROFILE": "ollama.embed"})
