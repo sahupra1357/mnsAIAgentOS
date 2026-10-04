@@ -604,11 +604,27 @@ class StorageConfig:
 
 @dataclass(frozen=True, slots=True)
 class PlanningConfig:
-    """Plan-and-execute: the model plans with create_plan, the orchestrator runs the plan."""
+    """Plan-and-execute: the model plans with create_plan, the orchestrator runs the plan.
+
+    ``mode``: ``off`` (only ``--plan`` runs plan), ``always`` (every run plans first), or
+    ``auto`` (the model may call create_plan; that run then plans and executes). Empty
+    keeps the older switch: ``enabled = true`` means ``always``.
+    """
 
     enabled: bool = False
     max_plan_steps: int = 20
     max_replans: int = 2
+    mode: str = ""
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"", "off", "always", "auto"}:
+            raise ConfigError('planning.mode must be "off", "always", or "auto"')
+        if self.enabled and self.mode in {"off", "auto"}:
+            raise ConfigError(f'planning.enabled = true contradicts mode = "{self.mode}"; set only mode')
+
+    @property
+    def effective_mode(self) -> str:
+        return self.mode or ("always" if self.enabled else "off")
 
 
 @dataclass(frozen=True, slots=True)

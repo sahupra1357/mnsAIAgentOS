@@ -15,8 +15,19 @@ build/
 validation-results/
 bench-results/
 
-# Local harness state (hook audit log, artifacts, installed plugins)
-.agent-harness/
+# Local harness state (hook audit log, artifacts, installed plugins) stays ignored;
+# the live config files the root models.toml uses are tracked (Phase 17).
+.agent-harness/*
+!.agent-harness/agents/
+!.agent-harness/hooks/
+!.agent-harness/skills/
+!.agent-harness/templates/
+!.agent-harness/tools/
+!.agent-harness/sandbox_tools/
+# Installed plugins stay local, except the one the root models.toml enables.
+!.agent-harness/plugins/
+.agent-harness/plugins/*
+!.agent-harness/plugins/security-review/
 .DS_Store
 .gstack/
 # Benchmark baselines are per machine and per model (scripts/validate.sh --update-baselines)

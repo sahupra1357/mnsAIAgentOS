@@ -435,5 +435,122 @@ class ParallelReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("timed out", first.lower())
 
 
+class AutoPlanningTests(unittest.IsolatedAsyncioTestCase):
+    """Planning mode "auto": the model decides whether a run plans (Phase 17)."""
+
+    def orchestrator(self, handler: Handler, store: Any = None, **policy: Any) -> AgentOrchestrator:
+        self.model = RoutedModel(handler)
+        return AgentOrchestrator(models=self.model, tools=create_default_runtime(),
+                                 store=store or InMemoryRunStore(),
+                                 planning=PlanningPolicy(auto=True, **policy))
+
+    @staticmethod
+    def offered(request: ModelRequest) -> list[str]:
+        return [spec.name for spec in request.tools]
+
+    async def test_simple_question_skips_planning(self) -> None:
+        orchestrator = self.orchestrator(lambda request: asyncio.sleep(0, final("42")))
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "what is 6*7?")])
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertFalse(finished.planning)
+        self.assertIsNone(finished.plan)
+        self.assertEqual(len(self.model.requests), 1)  # no reminder, no extra call
+        self.assertIn("create_plan", self.offered(self.model.requests[0]))
+        self.assertNotIn(PLANNER_INSTRUCTIONS, [m.content for m in self.model.requests[0].messages])
+
+    async def test_model_starts_a_plan_and_the_orchestrator_runs_it(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            text = last_user(request)
+            if "[Plan] Execute step s1" in text:
+                return final("s1 done")
+            if "[Plan] Execute step s2" in text:
+                return final("s2 done")
+            if "All steps are finished" in text:
+                return final("answer")
+            return call("create_plan", {"goal": "g", "steps": [
+                {"id": "s1", "title": "One"}, {"id": "s2", "title": "Two", "depends_on": ["s1"]}]}, "p1")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteRunStore(Path(directory) / "runs.sqlite3")
+            orchestrator = self.orchestrator(handler, store=store)
+            run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "refactor x")])
+            self.assertFalse(run.planning)
+            finished = await orchestrator.run(run.id)
+            events = await store.list_events(run.id)
+            await store.close()
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertTrue(finished.planning)  # persisted switch
+        assert finished.plan is not None
+        self.assertEqual([s.status for s in finished.plan.steps], [PlanStepStatus.COMPLETED] * 2)
+        created = [e for e in events if e.type is EventType.PLAN_CREATED]
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0].payload.get("auto"))
+        after = self.offered(self.model.requests[1])
+        self.assertNotIn("create_plan", after)
+        self.assertIn("update_plan", after)
+
+    async def test_rejected_plan_does_not_switch_the_run(self) -> None:
+        replies = iter([call("create_plan", {"goal": "g", "steps": [
+            {"id": "a", "title": "A", "depends_on": ["b"]}, {"id": "b", "title": "B", "depends_on": ["a"]}]}),
+            final("done without a plan")])
+        orchestrator = self.orchestrator(lambda request: asyncio.sleep(0, next(replies)))
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")])
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertFalse(finished.planning)
+        self.assertIn("Plan not changed", next(m.content for m in finished.messages if m.role is Role.TOOL))
+        self.assertEqual(len(self.model.requests), 2)  # no create_plan reminder afterwards
+
+    async def test_not_offered_to_children_schemas_plan_mode_or_when_off(self) -> None:
+        from agent_harness.domain import PermissionMode
+
+        orchestrator = self.orchestrator(lambda request: asyncio.sleep(0, final("x")))
+        parent = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")])
+        child = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")],
+                                              parent_run_id=parent.id, depth=1)
+        schema = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")],
+                                               output_schema={"type": "object"})
+        planned = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")],
+                                                mode=PermissionMode.PLAN)
+        names = lambda run: [spec.name for spec in orchestrator._specs_for(run)]  # noqa: E731
+        self.assertIn("create_plan", names(parent))
+        for run in (child, schema, planned):
+            self.assertNotIn("create_plan", names(run))
+        off = AgentOrchestrator(models=self.model, tools=create_default_runtime(), store=InMemoryRunStore())
+        plain = await off.create_run(model_profile="p", messages=[Message(Role.USER, "t")])
+        self.assertNotIn("create_plan", [spec.name for spec in off._specs_for(plain)])
+
+    async def test_explicit_plan_run_still_plans_first(self) -> None:
+        orchestrator = self.orchestrator(lambda request: asyncio.sleep(0, final("x")))
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")], planning=True)
+        self.assertTrue(run.planning)
+        self.assertIn(PLANNER_INSTRUCTIONS, [m.content for m in run.messages])
+
+
+class PlanningModeConfigTests(unittest.TestCase):
+    def test_modes(self) -> None:
+        from agent_harness.config import ConfigError, PlanningConfig
+
+        self.assertEqual(PlanningConfig().effective_mode, "off")
+        self.assertEqual(PlanningConfig(enabled=True).effective_mode, "always")  # older switch
+        self.assertEqual(PlanningConfig(mode="auto").effective_mode, "auto")
+        self.assertEqual(PlanningConfig(enabled=True, mode="always").effective_mode, "always")
+        for bad in (dict(mode="sometimes"), dict(enabled=True, mode="auto"), dict(enabled=True, mode="off")):
+            with self.subTest(bad), self.assertRaises(ConfigError):
+                PlanningConfig(**bad)
+
+    def test_application_policy(self) -> None:
+        from types import SimpleNamespace
+
+        from agent_harness.application import _planning
+        from agent_harness.config import PlanningConfig
+
+        cases = {"off": (False, False), "always": (True, False), "auto": (False, True)}
+        for mode, expected in cases.items():
+            policy = _planning(SimpleNamespace(planning=PlanningConfig(mode=mode)))  # type: ignore[arg-type]
+            self.assertEqual((policy.enabled, policy.auto), expected, mode)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,7 @@ from agent_harness.context import (
     fit_to_tokens,
 )
 from agent_harness.planning import (
+    AUTO_CREATE_PLAN_SPEC,
     CREATE_PLAN,
     CREATE_PLAN_SPEC,
     PLAN_TOOLS,
@@ -2165,7 +2166,8 @@ class AgentOrchestrator:
         if call.name in META_TOOLS and self._tool_loading.dynamic:
             await self._meta_tool(run, events, call, attempt)
             return
-        if call.name in PLAN_TOOLS and run.planning:
+        if call.name in PLAN_TOOLS and (run.planning or (
+                call.name == CREATE_PLAN and self._offers_auto_plan(run))):
             await self._plan_tool(run, events, call, attempt)
             return
         if call.name == AGENT_TOOL:
@@ -2254,6 +2256,13 @@ class AgentOrchestrator:
         if should_retry:
             await self._execute_tool(run, events, call)
 
+    def _offers_auto_plan(self, run: RunRecord) -> bool:
+        """Planning mode "auto": top-level runs that do not plan may start a plan themselves."""
+
+        return (self._planning.auto and not run.planning and run.plan is None
+                and run.parent_run_id is None and run.output_schema is None
+                and run.mode is not PermissionMode.PLAN)
+
     def _spec_map(self, run: RunRecord) -> dict[str, ToolSpec]:
         return {spec.name: spec for spec in self._specs_for(run)}
 
@@ -2284,6 +2293,8 @@ class AgentOrchestrator:
             specs += (TODO_SPEC,)
         if self._ask_user:
             specs += (ASK_USER_SPEC,)
+        if self._offers_auto_plan(run):
+            specs += (AUTO_CREATE_PLAN_SPEC,)
         if run.planning:
             if run.plan is None:
                 # Explore read-only, then plan: nothing can change before the plan exists.
@@ -2762,7 +2773,11 @@ class AgentOrchestrator:
                                     max_steps=policy.max_plan_steps)
                 plan = Plan(goal=str(call.arguments.get("goal", "")).strip(), steps=steps)
                 run.plan = plan
-                extra = (self._plan_event(run, EventType.PLAN_CREATED, plan_payload(plan)),)
+                payload = plan_payload(plan)
+                if not run.planning:  # planning mode "auto": the model chose to plan
+                    run.planning = True
+                    payload["auto"] = True
+                extra = (self._plan_event(run, EventType.PLAN_CREATED, payload),)
                 result = respond(ToolResultStatus.SUCCESS,
                                  f"Plan accepted with {len(steps)} steps. The orchestrator now runs it; "
                                  "follow its instructions.", steps=len(steps))

@@ -1,0 +1,23 @@
+# Security review plugin: a read-only auditor subagent, a secrets-scan skill, the
+# /audit template, and a pre_tool hook that refuses network commands in run_command.
+# Enabled in the root models.toml ([plugins] enabled). Hooks run with this directory
+# as their working directory.
+name = "security-review"
+version = "1.0.0"
+description = "Audit code for hard-coded secrets and unsafe commands; refuse network commands."
+templates = "templates"
+skills = "skills"
+
+[[agents]]
+name = "security-auditor"
+description = "Audits files or the current changes for hard-coded secrets, injection, and unsafe shell or file use. Read-only."
+prompt_file = "agents/security-auditor.md"
+tools = ["read_file", "search_files", "git_status", "git_diff"]
+max_steps = 12
+
+[[hooks]]
+name = "security-review:egress-guard"
+event = "pre_tool"
+matcher = "run_command"
+command = ["python3", "hooks/egress_guard.py"]
+timeout_seconds = 10

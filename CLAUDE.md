@@ -203,6 +203,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 - **Companion profiles (Phase 16).** `config.models` also holds hidden `NAME.embed` / `NAME.guard`
   profiles. Use `config.chat_models()` (not `config.models`) wherever profiles are listed or offered
   to users. A single chat profile with companions still counts as one profile for the default.
+- **`examples/` is reference only (Phase 17).** The root `models.toml` loads its agents, hooks,
+  skills, templates, and tool modules from `.agent-harness/` (copies of the `examples/` files;
+  `.gitignore` tracks those subdirectories and still ignores the runtime state there). Never point
+  the root config back at `examples/`; `tests/test_full_config.py` fails if it does.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A
@@ -597,6 +601,29 @@ One provider profile serves everything; nothing in `models.toml` depends on a se
    - `AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider.
 6. `doctor` also checks the profile's embedding and guard models (`companion_checks`).
 Tests: `tests/test_self_contained_profiles.py`.
+
+**Phase 17 – Live config, everything active** [tool-platform, harness-verification] — on `phase-17-live-config`
+1. Live files in `.agent-harness/` (`agents/`, `hooks/`, `skills/`, `templates/`, `tools/text_tools.py`,
+   `sandbox_tools/json_tools.py`); `examples/` is untouched and reference only.
+2. Activated in the root `models.toml`:
+   - a sandboxed Python tool source (`json-tools`, `json_check`, `network = false`): internal tools only;
+   - the Excalidraw MCP server over http (`https://mcp.excalidraw.com/mcp`, `read_me` and `create_view`
+     only, host in `[network] allowed_hosts`). It is an MCP App, so the harness gets text, not a drawing;
+   - `web_search` in `[tool_loading] core` (key `TAVILY_API_KEY` in `.env`).
+3. `[planning] mode = "off" | "always" | "auto"` (empty keeps `enabled`; `enabled = true` is
+   `always`). In `auto`, top-level runs without an output schema or plan permission mode are
+   offered `create_plan` (`AUTO_CREATE_PLAN_SPEC`); a successful call sets `run.planning` and the
+   `plan_created` event carries `auto: true`. A rejected plan leaves the run unplanned. The root
+   config uses `auto`.
+4. The `security-review` plugin in `.agent-harness/plugins/` (enabled): `security-auditor` subagent,
+   `secrets-scan` skill, `/audit` template, and an `egress-guard` pre_tool hook refusing network
+   commands in `run_command`.
+5. `[[api.keys]]` "me" (admin) with `key_env = "AGENT_HARNESS_API_KEY"`: `serve` needs that variable
+   in `.env`; the CLI does not. `[notifications]` has an empty `webhook_url` (dormant) that
+   `AGENT_HARNESS_SET__NOTIFICATIONS__WEBHOOK_URL` sets.
+6. Still off because they need something outside the harness: Modal and Postgres. The guard model
+   was already on. Known issue: Llama Guard 3 1B (llama.cpp) can block benign coding prompts
+   as `violent_crimes`.
 
 ## Validation
 
