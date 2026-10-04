@@ -100,7 +100,10 @@ class PipelineProgress:
         interval: float = 1.0,
         log_every: float = 30.0,
         width: Callable[[], int] | None = None,
+        display: bool = True,
     ) -> None:
+        # display=False: only records timings (quiet runs); output is not routed through it.
+        self.display = display
         self._stream = stream
         self.interactive = stream.isatty() if interactive is None else interactive
         self._clock = clock

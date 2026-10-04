@@ -172,5 +172,19 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(timings["profile"], "a")  # the config's default profile
 
 
+    def test_quiet_runs_still_record_timings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "evals").mkdir()
+            (base / "models.toml").write_text(
+                '[models.a]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://x/v1"\n')
+            (base / "plan.toml").write_text('[pipeline]\nconfig = "models.toml"\nrepo = "."\noutput_dir = "out"\n'
+                                            '[scenarios]\npath = "evals"\n')
+            with mock.patch.object(bench_cli, "_run_command", return_value=(True, "ok")):
+                asyncio.run(bench_cli.run_pipeline(base / "plan.toml", stages=("unit",)))  # no progress
+            run = next((base / "out" / "runs").iterdir())
+            self.assertEqual(json.loads((run / "timings.json").read_text())["profile"], "a")
+
+
 if __name__ == "__main__":
     unittest.main()
