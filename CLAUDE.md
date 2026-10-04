@@ -108,6 +108,16 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
     duplicates get that result (`_reuse_same_reply_result`). Before this, a weak model that
     repeated a call 7 times in its first reply failed before it ever saw a refusal.
   - **Side-effect tools:** duplicates still run.
+- **Tool-name recovery (gpt-oss).** `model_gateway/tool_names.py` (`recover_tool_names`, applied
+  by every client to the request's offered tools) rewrites leaked harmony-format calls:
+  - `functions.X` becomes `X`;
+  - a `functions` wrapper call is unwrapped;
+  - a subagent's name used as a tool becomes an `agent` call, but only for names in the
+    offered `agent` tool's enum.
+
+  It never renames a tool that was offered. Unknown tools now get a message listing the
+  available tools, plus a subagent hint. gpt-oss on Ollama also makes one tool call per
+  message, so it scores low on parallel bfcl items; that is the model, not the harness.
 - **Subagent benchmark (Phase 16h).** The `agents` suite measures delegation with a live
   model:
   - **Setup:** the parent run is limited to the `agent` tool

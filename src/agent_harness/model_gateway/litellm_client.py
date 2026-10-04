@@ -34,6 +34,7 @@ from agent_harness.domain import (
     RetryableModelError,
 )
 
+from .tool_names import recover_tool_names
 from .errors import (
     AuthenticationError,
     MalformedResponseError,
@@ -118,7 +119,7 @@ class LiteLLMClient(OpenAICompatibleClient):
             try:
                 async with asyncio.timeout(timeout):
                     raw = await module.acompletion(**kwargs)
-                response = self._normalize_raw(_as_dict(raw), {})
+                response = recover_tool_names(self._normalize_raw(_as_dict(raw), {}), request.tools)
                 self._warm = True
                 return self._priced(response, module, raw, self._monotonic() - started)
             except HarnessError:
@@ -167,7 +168,7 @@ class LiteLLMClient(OpenAICompatibleClient):
             raise ModelTimeoutError(f"model stream timed out: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 - classified
             raise classify_litellm_error(exc) from exc
-        response = self._normalize_raw(accumulator.as_completion(), {})
+        response = recover_tool_names(self._normalize_raw(accumulator.as_completion(), {}), request.tools)
         self._warm = True
         yield ModelStreamEvent(response=self._with_cost(response, self._monotonic() - started))
 

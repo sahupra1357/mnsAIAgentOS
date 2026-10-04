@@ -245,3 +245,13 @@ How it fits together:
   normal gateway (same credentials and headers).
 - **Checking:** `doctor` checks both companions.
 - **Do not add cross-provider defaults:** fallback to another provider is opt-in only.
+
+## gpt-oss quirks (any server)
+
+- **Leaked harmony format:** tool names come back as `functions.read_note`, or as a
+  `functions` wrapper around `{"name", "arguments"}`, and the model calls a subagent by its
+  name instead of `agent`. `recover_tool_names` (`model_gateway/tool_names.py`) fixes these
+  against the tools offered in that request. Add any new leak patterns there, never in the
+  orchestrator.
+- **One tool call per message on Ollama:** parallel-call benchmarks (bfcl `parallel_*`) score
+  low, and subagents run one after another. That is expected for this model and server.

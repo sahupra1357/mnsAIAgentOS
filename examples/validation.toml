@@ -237,7 +237,7 @@ benchmarks = ["gsm8k"]
 [[feature]]
 name = "providers"
 description = "Model gateway and adapters: llama.cpp, Ollama, Modal, LiteLLM, reasoning, gateway options"
-tests = ["test_model_gateway", "test_providers", "test_gateway_ops", "test_litellm", "test_reasoning",
+tests = ["test_model_gateway", "test_providers", "test_gateway_ops", "test_litellm", "test_reasoning", "test_tool_name_recovery",
          "test_self_contained_profiles"]
 smoke = ["default"]
 benchmarks = ["bfcl"]
