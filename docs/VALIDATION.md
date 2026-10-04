@@ -151,8 +151,10 @@ Both have commented entries at the end of `examples/validation.toml`.
 
 **Parallel items:** gsm8k, bfcl, and humaneval set `concurrency = 3`, so three items are in
 flight at once. llama.cpp parallel slots, vLLM, and SGLang batch concurrent requests on the
-GPU (continuous batching), so throughput rises about 2-3x and every item's result stays the
-same. Ollama gains only with `OLLAMA_NUM_PARALLEL` of 3 or more. The context and memory
+GPU (continuous batching), so every item's result stays the same and the run is faster. Measured:
+bfcl on llama.cpp (27B Q4 on a Mac) went from 8:46 to 6:00 at the same accuracy (0.950). A
+Mac is memory-bandwidth bound, so the gain is about 1.5x; datacenter GPUs (vLLM on Modal)
+gain more. Ollama gains only with `OLLAMA_NUM_PARALLEL` of 3 or more. The context and memory
 benchmarks stay at 1, because they fill the context window on purpose.
 
 **Why not the samples:** with the 3-item samples, a single miss moved accuracy by 33 points,
