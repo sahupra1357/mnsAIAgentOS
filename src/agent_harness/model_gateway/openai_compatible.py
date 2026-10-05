@@ -39,6 +39,7 @@ from .errors import (
     ThrottlingError,
     context_overflow_error,
 )
+from .system_messages import single_system_message
 from .tool_names import recover_tool_names
 from .transport import (
     HttpResponse,
@@ -103,6 +104,7 @@ class OpenAICompatibleClient:
         return self._profile
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        request = single_system_message(request)  # one system message, first (chat templates)
         if request.timeout_seconds is not None and request.timeout_seconds <= 0:
             raise ModelConfigurationError("model request timeout_seconds must be greater than zero")
         if request.max_output_tokens is not None and request.max_output_tokens <= 0:
@@ -184,6 +186,7 @@ class OpenAICompatibleClient:
         are not retried here: text may already have been shown, so the
         orchestrator's attempt budget decides whether to retry the whole call.
         """
+        request = single_system_message(request)  # one system message, first (chat templates)
 
         post_stream = getattr(self._transport, "post_stream", None)
         if post_stream is None:
@@ -330,6 +333,7 @@ class OpenAICompatibleClient:
     async def count_input_tokens(self, request: ModelRequest) -> int | None:
         """The server's token count for this request, or None (estimate mode, or any failure)."""
 
+        request = single_system_message(request)  # one system message, first (chat templates)
         if self._profile.token_counting != "server" or not self.supports_token_counting:
             return None
         try:

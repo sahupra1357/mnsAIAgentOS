@@ -497,6 +497,17 @@ class ModelGuardTests(unittest.IsolatedAsyncioTestCase):
         finished = await start(orchestrator(model, config=config), "hi")
         self.assertEqual(finished.messages[-1].content, REFUSAL)
 
+    async def test_prefilled_guard_reply_is_a_clear_guard_error(self) -> None:
+        # Phase 20: llama.cpp prefills a final assistant message unless --no-prefill-assistant.
+        model = Scripted([text("The answer is 42.")], ["safe", "The answer is 42.safe"])
+        orch = orchestrator(model, config=self.config())
+        finished = await start(orch, "what is the answer")
+        self.assertEqual(finished.messages[-1].content, "The answer is 42.")  # on_error = "allow"
+        decided = [e.payload for e in await orch._store.list_events(finished.id)
+                   if e.type is EventType.GUARDRAIL_DECIDED]
+        self.assertEqual(decided[-1]["category"], "guard_error")
+        self.assertIn("--no-prefill-assistant", decided[-1]["error"])
+
     def test_action_is_validated(self) -> None:
         self.assertEqual(GuardrailsConfig.from_mapping({"model": {"action": "flag"}}).model.action, "flag")
         self.assertEqual(GuardrailsConfig.from_mapping({}).model.action, "block")  # default unchanged

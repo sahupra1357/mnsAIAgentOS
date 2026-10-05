@@ -41,6 +41,15 @@ branch on a provider name. Read `skills/model-gateway/SKILL.md` as well.
 - Context is fixed by `-c` at server start, and `-c` is split across `--parallel` slots.
   Set profile `context_window` to the per-slot value.
 - Usage tokens are returned; cost is zero.
+- **One system message (Phase 20):** Qwen 3.x templates (llama.cpp `--jinja`, vLLM, SGLang)
+  raise "System message must be at the beginning" when a request has two. Runs start with
+  several (instruction files, system prompt, plan instructions, canary), so every client
+  merges the leading system messages before sending (`model_gateway/system_messages.py`).
+- **Guard model needs `--no-prefill-assistant`:** llama.cpp continues a final assistant
+  message by default, and the output guard sends `[user, assistant]`. Llama Guard then never
+  sees its instructions and echoes the reply. Set it for the guard model only, e.g. in a router
+  preset section: `no-prefill-assistant = true` (applied when the router restarts). The harness
+  reports an echoed reply as a `guard_error` that names the flag.
 
 ## Modal-hosted models
 

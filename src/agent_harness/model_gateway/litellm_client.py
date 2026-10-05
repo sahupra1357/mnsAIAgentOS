@@ -34,6 +34,7 @@ from agent_harness.domain import (
     RetryableModelError,
 )
 
+from .system_messages import single_system_message
 from .tool_names import recover_tool_names
 from .errors import (
     AuthenticationError,
@@ -109,6 +110,7 @@ class LiteLLMClient(OpenAICompatibleClient):
             raise ModelConfigurationError("model request max_output_tokens must be greater than zero")
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        request = single_system_message(request)  # one system message, first (chat templates)
         self._validate(request)
         module = self._litellm()
         timeout = self._effective_timeout(request)
@@ -142,6 +144,7 @@ class LiteLLMClient(OpenAICompatibleClient):
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelStreamEvent]:
         """Stream via ``acompletion(stream=True)``; not retried (text may be shown)."""
 
+        request = single_system_message(request)  # one system message, first (chat templates)
         self._validate(request)
         module = self._litellm()
         timeout = self._effective_timeout(request)
