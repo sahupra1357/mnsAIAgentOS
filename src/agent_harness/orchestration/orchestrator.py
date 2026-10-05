@@ -3209,13 +3209,15 @@ class AgentOrchestrator:
             run.consumed_tokens += tokens  # the guard model counts against the budget
         if verdict.error is None and verdict.safe:
             return [], False
+        # An unsafe verdict blocks unless [guardrails.model] action = "flag".
+        blocked = not verdict.safe and (verdict.error is not None or guard.config.model.action == "block")
         payload: dict[str, Any] = {
             "stage": stage, "detector": "model", "category": ",".join(verdict.categories) or "unsafe",
-            "action": "flag" if verdict.safe else "block", "count": 1,
+            "action": "block" if blocked else "flag", "count": 1,
         }
         if verdict.error is not None:
             payload["error"] = verdict.error[:200]
-        return [self._guard_event(run, payload)], not verdict.safe
+        return [self._guard_event(run, payload)], blocked
 
     async def _refuse(
         self, run: RunRecord, events: list[RunEvent], stage: str, annotations: Sequence[RunEvent]

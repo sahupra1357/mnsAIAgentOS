@@ -648,6 +648,18 @@ notifications, worker, `ui/`), `observability/` (telemetry, redaction), `cli/` (
 `agent_harness.cli.main:main`; tests import the CLI as `import agent_harness.cli.main as cli`.
 An installed `agent-harness` script must be reinstalled (`pip install -e .`).
 
+**Phase 19 – Guard model flag mode** [guardrails] — on `phase-19-guard-flag` (stacked on Phase 18)
+- **Why:** Llama Guard 3 1B misreads code. Measured on 30 coding prompts, it wrongly flagged 8–10,
+  for example "Explain src/agent_harness/cli/repl.py" as `violent_crimes`. The 8B flagged none and
+  caught 12 of 12 harmful prompts.
+- **Memory:** the 8B does not fit next to the 27B chat model on a 36 GB Mac (about 23 + 5.5 GB).
+- **The setting:** `[guardrails.model] action = "block" | "flag"`. The default is `block`, so
+  behavior is unchanged. With `flag`, an unsafe verdict becomes a `guardrail_decided` event with
+  `action: flag`, and the turn continues.
+- **Guard failures:** `on_error` still decides them on its own.
+- **Root config:** `action = "flag"` (llamacpp keeps the 1B). The ollama profile uses
+  `llama-guard3:8b`; set `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block` with it.
+
 ## Validation
 
 `docs/VALIDATION.md` describes six stages: static, unit, scenarios, smoke, benchmarks,

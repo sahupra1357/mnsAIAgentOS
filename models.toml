@@ -52,7 +52,9 @@ timeout_seconds = 600
 max_retries = 1
 embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"   # same router
 # embedding_endpoint = "http://127.0.0.1:8081/v1"            # only for a separate server
-guard_model = "QuantFactory/Llama-Guard-3-1B-GGUF:Q4_K_M"   # Llama Guard in the same router
+# Llama Guard 1B in the same router: the 8B does not fit next to the 27B chat model on a 36 GB
+# Mac (about 23 + 5.5 GB), so this profile keeps the 1B with [guardrails.model] action = "flag".
+guard_model = "QuantFactory/Llama-Guard-3-1B-GGUF:Q4_K_M"
 # fallback = ["ollama"]          # opt-in only: crossing providers breaks "one profile"
 
 [models.llamacpp.parameters]
@@ -60,7 +62,9 @@ temperature = 0.2
 max_tokens = 2048
 
 # Ollama: `ollama serve`, then `ollama pull gpt-oss:20b`, `ollama pull nomic-embed-text`, and
-# `ollama pull llama-guard3:1b`. One server, three model names: chat, embeddings, guard.
+# `ollama pull llama-guard3:8b`. One server, three model names: chat, embeddings, guard.
+# Memory: about 13 + 5.5 + 0.3 GB, which fits a 36 GB Mac (the 8B guard is far more accurate
+# than the 1B; see [guardrails.model]).
 [models.ollama]
 enabled = true
 adapter = "ollama"
@@ -71,7 +75,7 @@ context_window = 8192
 timeout_seconds = 180
 max_retries = 1
 embedding_model = "nomic-embed-text"
-guard_model = "llama-guard3:1b"
+guard_model = "llama-guard3:8b"
 
 [models.ollama.parameters]
 temperature = 0.2
@@ -333,6 +337,15 @@ pii = "redact"
 injection = "redact"
 taint = true                     # side-effect tools need approval after untrusted output
 
+# Llama Guard (the default profile's guard_model) checks input and output. "flag" records an
+# unsafe verdict as a guardrail_decided event and lets the turn go on; "block" refuses.
+# Measured 2026-10-04 on 30 coding prompts: Llama Guard 3 1B wrongly flags 8-10 of them
+# (e.g. "Explain src/agent_harness/cli/repl.py" as violent_crimes); 8B flags none and caught
+# 12/12 harmful prompts. Keep "flag" with the 1B; use "block" with the 8B (the ollama profile):
+#   AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block
+[guardrails.model]
+action = "flag"
+
 # --- Network, redaction, quotas, API --------------------------------------------
 # Egress allowlist for HTTP tools, web search, web_fetch, and MCP over HTTP (not for
 # model endpoints). Add the hosts you want web_fetch to reach.
@@ -384,12 +397,6 @@ webhook_url = ""
 # command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "./docs"]
 # read_only = ["read_file", "read_text_file", "list_directory", "search_files", "get_file_info"]
 # sync_on_start = true
-#
-# Llama Guard classifier: already on. The default profile's guard_model is used for
-# input and output ([guardrails.model] defaults). To tune it:
-# [guardrails.model]
-# check = ["input", "output"]
-# on_error = "allow"             # or "block" when the guard model fails
 #
 # Postgres storage (needs the [postgres] extra and a server):
 # [storage]
