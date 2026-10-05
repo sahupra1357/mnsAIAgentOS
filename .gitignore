@@ -1,6 +1,10 @@
 __pycache__/
 *.py[cod]
 *.sqlite3
+# SQLite's write-ahead log and shared-memory companions (run data)
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
 *.db
 .env
 .venv/
