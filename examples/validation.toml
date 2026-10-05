@@ -287,7 +287,7 @@ benchmarks = ["agents"]
 name = "extensibility"
 description = "Instruction files, skills, templates, layered settings, plugins, rewind, full config"
 tests = ["test_instructions_settings_plugins", "test_instruction_discovery", "test_rewind",
-         "test_full_config"]
+         "test_full_config", "test_repo_hygiene"]
 scenarios = ["skill_loading", "plan_mode_then_edit"]
 
 [[feature]]
