@@ -175,6 +175,11 @@ class Guardrails:
         except HarnessError as exc:
             return self._on_error(f"guard model failed: {exc}")
         verdict = parse_llama_guard(response.content)
+        if verdict is None and assistant_text and _prefilled(response.content, assistant_text):
+            # llama.cpp continues a final assistant message by default, so Llama Guard never
+            # sees its instructions; the verdict would be meaningless.
+            return self._on_error("the guard server continued the assistant message instead of "
+                                  "classifying it; start it with --no-prefill-assistant")
         if verdict is None:
             return self._on_error(f"unexpected guard model reply: {response.content[:80]!r}")
         safe, categories = verdict
@@ -182,6 +187,13 @@ class Guardrails:
 
     def _on_error(self, message: str) -> ModelVerdict:
         return ModelVerdict(self.config.model.on_error == "allow", ("guard_error",), error=message)
+
+
+def _prefilled(content: str, assistant_text: str) -> bool:
+    """The reply starts by repeating the assistant message: the server prefilled it."""
+
+    head = assistant_text.strip()[:200]
+    return bool(head) and content.strip().startswith(head)
 
 
 def parse_llama_guard(content: str) -> tuple[bool, tuple[str, ...]] | None:

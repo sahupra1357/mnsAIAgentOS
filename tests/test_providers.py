@@ -526,6 +526,57 @@ class ModalClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(transport.calls), 1)
 
 
+class SingleSystemMessageTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 20: Qwen 3.x templates reject a second system message, so clients send one."""
+
+    MESSAGES = (
+        Message(Role.SYSTEM, "## Instructions from AGENTS.md"),
+        Message(Role.SYSTEM, "You are a careful coding agent."),
+        Message(Role.USER, "what is the weather in pittsburgh"),
+    )
+    MERGED = "## Instructions from AGENTS.md\n\nYou are a careful coding agent."
+
+    def test_helper(self) -> None:
+        from agent_harness.model_gateway.system_messages import single_system_message
+
+        merged = single_system_message(ModelRequest(messages=self.MESSAGES))
+        self.assertEqual([(m.role, m.content) for m in merged.messages],
+                         [(Role.SYSTEM, self.MERGED), (Role.USER, "what is the weather in pittsburgh")])
+        one = ModelRequest(messages=self.MESSAGES[1:])
+        self.assertIs(single_system_message(one), one)  # nothing to merge: unchanged
+        later = ModelRequest(messages=(*self.MESSAGES, Message(Role.SYSTEM, "late note")))
+        self.assertEqual([m.role for m in single_system_message(later).messages],
+                         [Role.SYSTEM, Role.USER, Role.SYSTEM])  # only the leading ones merge
+
+    async def test_every_adapter_sends_one_leading_system_message(self) -> None:
+        clients = {
+            "openai_compatible": lambda t: OpenAICompatibleClient(make_profile(), transport=t, environ={}),
+            "llama_cpp": lambda t: LlamaCppClient(make_profile(adapter="llama_cpp"), transport=t, environ={}),
+            "ollama": lambda t: OllamaClient(make_profile(adapter="ollama"), transport=t, environ={}),
+            "modal": lambda t: ModalClient(modal_profile(), transport=t, environ=MODAL_ENV),
+        }
+        for name, build in clients.items():
+            with self.subTest(name):
+                transport = FakeTransport([text_completion("ok")])
+                await build(transport).complete(ModelRequest(messages=self.MESSAGES))
+                sent = transport.calls[0][1]["messages"]  # type: ignore[index]
+                self.assertEqual([m["role"] for m in sent], ["system", "user"])
+                self.assertEqual(sent[0]["content"], self.MERGED)
+
+    async def test_ollama_native_mode_and_llama_cpp_token_counting(self) -> None:
+        transport = FakeTransport([json_response({"message": {"role": "assistant", "content": "ok"},
+                                                  "done": True, "done_reason": "stop"})])
+        native = OllamaClient(make_profile(adapter="ollama", api_mode="native"), transport=transport, environ={})
+        await native.complete(ModelRequest(messages=self.MESSAGES))
+        self.assertEqual([m["role"] for m in transport.calls[0][1]["messages"]], ["system", "user"])  # type: ignore[index]
+        transport = FakeTransport([json_response({"prompt": "rendered"}), json_response({"tokens": [1, 2, 3]})])
+        client = LlamaCppClient(make_profile(adapter="llama_cpp", token_counting="server"),
+                                transport=transport, environ={})
+        self.assertEqual(await client.count_input_tokens(ModelRequest(messages=self.MESSAGES)), 3)
+        rendered = transport.calls[0][1]["messages"]  # type: ignore[index]
+        self.assertEqual([m["role"] for m in rendered], ["system", "user"])
+
+
 class GatewayRegistrationTests(unittest.TestCase):
     def test_builtin_adapters_resolve_to_provider_clients(self) -> None:
         config = HarnessConfig(

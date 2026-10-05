@@ -660,6 +660,18 @@ An installed `agent-harness` script must be reinstalled (`pip install -e .`).
 - **Root config:** `action = "flag"` (llamacpp keeps the 1B). The ollama profile uses
   `llama-guard3:8b`; set `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block` with it.
 
+**Phase 20 – llama.cpp end-to-end fixes** [llm-providers, model-gateway, guardrails] — on `phase-20-single-system-message` (stacked on Phase 19)
+- **One system message:** the first real llama.cpp run failed. Runs start with two or more system
+  messages, and the Qwen 3.x template raises "System message must be at the beginning".
+  `single_system_message()` merges the leading system messages in every client: the
+  OpenAI-compatible family's `complete`, `stream`, and `count_input_tokens`, and LiteLLM. Stored
+  history is unchanged.
+- **Guard prefill:** llama.cpp prefills a final assistant message, so the output guard got its
+  reply echoed back. The guard model needs `--no-prefill-assistant` (preset:
+  `no-prefill-assistant = true`), and an echoed reply is now a `guard_error` naming the flag.
+- **Earlier claims corrected:** the "live on llama.cpp" checks in Phases 17–19 ran on Modal
+  (`.env` had `AGENT_HARNESS_MODEL_PROFILE=modal`).
+
 ## Validation
 
 `docs/VALIDATION.md` describes six stages: static, unit, scenarios, smoke, benchmarks,
