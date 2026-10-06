@@ -14,7 +14,7 @@ from uuid import uuid4
 from agent_harness.domain import Message, ModelRequest, Role
 
 from .errors import ModelConfigurationError
-from .openai_compatible import OpenAICompatibleClient, schema_instruction
+from .openai_compatible import OpenAICompatibleClient, merge_extra_body, schema_instruction
 
 
 # Native /api/chat keys that belong at the top level rather than in ``options``.
@@ -96,6 +96,7 @@ class OllamaClient(OpenAICompatibleClient):
             else:
                 # Native structured outputs; /api/chat has no tool_choice, so it is not sent.
                 payload["format"] = request.response_schema
+        merge_extra_body(payload, request)
         return payload
 
     def _preprocess_response(self, raw: dict[str, Any]) -> dict[str, Any]:

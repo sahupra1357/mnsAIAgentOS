@@ -210,6 +210,14 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.usage.cost_usd, 0.0123)
         self.assertEqual(response.metadata["cost_source"], "litellm")
 
+    async def test_extra_body_is_nested_for_litellm(self) -> None:
+        module = fake_litellm([FakeResponse(completion(content="summary"))])
+        await LiteLLMClient(profile(), module=module, environ=ENV).complete(ModelRequest(
+            messages=(), extra_body={"chat_template_kwargs": {"enable_thinking": False}}))
+        call = module.calls[0]  # type: ignore[attr-defined]
+        self.assertNotIn("chat_template_kwargs", call)
+        self.assertEqual(call["extra_body"], {"chat_template_kwargs": {"enable_thinking": False}})
+
     async def test_no_endpoint_means_no_api_base_and_missing_key_fails_first(self) -> None:
         module = fake_litellm([FakeResponse(completion())])
         await LiteLLMClient(profile(), module=module, environ=ENV).complete(ModelRequest(messages=()))

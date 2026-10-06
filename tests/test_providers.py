@@ -577,6 +577,35 @@ class SingleSystemMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m["role"] for m in rendered], ["system", "user"])
 
 
+class ExtraBodyTests(unittest.IsolatedAsyncioTestCase):
+    """A request's extra_body fields reach the payload; adapter-owned fields are kept."""
+
+    async def test_every_adapter_merges_extra_body(self) -> None:
+        extra = {"chat_template_kwargs": {"enable_thinking": False}, "model": "hijack", "messages": []}
+        request = ModelRequest(messages=(Message(Role.USER, "summarize"),), extra_body=extra)
+        native_reply = json_response({"message": {"role": "assistant", "content": "ok"}, "done": True})
+        clients = {
+            "openai_compatible": (lambda t: OpenAICompatibleClient(make_profile(), transport=t, environ={}),
+                                  text_completion("ok")),
+            "llama_cpp": (lambda t: LlamaCppClient(make_profile(adapter="llama_cpp"), transport=t, environ={}),
+                          text_completion("ok")),
+            "ollama native": (lambda t: OllamaClient(make_profile(adapter="ollama", api_mode="native"),
+                                                     transport=t, environ={}), native_reply),
+        }
+        for name, (build, reply) in clients.items():
+            with self.subTest(name):
+                transport = FakeTransport([reply])
+                await build(transport).complete(request)
+                payload = transport.calls[0][1]
+                self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})  # type: ignore[index]
+                self.assertEqual(payload["model"], "test-model")  # type: ignore[index]
+                self.assertEqual(len(payload["messages"]), 1)  # type: ignore[index,arg-type]
+        transport = FakeTransport([text_completion("ok")])
+        await OpenAICompatibleClient(make_profile(), transport=transport, environ={}).complete(
+            ModelRequest(messages=(Message(Role.USER, "hi"),)))
+        self.assertNotIn("chat_template_kwargs", transport.calls[0][1])  # unchanged without extra_body
+
+
 class GatewayRegistrationTests(unittest.TestCase):
     def test_builtin_adapters_resolve_to_provider_clients(self) -> None:
         config = HarnessConfig(

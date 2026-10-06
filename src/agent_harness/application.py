@@ -389,6 +389,8 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         context_overflow_patterns=section.context_overflow_patterns,
         current_date_note=section.current_date_note,
         reserve_tokens_per_run=section.reserve_tokens_per_run or None,
+        turn_max_steps=section.turn_max_steps or None,
+        turn_max_wall_seconds=section.turn_max_wall_seconds or None,
     )
 
 
@@ -615,6 +617,7 @@ def _summarizer(
         return ContextSummarizer(
             profile=profile,
             max_output_tokens=section.max_output_tokens,
+            parameters=section.parameters,
             max_input_chars=section.max_input_chars or 48_000,
             input_chars=None if section.max_input_chars else summary_input_chars(limits, policy),
         )

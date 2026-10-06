@@ -90,6 +90,10 @@ class LiteLLMClient(OpenAICompatibleClient):
 
     def _call_kwargs(self, request: ModelRequest, timeout: float) -> dict[str, Any]:
         kwargs: dict[str, Any] = dict(self._build_payload(request))
+        if request.extra_body:  # provider-specific fields travel in LiteLLM's extra_body
+            extra = {key: kwargs.pop(key) for key in request.extra_body if key in kwargs}
+            if extra:
+                kwargs["extra_body"] = {**kwargs.get("extra_body", {}), **extra}
         kwargs["num_retries"] = 0
         kwargs["timeout"] = timeout
         if self._profile.endpoint.strip():

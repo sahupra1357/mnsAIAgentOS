@@ -355,6 +355,54 @@ class DateNoteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(orchestrator_settings(OrchestratorConfig(current_date_note=True)).current_date_note)
 
 
+class TurnBudgetTests(unittest.IsolatedAsyncioTestCase):
+    """[orchestrator] turn_max_*: a budget per turn for new runs and plain continuations."""
+
+    def harness(self, model: Model, store: InMemoryRunStore, clock: Clock, **settings: Any) -> AgentOrchestrator:
+        from agent_harness.orchestration.orchestrator import OrchestratorSettings
+
+        return orchestrator(model, store, clock=clock, settings=OrchestratorSettings(**settings))
+
+    async def test_new_runs_and_each_continuation_get_the_turn_allowance(self) -> None:
+        clock, store = Clock(), InMemoryRunStore()
+        harness = self.harness(Model([answer("one"), answer("two")]), store, clock,
+                               turn_max_steps=40, turn_max_wall_seconds=900)
+        run = await harness.create_run(model_profile="p", messages=[Message(Role.USER, "q")])
+        self.assertEqual((run.budget.max_steps, run.budget.max_wall_seconds), (40, 900))
+        await harness.run(run.id)
+        clock.now += timedelta(hours=1)  # idle time is not counted
+        continued = await harness.continue_run(run.id, "again")  # no budget passed, as /ui does
+        self.assertEqual(continued.budget.max_steps, 1 + 40)
+        self.assertEqual(continued.budget.max_wall_seconds, 900)  # 0 s active so far + 900
+        self.assertEqual((await harness.run(run.id)).status, RunStatus.COMPLETED)
+
+    async def test_follow_up_after_budget_exhausted_gets_a_fresh_turn(self) -> None:
+        clock, store = Clock(), InMemoryRunStore()
+        harness = self.harness(Model([call("lookup", "c1"), answer("done")]), store, clock, turn_max_steps=1)
+        run = await harness.create_run(model_profile="p", messages=[Message(Role.USER, "q")])
+        self.assertEqual((await harness.run(run.id)).status, RunStatus.BUDGET_EXHAUSTED)
+        await harness.continue_run(run.id, "please finish")  # before: "pass a larger budget"
+        self.assertEqual((await harness.run(run.id)).status, RunStatus.COMPLETED)
+
+    async def test_unset_keeps_the_old_behavior(self) -> None:
+        clock, store = Clock(), InMemoryRunStore()
+        harness = self.harness(Model([answer("one")]), store, clock)
+        run = await harness.create_run(model_profile="p", messages=[Message(Role.USER, "q")])
+        self.assertEqual((run.budget.max_steps, run.budget.max_wall_seconds), (20, 300.0))
+        await harness.run(run.id)
+        self.assertEqual((await harness.continue_run(run.id, "again")).budget.max_steps, 20)
+
+    def test_config_switch(self) -> None:
+        from agent_harness.application import orchestrator_settings
+        from agent_harness.config.loader import ConfigError, OrchestratorConfig
+
+        settings = orchestrator_settings(OrchestratorConfig(turn_max_steps=40, turn_max_wall_seconds=900))
+        self.assertEqual((settings.turn_max_steps, settings.turn_max_wall_seconds), (40, 900))
+        self.assertIsNone(orchestrator_settings(OrchestratorConfig()).turn_max_steps)
+        with self.assertRaises(ConfigError):
+            OrchestratorConfig(turn_max_wall_seconds=-1)
+
+
 class CliTests(unittest.TestCase):
     def test_run_continue_status_steer_cancel(self) -> None:
         transport = Transport(["first answer", "second answer"])

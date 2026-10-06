@@ -220,6 +220,24 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(derived.input_limit("p"), int((4096 - 512 - 256) * 3.5 * 0.75))
         self.assertEqual(derived.input_limit("other"), 48_000)
 
+    def test_parameters_ride_on_summary_requests_only(self) -> None:
+        # A thinking model spends the output allowance thinking unless the summary call
+        # turns thinking off; only this request carries the extra fields.
+        off = {"chat_template_kwargs": {"enable_thinking": False}}
+        request = ContextSummarizer(parameters=off).request(None, history(2)[2:], profile="p")
+        self.assertEqual(request.extra_body, off)
+        self.assertIsNone(ContextSummarizer().request(None, history(2)[2:], profile="p").extra_body)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "m.toml")
+            path.write_text(MODEL + "[summarization]\nenabled = true\n"
+                            "parameters = { chat_template_kwargs = { enable_thinking = false } }\n",
+                            encoding="utf-8")
+            self.assertEqual(dict(load_config(path).summarization.parameters), off)
+            with mock.patch.dict(os.environ, HERMETIC):
+                app = build_application(config_path=path, database_path=Path(directory, "db.sqlite3"))
+            self.assertEqual(dict(app.orchestrator._summarizer.parameters), off)
+            asyncio.run(app.close())
+
     def test_validation(self) -> None:
         for kwargs in ({"max_output_tokens": 0}, {"max_input_chars": 10}, {"max_message_chars": 10}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
