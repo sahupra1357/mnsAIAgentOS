@@ -512,6 +512,7 @@ def _load_tool_sources(
                 max_results=config.web_search.max_results,
                 search_depth=config.web_search.search_depth,
                 timeout_seconds=config.web_search.timeout_seconds,
+                max_chars_per_result=config.web_search.max_chars_per_result,
             ).load(runtime, host_policy=host_policy)
         if config.web_fetch.enabled:
             WebFetchSource(

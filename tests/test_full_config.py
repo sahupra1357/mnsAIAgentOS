@@ -125,6 +125,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertNotIn("Agent Harness Collaboration Guide", context.text)
         self.assertLess(len(context.text), 1500)
         self.assertEqual(c.web_search.max_results, 3)
+        self.assertEqual(c.web_search.max_chars_per_result, 800)
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date
 
     def test_live_files_are_tracked_not_ignored(self) -> None:

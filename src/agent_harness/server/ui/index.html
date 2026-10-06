@@ -375,6 +375,13 @@ async function stream() {
   if (key) headers.authorization = "Bearer " + key;
   let live = null;
   let liveText = "";
+  let liveReasoning = "";
+  const paintLive = () => {
+    if (!live) { live = message("assistant", ""); $("chat").append(live); }
+    const parts = liveReasoning ? [el("div", { class: "reasoning" }, liveReasoning)] : [];
+    live.firstChild.replaceChildren(...parts, renderText(liveText));
+    $("chat").scrollTop = $("chat").scrollHeight;
+  };
   try {
     const response = await fetch(`/runs/${runId}/stream?after=${state.events}`, { headers, signal: controller.signal });
     if (!response.ok) throw new Error(`${response.status}: stream failed`);
@@ -397,17 +404,18 @@ async function stream() {
         const parsed = data ? JSON.parse(data) : null;
         if (runId !== state.runId) return;
         if (name === "delta" && parsed && parsed.type === "text") {
-          if (!live) { live = message("assistant", ""); $("chat").append(live); }
           liveText += parsed.text;
-          live.firstChild.replaceChildren(renderText(liveText));
-          $("chat").scrollTop = $("chat").scrollHeight;
+          paintLive();
+        } else if (name === "delta" && parsed && parsed.type === "reasoning") {
+          liveReasoning += parsed.text;  // the model's thinking, shown as it is written
+          paintLive();
         } else if (name === "end") {
           await refresh();
           loadRuns();
           return;
         } else if (parsed && typeof parsed.index === "number") {
           addEvent(parsed);
-          if (name === "model_responded" || name === "tool_responded" || name === "approval_requested") { live = null; liveText = ""; await refresh(); }
+          if (name === "model_responded" || name === "tool_responded" || name === "approval_requested") { live = null; liveText = ""; liveReasoning = ""; await refresh(); }
         }
       }
     }

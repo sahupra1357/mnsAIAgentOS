@@ -216,6 +216,28 @@ class HttpSourceTests(unittest.IsolatedAsyncioTestCase):
         refused = await unconfigured.execute(ToolCall("c", "web_search", {"query": "q"}), idempotency_key="k")
         self.assertIn("TAVILY_API_KEY", refused.model_message)
 
+    async def test_web_search_snippets_are_clipped_at_a_word(self) -> None:
+        long = "Pittsburgh weather today: " + "sunny and mild " * 100
+        transport = FakeTransport(ok_json({"results": [
+            {"title": "Long", "url": "https://a.example", "content": long},
+            {"title": "Short", "url": "https://b.example", "content": "Clear, 12 C."}]}))
+        runtime = ToolRuntime(ToolRegistry())
+        WebSearchSource(max_chars_per_result=200).load(runtime, transport=transport,
+                                                       environ={"TAVILY_API_KEY": "tvly-test"})
+        result = await runtime.execute(ToolCall("c", "web_search", {"query": "weather"}), idempotency_key="k")
+        clipped, short = (item["content"] for item in result.output["results"])
+        self.assertLessEqual(len(clipped), 202)
+        self.assertTrue(clipped.endswith(" \u2026"))
+        self.assertTrue(long.startswith(clipped[:-2]))  # a prefix of the original, cut at a word
+        self.assertEqual(short, "Clear, 12 C.")
+
+    def test_web_search_snippet_limit_is_validated(self) -> None:
+        from agent_harness.config.loader import ConfigError, WebSearchConfig
+
+        self.assertEqual(WebSearchConfig().max_chars_per_result, 2000)  # default unchanged
+        with self.assertRaises(ConfigError):
+            WebSearchConfig(max_chars_per_result=10)
+
 
 class ConfigSourcesTests(unittest.TestCase):
     def test_python_source_and_config_validation(self) -> None:

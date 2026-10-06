@@ -639,6 +639,13 @@ class WebSearchConfig:
     max_results: int = 5
     search_depth: str = "basic"
     timeout_seconds: float = 20.0
+    # Characters of each result's snippet passed to the model. Every character is read by
+    # the model on each later turn, so shorter snippets make search answers faster.
+    max_chars_per_result: int = 2000
+
+    def __post_init__(self) -> None:
+        if self.max_chars_per_result < 100:
+            raise ConfigError("web_search.max_chars_per_result must be at least 100")
 
 
 @dataclass(frozen=True, slots=True)

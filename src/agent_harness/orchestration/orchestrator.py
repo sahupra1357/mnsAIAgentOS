@@ -3615,13 +3615,19 @@ class AgentOrchestrator:
         )
 
     def _should_stream(self, client: ModelClient) -> bool:
-        if self._guardrails is not None and self._guardrails.holds_output:
-            return False  # replies are checked first; an unchecked preview could leak
+        # Streams even when guardrails hold replies: the thinking is shown live (it is
+        # never scanned, and transcripts show it anyway), while the answer text is held
+        # until checked (``_holds_text``).
         return (
             self._stream_listener is not None
             and callable(getattr(client, "stream", None))
             and getattr(client, "supports_streaming", True) is True
         )
+
+    def _holds_text(self) -> bool:
+        """Replies are checked before they are recorded, so answer text is not previewed."""
+
+        return self._guardrails is not None and self._guardrails.holds_output
 
     async def _consume_stream(
         self, client: ModelClient, request: ModelRequest, run: RunRecord
@@ -3637,7 +3643,7 @@ class AgentOrchestrator:
                         on_reasoning(run.id, run.step_count, event.reasoning)
                     except Exception:  # noqa: BLE001 - display problems must not fail runs
                         pass
-            if event.text and self._stream_listener is not None:
+            if event.text and self._stream_listener is not None and not self._holds_text():
                 try:
                     self._stream_listener.on_text(run.id, run.step_count, event.text)
                 except Exception:  # noqa: BLE001 - display problems must not fail runs

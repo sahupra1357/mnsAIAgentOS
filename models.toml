@@ -301,7 +301,8 @@ max_chars = 20000
 [web_search]
 enabled = true
 api_key_env = "TAVILY_API_KEY"
-max_results = 3                  # each result adds ~550 tokens the model must read (~3.5 s on the 27B)
+max_results = 3
+max_chars_per_result = 800       # snippet length per result: ~3 x 230 tokens to read, not ~3 x 550
 
 [memory]
 enabled = true
