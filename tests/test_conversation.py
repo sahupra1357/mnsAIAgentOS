@@ -293,6 +293,68 @@ class Transport:
         return self.outcomes.popleft()
 
 
+class DateNoteTests(unittest.IsolatedAsyncioTestCase):
+    """Today's date rides on the user message, never in the cached system prefix."""
+
+    def setUp(self) -> None:
+        from agent_harness.orchestration.orchestrator import OrchestratorSettings
+
+        self.clock = Clock()
+        self.clock.now = datetime(2026, 10, 6, 12, tzinfo=UTC)
+        self.store = InMemoryRunStore()
+        self.settings = OrchestratorSettings(current_date_note=True)
+
+    async def test_first_message_carries_the_date_and_transcripts_hide_it(self) -> None:
+        from agent_harness.orchestration.date_note import date_note
+        from agent_harness.server.api import _transcript
+
+        model = Model([answer("Super Bowl LXI is in February 2027.")])
+        harness = orchestrator(model, self.store, clock=self.clock, settings=self.settings)
+        run = await harness.create_run(model_profile="p", messages=[
+            Message(Role.SYSTEM, "You are helpful."), Message(Role.USER, "when is the Super Bowl?")])
+        finished = await harness.run(run.id)
+        note = date_note(self.clock.now)
+        self.assertTrue(note.startswith("\n\n[Current date: "))
+        sent = [m for m in model.requests[0].messages if m.role is Role.USER]
+        self.assertEqual(sent[0].content, "when is the Super Bowl?" + note)
+        self.assertEqual(model.requests[0].messages[0].content, "You are helpful.")  # prefix untouched
+        self.assertEqual(_transcript(finished)[0]["content"], "when is the Super Bowl?")
+
+    async def test_continuations_get_a_note_only_on_a_new_day(self) -> None:
+        from agent_harness.orchestration.date_note import noted_date
+
+        model = Model([answer("one"), answer("two"), answer("three")])
+        harness = orchestrator(model, self.store, clock=self.clock, settings=self.settings)
+        run = await harness.create_run(model_profile="p", messages=[Message(Role.USER, "q")])
+        await harness.run(run.id)
+        self.clock.now += timedelta(minutes=5)
+        await harness.continue_run(run.id, "same day")
+        await harness.run(run.id)
+        self.clock.now += timedelta(days=1)
+        await harness.continue_run(run.id, "next day")
+        finished = await harness.run(run.id)
+        users = [m for m in finished.messages if m.role is Role.USER]
+        self.assertEqual(users[1].content, "same day")
+        self.assertIsNotNone(noted_date(users[2]))
+        self.assertNotEqual(noted_date(users[0]), noted_date(users[2]))
+
+    async def test_off_by_default_and_never_on_subagent_runs(self) -> None:
+        plain = orchestrator(Model([]), self.store, clock=self.clock)
+        run = await plain.create_run(model_profile="p", messages=[Message(Role.USER, "q")])
+        self.assertEqual(run.messages[-1].content, "q")
+        harness = orchestrator(Model([]), self.store, clock=self.clock, settings=self.settings)
+        child = await harness.create_run(model_profile="p", messages=[Message(Role.USER, "task")],
+                                         parent_run_id=run.id, depth=1)
+        self.assertEqual(child.messages[-1].content, "task")
+
+    def test_config_switch(self) -> None:
+        from agent_harness.application import orchestrator_settings
+        from agent_harness.config.loader import OrchestratorConfig
+
+        self.assertFalse(orchestrator_settings(OrchestratorConfig()).current_date_note)
+        self.assertTrue(orchestrator_settings(OrchestratorConfig(current_date_note=True)).current_date_note)
+
+
 class CliTests(unittest.TestCase):
     def test_run_continue_status_steer_cancel(self) -> None:
         transport = Transport(["first answer", "second answer"])
