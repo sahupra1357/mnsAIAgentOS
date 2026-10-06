@@ -363,19 +363,33 @@ class OutputGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((finished.messages[-1].content, finished.messages[-1].reasoning), ("fine answer", None))
 
     async def test_streaming_is_off_while_replies_are_checked(self) -> None:
+        # Answer text is never previewed while replies are checked. Since Phase 21 the
+        # model still streams, so its thinking is shown live; only that reaches the listener.
+        from agent_harness.domain import ModelStreamEvent
+
         class Listener:
+            def __init__(self) -> None:
+                self.reasoning: list[str] = []
+
             def on_text(self, run_id: str, step: int, text: str) -> None:
                 raise AssertionError("must not stream unchecked text")
+
+            def on_reasoning(self, run_id: str, step: int, text: str) -> None:
+                self.reasoning.append(text)
 
         class Streaming(Scripted):
             supports_streaming = True
 
-            async def stream(self, request: ModelRequest):  # pragma: no cover - must not be used
-                raise AssertionError("must not stream")
-                yield
+            async def stream(self, request: ModelRequest):
+                response = await self.complete(request)
+                yield ModelStreamEvent(reasoning="thinking about it")
+                yield ModelStreamEvent(text=response.content)
+                yield ModelStreamEvent(response=response)
 
-        finished = await start(orchestrator(Streaming([text("hi")]), stream_listener=Listener()), "hello")
+        listener = Listener()
+        finished = await start(orchestrator(Streaming([text("hi")]), stream_listener=listener), "hello")
         self.assertEqual(finished.messages[-1].content, "hi")
+        self.assertEqual(listener.reasoning, ["thinking about it"])
 
 
 class ToolGuardTests(unittest.IsolatedAsyncioTestCase):

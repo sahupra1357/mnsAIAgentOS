@@ -160,6 +160,7 @@ class WebSearchSource:
     search_depth: str = "basic"
     timeout_seconds: float = 20.0
     tool_name: str = "web_search"
+    max_chars_per_result: int = 2_000
 
     def spec(self) -> ToolSpec:
         return ToolSpec(
@@ -217,7 +218,7 @@ class WebSearchSource:
                     {
                         "title": str(item.get("title", "")),
                         "url": str(item.get("url", "")),
-                        "content": str(item.get("content", ""))[:2_000],
+                        "content": _clip(str(item.get("content", "")), self.max_chars_per_result),
                     }
                     for item in results
                     if isinstance(item, dict)
@@ -226,6 +227,16 @@ class WebSearchSource:
 
         runtime.register(self.spec(), web_search, source="web_search", source_kind="web_search")
 
+
+
+def _clip(text: str, limit: int) -> str:
+    """At most ``limit`` characters, cut at a word boundary, marked with an ellipsis."""
+
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    return (cut[:space] if space > limit // 2 else cut).rstrip() + " …"
 
 Fetch = Callable[[str, Mapping[str, str], float, int], Any]  # async -> HttpResponse (no redirects)
 Resolve = Callable[[str], Any]  # async host -> list of IP address strings

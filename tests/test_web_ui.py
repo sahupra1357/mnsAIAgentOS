@@ -61,6 +61,12 @@ class WebUiTests(unittest.TestCase):
         self.assertTrue(paths)
         self.assertEqual([p for p in sorted(paths) if not allowed.match(p)], [])
 
+    def test_live_thinking_is_shown_as_text(self) -> None:
+        # Reasoning deltas stream while answer text is held for the guardrails (Phase 21).
+        source = PAGE.read_text(encoding="utf-8")
+        self.assertIn('parsed.type === "reasoning"', source)
+        self.assertIn('el("div", { class: "reasoning" }, liveReasoning)', source)  # a text node
+
 
 if __name__ == "__main__":
     unittest.main()
