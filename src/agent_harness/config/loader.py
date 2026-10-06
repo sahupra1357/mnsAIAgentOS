@@ -567,8 +567,11 @@ class OrchestratorConfig:
     context_overflow_shrink: float = 0.5
     context_overflow_patterns: tuple[str, ...] = ()
     current_date_note: bool = False
+    reserve_tokens_per_run: int = 0  # 0: reserve everything left (see OrchestratorSettings)
 
     def __post_init__(self) -> None:
+        if self.reserve_tokens_per_run < 0:
+            raise ConfigError("orchestrator.reserve_tokens_per_run must not be negative")
         if self.max_model_attempts < 1 or self.max_tool_attempts < 1:
             raise ConfigError("orchestrator.max_model_attempts and max_tool_attempts must be at least 1")
         if min(self.max_identical_tool_calls, self.max_tool_calls_per_turn,

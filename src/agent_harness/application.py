@@ -388,6 +388,7 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         context_overflow_shrink=section.context_overflow_shrink,
         context_overflow_patterns=section.context_overflow_patterns,
         current_date_note=section.current_date_note,
+        reserve_tokens_per_run=section.reserve_tokens_per_run or None,
     )
 
 

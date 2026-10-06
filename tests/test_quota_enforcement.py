@@ -74,6 +74,53 @@ class ReservationTests(unittest.IsolatedAsyncioTestCase):
         created = next(e for e in await store.list_events(second.id) if e.type is EventType.RUN_CREATED)
         self.assertEqual(created.payload["quota_reservation"]["max_tokens"], 700)
 
+    async def test_capped_reservation_lets_several_runs_start(self) -> None:
+        # Without a cap the first open run reserves everything left, and any other run gets
+        # "no tokens left" (HTTP 429) until it finishes.
+        from agent_harness.orchestration.orchestrator import OrchestratorSettings
+
+        store = InMemoryRunStore()
+        quotas = {"acme": Quota("acme", max_tokens_per_day=1000)}
+        harness = orchestrator(store, TokenModel(300), quotas,
+                               settings=OrchestratorSettings(reserve_tokens_per_run=400))
+        first = await harness.create_run(model_profile="p", messages=message(), tenant="acme")
+        second = await harness.create_run(model_profile="p", messages=message(), tenant="acme")
+        self.assertIsNone(first.budget.max_tokens)  # the budget stays open
+        created = next(e for e in await store.list_events(first.id) if e.type is EventType.RUN_CREATED)
+        self.assertEqual(created.payload["quota_reservation"]["reserved_tokens"], 400)
+        third = await harness.create_run(model_profile="p", messages=message(), tenant="acme")
+        self.assertIsNone(third.budget.max_tokens)  # 200 left: reserved, still open
+        with self.assertRaisesRegex(QuotaExceededError, "no tokens left"):
+            await harness.create_run(model_profile="p", messages=message(), tenant="acme")
+        self.assertEqual((await harness.run(second.id)).status, RunStatus.COMPLETED)
+
+    async def test_open_budget_survives_long_conversations(self) -> None:
+        from agent_harness.orchestration.orchestrator import OrchestratorSettings
+
+        store = InMemoryRunStore()
+        quotas = {"acme": Quota("acme", max_tokens_per_day=100_000)}
+        harness = orchestrator(store, TokenModel(300), quotas,
+                               settings=OrchestratorSettings(reserve_tokens_per_run=200))
+        run = await harness.create_run(model_profile="p", messages=message(), tenant="acme")
+        for turn in range(3):  # each turn uses more than one reservation
+            finished = await harness.run(run.id)
+            self.assertEqual(finished.status, RunStatus.COMPLETED, turn)
+            await harness.continue_run(run.id, "and again")
+        self.assertGreater((await harness.run(run.id)).consumed_tokens, 200)
+        explicit = await harness.create_run(model_profile="p", messages=message(), tenant="acme",
+                                            budget=RunBudget(max_tokens=5000))
+        self.assertEqual(explicit.budget.max_tokens, 5000)  # explicit budgets are unchanged
+
+    def test_reservation_setting_from_config(self) -> None:
+        from agent_harness.application import orchestrator_settings
+        from agent_harness.config.loader import ConfigError, OrchestratorConfig
+
+        self.assertIsNone(orchestrator_settings(OrchestratorConfig()).reserve_tokens_per_run)
+        self.assertEqual(orchestrator_settings(OrchestratorConfig(reserve_tokens_per_run=200_000))
+                         .reserve_tokens_per_run, 200_000)
+        with self.assertRaises(ConfigError):
+            OrchestratorConfig(reserve_tokens_per_run=-1)
+
     async def test_concurrent_admissions_cannot_exceed_the_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             for store in (InMemoryRunStore(), SQLiteRunStore(Path(directory) / "runs.sqlite3")):
