@@ -221,9 +221,12 @@ max_plan_steps = 20
 max_replans = 2
 
 # --- Instructions, skills, templates, plugins -----------------------------------
+# Short chat-oriented instructions, sent with every run (~170 tokens). The repo's AGENTS.md
+# (a ~1,860-token developer guide) is not sent: it slowed every uncached first turn by ~12 s.
+# For coding sessions on this repo, add "AGENTS.md" back to the list.
 [instructions]
 enabled = true
-files = ["~/.agent-harness/AGENTS.md", "AGENTS.md"]
+files = ["~/.agent-harness/AGENTS.md", ".agent-harness/instructions/CHAT.md"]
 subdirectories = true
 
 [skills]
@@ -294,7 +297,7 @@ max_chars = 20000
 [web_search]
 enabled = true
 api_key_env = "TAVILY_API_KEY"
-max_results = 5
+max_results = 3                  # each result adds ~550 tokens the model must read (~3.5 s on the 27B)
 
 [memory]
 enabled = true

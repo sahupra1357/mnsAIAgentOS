@@ -28,6 +28,7 @@ bench-results/
 !.agent-harness/templates/
 !.agent-harness/tools/
 !.agent-harness/sandbox_tools/
+!.agent-harness/instructions/
 # Installed plugins stay local, except the one the root models.toml enables.
 !.agent-harness/plugins/
 .agent-harness/plugins/*

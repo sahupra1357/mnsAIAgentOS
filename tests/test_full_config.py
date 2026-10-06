@@ -110,9 +110,26 @@ class FullConfigTests(unittest.TestCase):
                 if "examples/" in line and not line.lstrip().startswith("#")]
         self.assertEqual(live, [])
 
+    def test_chat_instructions_and_search_size(self) -> None:
+        # The repo's developer guide (AGENTS.md, ~1,860 tokens) is not sent with every chat;
+        # a short chat file is. Fewer search results keep each tool turn small.
+        from agent_harness.extensions.instructions import SystemContextBuilder
+
+        c = self.config
+        self.assertNotIn("AGENTS.md", c.instructions.files)
+        self.assertIn(".agent-harness/instructions/CHAT.md", c.instructions.files)
+        context = SystemContextBuilder(instruction_files=c.instructions.files, base=ROOT,
+                                       subdirectory_filenames=c.instructions.filenames,
+                                       working_directory=lambda: ROOT)()
+        self.assertIn("use web_search before answering", context.text)
+        self.assertNotIn("Agent Harness Collaboration Guide", context.text)
+        self.assertLess(len(context.text), 1500)
+        self.assertEqual(c.web_search.max_results, 3)
+
     def test_live_files_are_tracked_not_ignored(self) -> None:
         c = self.config
         paths = [agent.prompt_file for agent in c.agents] + [hook.command[1] for hook in c.hooks]
+        paths += [f for f in c.instructions.files if not f.startswith("~")]
         paths += list(c.skills.paths) + list(c.templates.paths)
         paths += [source.path for source in c.tool_sources if source.path]
         ignored = subprocess.run(["git", "check-ignore", "--no-index", *paths], cwd=ROOT,
