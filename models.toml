@@ -123,6 +123,10 @@ max_refused_repeats = 2
 max_tool_calls_per_turn = 32
 context_overflow_retries = 2
 context_overflow_shrink = 0.5
+# Append "[Current date: Tuesday, 2026-10-06]" to the user message that starts a run (and
+# to a continuation on a later day). Models don't know the date; the system prompt stays
+# unchanged, so the prompt cache is unaffected.
+current_date_note = true
 
 [context]
 chars_per_token = 3.0            # code and JSON use more tokens per character

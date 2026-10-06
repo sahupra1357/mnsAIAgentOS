@@ -34,6 +34,7 @@ from agent_harness.orchestration.context import (
     estimate_tokens,
     fit_to_tokens,
 )
+from agent_harness.orchestration.date_note import date_note, last_noted_date, with_date_note
 from agent_harness.orchestration.planning import (
     AUTO_CREATE_PLAN_SPEC,
     CREATE_PLAN,
@@ -169,6 +170,9 @@ class OrchestratorSettings:
     context_overflow_retries: int = 2
     context_overflow_shrink: float = 0.5
     context_overflow_patterns: tuple[str, ...] = ()
+    # Append "[Current date: Tuesday, 2026-10-06]" to the user message that starts a
+    # top-level run (and to a continuation on a later day); see orchestration/date_note.py.
+    current_date_note: bool = False
 
     def __post_init__(self) -> None:
         if self.max_model_attempts < 1:
@@ -382,6 +386,11 @@ class AgentOrchestrator:
             initial_messages.insert(head, Message(role=Role.SYSTEM, content=PLANNER_INSTRUCTIONS))
         if self._guardrails is not None and self._guardrails.uses_canary:
             _add_canary(initial_messages)
+        if self._settings.current_date_note and parent_run_id is None:
+            last_user = next((i for i in range(len(initial_messages) - 1, -1, -1)
+                              if initial_messages[i].role is Role.USER), None)
+            if last_user is not None:
+                initial_messages[last_user] = with_date_note(initial_messages[last_user], self._clock())
         prompt_hook = await self._user_prompt_hook(identifier, initial_messages, model_profile)
 
         now = self._clock()
@@ -1111,6 +1120,10 @@ class AgentOrchestrator:
             )
         parts = tuple(ContentPart(image_url=url) for url in images)
         added = [Message(role=Role.USER, content=content, parts=parts)]
+        if self._settings.current_date_note and run.parent_run_id is None:
+            noted = last_noted_date(run.messages)
+            if noted is None or noted not in date_note(self._clock()):  # none yet, or a new day
+                added[0] = with_date_note(added[0], self._clock())
         _validate_message(added[0])
         prompt_hook = await self._user_prompt_hook(run.id, added, run.model_profile)
         run.status = RunStatus.RUNNING

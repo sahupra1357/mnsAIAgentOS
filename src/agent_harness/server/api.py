@@ -62,6 +62,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs
 
+from agent_harness.orchestration.date_note import strip_date_note
 from agent_harness.knowledge.artifacts import referenced_artifacts
 from agent_harness.server.access import Principal, PrincipalDirectory, Quota, QuotaExceeded, check_quota
 from agent_harness.server.notifications import notifier_from_config
@@ -976,7 +977,8 @@ def _transcript(run: RunRecord, *, with_reasoning: bool = False) -> list[dict[st
     turns: list[dict[str, Any]] = []
     for index, message in enumerate(run.messages):
         if message.role is Role.USER and not message.content.startswith("[Context from hooks]"):
-            user_turn: dict[str, Any] = {"index": index, "role": "user", "content": message.content}
+            user_turn: dict[str, Any] = {"index": index, "role": "user",
+                                         "content": strip_date_note(message.content)}
             if message.parts:
                 user_turn["images"] = [part.image_url for part in message.parts]
             turns.append(user_turn)

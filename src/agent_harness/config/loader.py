@@ -566,6 +566,7 @@ class OrchestratorConfig:
     context_overflow_retries: int = 2
     context_overflow_shrink: float = 0.5
     context_overflow_patterns: tuple[str, ...] = ()
+    current_date_note: bool = False
 
     def __post_init__(self) -> None:
         if self.max_model_attempts < 1 or self.max_tool_attempts < 1:
