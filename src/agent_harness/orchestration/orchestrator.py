@@ -177,8 +177,17 @@ class OrchestratorSettings:
     # quota per turn (None: everything left, which blocks every other run while it is
     # active). Its budget stays open; the daily quota is still checked at each step.
     reserve_tokens_per_run: int | None = None
+    # Steps and wall-clock seconds for a run created without a budget, and added for
+    # each continuation that does not pass one (budgets are cumulative across turns).
+    # None keeps RunBudget's defaults and leaves continuations' budgets unchanged.
+    turn_max_steps: int | None = None
+    turn_max_wall_seconds: float | None = None
 
     def __post_init__(self) -> None:
+        if self.turn_max_steps is not None and self.turn_max_steps < 1:
+            raise ValueError("turn_max_steps must be at least 1")
+        if self.turn_max_wall_seconds is not None and self.turn_max_wall_seconds <= 0:
+            raise ValueError("turn_max_wall_seconds must be positive")
         if self.reserve_tokens_per_run is not None and self.reserve_tokens_per_run < 1:
             raise ValueError("reserve_tokens_per_run must be at least 1")
         if self.max_model_attempts < 1:
@@ -356,7 +365,7 @@ class AgentOrchestrator:
         identifier = run_id or uuid4().hex
         _validate_identifier(identifier, "run_id")
         _validate_identifier(model_profile, "model_profile")
-        selected_budget = budget or RunBudget()
+        selected_budget = budget or self._default_budget()
         _validate_budget(selected_budget)
         _validate_identifier(tenant, "tenant")
         if end_user is not None and not _END_USER.fullmatch(end_user):
@@ -1093,6 +1102,35 @@ class AgentOrchestrator:
             await self._change_mode(run, events, target, reason="set by user", actor=actor)
         return run
 
+    def _default_budget(self) -> RunBudget:
+        defaults = RunBudget()
+        return replace(
+            defaults,
+            max_steps=self._settings.turn_max_steps or defaults.max_steps,
+            max_wall_seconds=self._settings.turn_max_wall_seconds or defaults.max_wall_seconds,
+        )
+
+    def turn_budget(self, run: RunRecord) -> RunBudget | None:
+        """The run's budget plus one turn's allowance (``turn_max_*``), or None if unset.
+
+        Budgets are cumulative, so the allowance is added to what the run has used:
+        its steps and its active time (idle time between turns is not counted).
+        """
+
+        steps, wall = self._settings.turn_max_steps, self._settings.turn_max_wall_seconds
+        if steps is None and wall is None:
+            return None
+        budget = run.budget
+        if steps is not None:
+            budget = replace(budget, max_steps=run.step_count + steps)
+        if wall is not None:
+            active = 0.0
+            if run.started_at is not None:
+                end = run.completed_at or self._clock()
+                active = max(0.0, (end - run.started_at).total_seconds())
+            budget = replace(budget, max_wall_seconds=active + wall)
+        return budget
+
     async def continue_run(
         self, run_id: str, content: str, *, budget: RunBudget | None = None,
         images: Sequence[str] = (),
@@ -1110,6 +1148,8 @@ class AgentOrchestrator:
         run = await self._store.get_run(run_id)
         if run is None:
             raise KeyError(f"unknown run: {run_id}")
+        if budget is None and run.parent_run_id is None:
+            budget = self.turn_budget(run)  # a fresh per-turn allowance, when configured
         if run.status is RunStatus.BUDGET_EXHAUSTED:
             if budget is None:
                 raise ValueError("run exhausted its budget; pass a larger budget to continue")

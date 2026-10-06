@@ -181,6 +181,9 @@ class FullConfigTests(unittest.TestCase):
             self.assertTrue(allowed(host), host)
         self.assertFalse(allowed("evil.example"))
         self.assertEqual(c.orchestrator.reserve_tokens_per_run, 200_000)
+        self.assertEqual((c.orchestrator.turn_max_steps, c.orchestrator.turn_max_wall_seconds), (40, 900))
+        self.assertEqual(dict(c.summarization.parameters),
+                         {"chat_template_kwargs": {"enable_thinking": False}})
 
     def test_application_builds_with_every_tool(self) -> None:
         async def build() -> list[str]:

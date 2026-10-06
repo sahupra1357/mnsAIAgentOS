@@ -306,10 +306,14 @@ class OpenAIChat:
                         run.id, call_id=pending.call_id, approved=approved, feedback=feedback, actor=actor)
                 return run.id
         if run is not None and run.status in {RunStatus.COMPLETED, RunStatus.BUDGET_EXHAUSTED}:
-            usage = await self._orchestrator.usage(run.id)
-            budget = dataclasses.replace(
-                run.budget, max_steps=usage.steps + TURN_STEPS,
-                max_wall_seconds=usage.active_seconds + TURN_WALL_SECONDS)
+            # The configured per-turn allowance ([orchestrator] turn_max_*), else this
+            # endpoint's own defaults.
+            budget = self._orchestrator.turn_budget(run)
+            if budget is None:
+                usage = await self._orchestrator.usage(run.id)
+                budget = dataclasses.replace(
+                    run.budget, max_steps=usage.steps + TURN_STEPS,
+                    max_wall_seconds=usage.active_seconds + TURN_WALL_SECONDS)
             await self._orchestrator.continue_run(run.id, last.text, budget=budget, images=list(last.images))
             return run.id
         if run is not None and not run_is_settled(run):

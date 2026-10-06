@@ -21,6 +21,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import Any
 
 from agent_harness.domain import (
     ContextSummary,
@@ -381,6 +382,7 @@ class ContextSummarizer:
         max_message_chars: int = 4_000,
         input_chars: Callable[[str], int | None] | None = None,
         instructions: str = SUMMARY_INSTRUCTIONS,
+        parameters: Mapping[str, Any] | None = None,
     ) -> None:
         if max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be greater than zero")
@@ -390,6 +392,7 @@ class ContextSummarizer:
             raise ValueError("max_message_chars must be at least 200")
         self.profile = profile
         self.max_output_tokens = max_output_tokens
+        self.parameters: Mapping[str, Any] = dict(parameters or {})
         self._max_input_chars = max_input_chars
         self._max_message_chars = max_message_chars
         self._input_chars = input_chars
@@ -422,6 +425,9 @@ class ContextSummarizer:
             ),
             max_output_tokens=self.max_output_tokens,
             metadata=dict(metadata or {}),
+            # e.g. chat_template_kwargs = {enable_thinking = false}: a thinking model would
+            # otherwise spend the output allowance thinking and return an empty summary.
+            extra_body=dict(self.parameters) or None,
         )
 
     def _render(self, message: Message) -> str:

@@ -208,6 +208,9 @@ class ModelRequest:
     response_schema: JsonObject | None = None
     # "auto" | "none" | "required" | the name of one offered tool; None leaves it to the server.
     tool_choice: str | None = None
+    # Extra top-level request fields for this call only (e.g. a summary call's
+    # ``chat_template_kwargs``); None leaves the payload unchanged.
+    extra_body: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

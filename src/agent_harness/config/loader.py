@@ -455,6 +455,9 @@ class SummarizationConfig:
     profile: str = ""
     max_output_tokens: int = 1024
     max_input_chars: int = 0
+    # Extra request fields sent with summary calls only, e.g.
+    # parameters = { chat_template_kwargs = { enable_thinking = false } }
+    parameters: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -568,8 +571,12 @@ class OrchestratorConfig:
     context_overflow_patterns: tuple[str, ...] = ()
     current_date_note: bool = False
     reserve_tokens_per_run: int = 0  # 0: reserve everything left (see OrchestratorSettings)
+    turn_max_steps: int = 0          # 0: RunBudget's default (20), continuations unchanged
+    turn_max_wall_seconds: float = 0.0  # 0: RunBudget's default (300 s)
 
     def __post_init__(self) -> None:
+        if self.turn_max_steps < 0 or self.turn_max_wall_seconds < 0:
+            raise ConfigError("orchestrator.turn_max_steps and turn_max_wall_seconds must not be negative")
         if self.reserve_tokens_per_run < 0:
             raise ConfigError("orchestrator.reserve_tokens_per_run must not be negative")
         if self.max_model_attempts < 1 or self.max_tool_attempts < 1:

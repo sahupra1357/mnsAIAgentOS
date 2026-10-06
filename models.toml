@@ -131,6 +131,10 @@ current_date_note = true
 # instead of everything left (which refused every other run with HTTP 429 while it was
 # active). Its budget stays open; [[quotas]] is still enforced at each step.
 reserve_tokens_per_run = 200000
+# Per turn: a new run gets this budget, and each follow-up adds it again (/ui, Open WebUI).
+# Exploring a codebase on a local 27B takes minutes; the code default is 20 steps / 300 s.
+turn_max_steps = 40
+turn_max_wall_seconds = 900
 
 [context]
 chars_per_token = 3.0            # code and JSON use more tokens per character
@@ -141,7 +145,10 @@ max_tool_output_chars = 16000
 # Summarize older turns instead of only dropping them (profiles with context_window).
 [summarization]
 enabled = true
-max_output_tokens = 1024
+max_output_tokens = 1536
+# Summary calls only: write the summary without thinking. Qwen 3.x otherwise spent the whole
+# allowance thinking and returned an empty summary (~95 s wasted per attempt). Chats keep thinking.
+parameters = { chat_template_kwargs = { enable_thinking = false } }
 
 # --- Coding tools (Docker sandbox) ----------------------------------------------
 # Needs a running Docker daemon. python:3.12 (not -slim) includes git.
@@ -297,7 +304,7 @@ sync_on_start = true
 
 [web_fetch]
 enabled = true
-max_chars = 20000
+max_chars = 6000
 
 # Tavily web search, called from the harness process (egress allowlist applies; results
 # are untrusted, so guardrails scan them and taint mode applies). The key is read from

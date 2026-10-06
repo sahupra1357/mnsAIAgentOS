@@ -427,6 +427,7 @@ class OpenAICompatibleClient:
                 }
         if request.tool_choice is not None:
             payload["tool_choice"] = tool_choice_payload(request.tool_choice)
+        merge_extra_body(payload, request)
         return payload
 
     @staticmethod
@@ -585,6 +586,15 @@ def tool_choice_payload(choice: str) -> object:
     if choice in _TOOL_CHOICE_MODES:
         return choice
     return {"type": "function", "function": {"name": choice}}
+
+
+
+def merge_extra_body(payload: dict[str, object], request: ModelRequest) -> None:
+    """Add the request's ``extra_body`` fields; never the fields the adapter owns."""
+
+    for key, value in (request.extra_body or {}).items():
+        if key not in {"model", "messages", "tools", "stream"}:
+            payload[key] = value
 
 
 _REASONING_FIELDS = ("reasoning_content", "reasoning")
