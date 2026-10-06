@@ -173,6 +173,14 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(server.tools, ("read_me", "create_view"))  # widget-only tools are not offered
         self.assertIn("mcp.excalidraw.com", c.network.allowed_hosts)
         self.assertIn("api.tavily.com", c.network.allowed_hosts)
+        from agent_harness.tools.sources import host_policy_from
+
+        allowed = host_policy_from(c.network.allowed_hosts)
+        assert allowed is not None
+        for host in ("www.weatherapi.com", "api.open-meteo.com", "wttr.in", "forecast.weather.gov"):
+            self.assertTrue(allowed(host), host)
+        self.assertFalse(allowed("evil.example"))
+        self.assertEqual(c.orchestrator.reserve_tokens_per_run, 200_000)
 
     def test_application_builds_with_every_tool(self) -> None:
         async def build() -> list[str]:

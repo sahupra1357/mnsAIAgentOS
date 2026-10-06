@@ -173,8 +173,14 @@ class OrchestratorSettings:
     # Append "[Current date: Tuesday, 2026-10-06]" to the user message that starts a
     # top-level run (and to a continuation on a later day); see orchestration/date_note.py.
     current_date_note: bool = False
+    # A run without its own token limit reserves at most this many tokens of the daily
+    # quota per turn (None: everything left, which blocks every other run while it is
+    # active). Its budget stays open; the daily quota is still checked at each step.
+    reserve_tokens_per_run: int | None = None
 
     def __post_init__(self) -> None:
+        if self.reserve_tokens_per_run is not None and self.reserve_tokens_per_run < 1:
+            raise ValueError("reserve_tokens_per_run must be at least 1")
         if self.max_model_attempts < 1:
             raise ValueError("max_model_attempts must be at least 1")
         if self.max_tool_attempts < 1:
@@ -443,6 +449,8 @@ class AgentOrchestrator:
         if reserved:
             payload["quota_reservation"] = {
                 "max_tokens": selected_budget.max_tokens, "max_cost_usd": selected_budget.max_cost_usd}
+            if selected_budget.max_tokens is None and self._settings.reserve_tokens_per_run is not None:
+                payload["quota_reservation"]["reserved_tokens"] = self._settings.reserve_tokens_per_run
         if template is not None:
             payload["template"] = {str(k): str(v) for k, v in template.items()}
         if prompt_hook is not None:
@@ -494,6 +502,9 @@ class AgentOrchestrator:
             return budget, False
         tenant_quota = quota if quota is not None else Quota(tenant)
         want_tokens = None if budget.max_tokens is None else max(0, budget.max_tokens - consumed_tokens)
+        open_tokens = budget.max_tokens is None and self._settings.reserve_tokens_per_run is not None
+        if open_tokens:
+            want_tokens = self._settings.reserve_tokens_per_run
         want_cost = None if budget.max_cost_usd is None else max(0.0, budget.max_cost_usd - consumed_cost)
 
         def decide(usage: Any, user_usage: Any = None) -> Any:
@@ -522,7 +533,9 @@ class AgentOrchestrator:
             raise QuotaExceededError(decision)
         self._usage_cache.pop(tenant, None)
         self._usage_cache.pop(f"{tenant}\x00{end_user}", None)
-        return replace(budget, max_tokens=decision.tokens, max_cost_usd=decision.cost_usd), True
+        # An open token budget stays open: only the reservation is capped.
+        max_tokens = None if open_tokens else decision.tokens
+        return replace(budget, max_tokens=max_tokens, max_cost_usd=decision.cost_usd), True
 
     def _user_quota(self, end_user: str | None) -> Quota | None:
         if end_user is None or self._user_quotas is None:

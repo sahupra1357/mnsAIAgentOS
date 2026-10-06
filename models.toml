@@ -127,6 +127,10 @@ context_overflow_shrink = 0.5
 # to a continuation on a later day). Models don't know the date; the system prompt stays
 # unchanged, so the prompt cache is unaffected.
 current_date_note = true
+# A run without its own token limit reserves this many tokens of the daily quota per turn,
+# instead of everything left (which refused every other run with HTTP 429 while it was
+# active). Its budget stays open; [[quotas]] is still enforced at each step.
+reserve_tokens_per_run = 200000
 
 [context]
 chars_per_token = 3.0            # code and JSON use more tokens per character
@@ -361,7 +365,10 @@ action = "flag"
 [network]
 restrict_egress = true
 allowed_hosts = ["api.tavily.com", "api.github.com", "github.com", "raw.githubusercontent.com",
-                 "docs.python.org", "pypi.org", "en.wikipedia.org", "mcp.excalidraw.com"]
+                 "docs.python.org", "pypi.org", "en.wikipedia.org", "mcp.excalidraw.com",
+                 # Weather and time (web_fetch after a search; "*." also matches the bare domain)
+                 "wttr.in", "*.open-meteo.com", "*.weather.gov", "*.weatherapi.com",
+                 "*.timeanddate.com", "mausam.imd.gov.in"]
 
 [redaction]
 enabled = true
