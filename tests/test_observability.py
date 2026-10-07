@@ -316,6 +316,29 @@ class AdapterStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0].text, "whole")
         self.assertEqual(events[-1].response.content, "whole")  # type: ignore[union-attr]
 
+    async def test_error_events_and_cut_off_streams_are_errors(self) -> None:
+        # A failure mid-stream used to be recorded as an empty answer (llama.cpp sends
+        # {"error": ...} as an SSE event, e.g. when its shared KV cache is full).
+        from agent_harness.domain import ContextOverflowError
+        from agent_harness.model_gateway import RetryableProviderError
+
+        started = {"choices": [{"delta": {"role": "assistant", "content": None}}]}
+        full = {"error": {"code": 500, "message": "Context size has been exceeded.", "type": "server_error"}}
+        cases = {
+            "server error event": ([f"data: {json.dumps(started)}\n".encode(),
+                                    f"data: {json.dumps(full)}\n".encode()], RetryableProviderError),
+            "too-long request event": ([f"data: {json.dumps({'error': {'code': 400, 'message': 'the request exceeds the available context size'}})}\n".encode()],
+                                       ContextOverflowError),
+            "cut off, no [DONE], no finish": ([f"data: {json.dumps(started)}\n".encode()], RetryableProviderError),
+        }
+        for name, (lines, error) in cases.items():
+            with self.subTest(name), self.assertRaises(error):
+                await collect(OpenAICompatibleClient(profile(), transport=StreamTransport(lines=lines), environ={}))
+        # A finish reason without [DONE] is a complete reply.
+        finished = [f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}, 'finish_reason': 'stop'}]})}\n".encode()]
+        events = await collect(OpenAICompatibleClient(profile(), transport=StreamTransport(lines=finished), environ={}))
+        self.assertEqual(events[-1].response.content, "ok")  # type: ignore[union-attr]
+
     def test_ollama_native_mode_does_not_stream(self) -> None:
         native = OllamaClient(profile(adapter="ollama", api_mode="native"), environ={})
         compatible = OllamaClient(profile(adapter="ollama"), environ={})
@@ -365,6 +388,29 @@ class OrchestratorStreamingTests(unittest.IsolatedAsyncioTestCase):
         finished = await self._run(StreamingModel([[ModelStreamEvent(text="partial")]]), Listener())
         self.assertEqual(finished.status, RunStatus.FAILED)
         self.assertIn("malformed model response", finished.error or "")
+
+    async def test_cut_off_stream_is_retried_not_recorded_as_an_empty_answer(self) -> None:
+        class Sequenced(StreamTransport):
+            def __init__(self, attempts: list[list[bytes]]) -> None:
+                super().__init__()
+                self.attempts = attempts
+
+            async def post_stream(self, url, payload, headers, timeout_seconds) -> HttpStreamResponse:
+                self.lines = self.attempts.pop(0)
+                return await super().post_stream(url, payload, headers, timeout_seconds)
+
+        error = {"error": {"code": 500, "message": "Context size has been exceeded."}}
+        answer = {"choices": [{"delta": {"content": "Films out this month"}, "finish_reason": "stop"}]}
+        client = OpenAICompatibleClient(profile(), transport=Sequenced(
+            [[f"data: {json.dumps(error)}\n".encode()], sse(answer)]), environ={})
+
+        class Resolver:
+            def resolve(self, name: str) -> OpenAICompatibleClient:
+                return client
+
+        finished = await self._run(Resolver(), Listener())
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(finished.messages[-1].content, "Films out this month")
 
     async def test_without_listener_the_non_streaming_path_is_used(self) -> None:
         model = StreamingModel([])

@@ -213,13 +213,20 @@ class OpenAICompatibleClient:
             async with asyncio.timeout(timeout):
                 streamed = await post_stream(self._completion_url(), payload, headers, timeout)
             self._raise_for_status(HttpResponse(streamed.status, streamed.headers, streamed.body))
+            done = False
             async for line in streamed.lines:
                 data = _sse_data(line)
                 if data is None:
                     continue
                 if data == "[DONE]":
+                    done = True
                     break
-                text = accumulator.add(json.loads(data))
+                chunk = json.loads(data)
+                if isinstance(chunk, dict) and chunk.get("error") is not None:
+                    # Servers report a failure mid-stream as an error event (llama.cpp:
+                    # "Context size has been exceeded" when its shared KV cache is full).
+                    self._raise_stream_error(chunk["error"])
+                text = accumulator.add(chunk)
                 if accumulator.reasoning_delta:
                     yield ModelStreamEvent(reasoning=accumulator.reasoning_delta)
                 if text:
@@ -232,6 +239,10 @@ class OpenAICompatibleClient:
             raise MalformedResponseError(f"malformed model stream: {exc}") from exc
         finally:
             await slot.__aexit__(None, None, None)
+        if not done and not accumulator.finished:
+            # Cut off before the server said it was finished: an empty or partial reply
+            # must not be recorded as the answer.
+            raise RetryableProviderError("model stream ended before the reply was finished")
         response = recover_tool_names(
             self._normalize_raw(accumulator.as_completion(), streamed.headers), request.tools)
         self._warm = True
@@ -494,6 +505,15 @@ class OpenAICompatibleClient:
             raise overflow
         raise ProviderError(f"model provider error ({response.status}): {detail}")
 
+    @classmethod
+    def _raise_stream_error(cls, error: Any) -> None:
+        """Classify an error event like the HTTP error it stands for (code 500 when absent)."""
+
+        code = error.get("code") if isinstance(error, dict) else None
+        status = code if isinstance(code, int) and 400 <= code < 600 else 500
+        body = json.dumps({"error": error}, default=str).encode("utf-8")
+        cls._raise_for_status(HttpResponse(status, {}, body))
+
     def _normalize(self, response: HttpResponse) -> ModelResponse:
         try:
             raw = json.loads(response.body)
@@ -729,6 +749,12 @@ class _StreamAccumulator:
         self._tool_calls: dict[int, dict[str, Any]] = {}
         self._finish_reason: Any = None
         self._extra: dict[str, Any] = {}
+
+    @property
+    def finished(self) -> bool:
+        """The server sent a finish reason (the reply is complete)."""
+
+        return self._finish_reason is not None
 
     def add(self, chunk: Any) -> str:
         if not isinstance(chunk, dict):
