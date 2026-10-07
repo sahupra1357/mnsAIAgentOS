@@ -166,6 +166,27 @@ class TasksSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(failed.correct)
         self.assertFalse(failed.details["answer_ok"])
 
+    async def test_shared_telemetry_stays_open_and_transcripts_are_saved(self) -> None:
+        import io
+
+        from agent_harness.bench.core import CURRENT_ITEM
+        from agent_harness.observability.telemetry import JsonLinesTelemetry
+
+        stream = io.StringIO()
+        context = self._context(Model())
+        context.telemetry = JsonLinesTelemetry(stream)
+        context.transcripts = Path(self.data.parent) / "transcripts"
+        for item in self._items(self._record(), {"repeats": 2}):
+            token = CURRENT_ITEM.set(item.id)
+            try:
+                await TasksSuite().run(item, context)
+            finally:
+                CURRENT_ITEM.reset(token)
+        runs = {json.loads(line)["run_id"] for line in stream.getvalue().splitlines()}
+        self.assertGreaterEqual(len(runs), 2)  # the second task was recorded too
+        saved = json.loads((context.transcripts / "billing_2.json").read_text(encoding="utf-8"))
+        self.assertIn("subagent_started", {event["type"] for event in saved["events"]})
+
     async def test_needs_the_config_under_test(self) -> None:
         item = self._items(self._record())[0]
         with self.assertRaises(BenchConfigError):

@@ -940,7 +940,9 @@ class TasksSuite:
                 overrides["coding"] = {"workspace": str(files)}
             app = build_application(
                 config_path=context.config_path, database_path=root / "runs.sqlite3",
-                config_overrides=overrides, model_resolver=context.models, telemetry=context.telemetry,
+                config_overrides=overrides, model_resolver=context.models,
+                # The app closes its telemetry; the benchmark's sink must outlive each task.
+                telemetry=_Unclosed(context.telemetry) if context.telemetry is not None else None,
             )
             async with app:
                 await app.start_tools()
@@ -970,6 +972,7 @@ class TasksSuite:
                             feedback=None if allow else _TASK_DENIAL, actor="bench")
                     run = await orchestrator.resume(run.id)
                 events = list(await app.store.list_events(run.id))
+        context.record_transcript(run, events)
         output = next((m.content for m in reversed(run.messages)
                        if m.role is Role.ASSISTANT and not m.tool_calls and m.content.strip()), "")
         behavior = task_behavior(events, run.step_count)
@@ -1000,6 +1003,16 @@ class TasksSuite:
             cost_usd=run.consumed_cost_usd or 0.0, latency_seconds=time.monotonic() - started,
             error=run.error, details=details,
         )
+
+
+class _Unclosed:
+    """A telemetry sink that ignores close() (one shared sink, one application per task)."""
+
+    def __init__(self, sink: Any) -> None:
+        self._sink = sink
+
+    def record(self, record: Any) -> None:
+        self._sink.record(record)
 
 
 def task_behavior(events: Sequence[Any], steps: int) -> dict[str, Any]:
