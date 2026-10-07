@@ -238,6 +238,9 @@ max_steps = 8
 # forces planning for one run; "always" plans every run, "off" only `--plan` runs.
 [planning]
 mode = "auto"
+# After 6 tool-calling steps in one turn (or a context summary) without a plan, remind the
+# model once that it can plan and delegate the reading to a subagent. 0 = never.
+auto_reminder_after_steps = 6
 max_plan_steps = 20
 max_replans = 2
 

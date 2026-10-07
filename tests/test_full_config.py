@@ -74,6 +74,7 @@ class FullConfigTests(unittest.TestCase):
             "mcp server": any(server.enabled for server in c.mcp_servers),
             "web_search offered every turn": "web_search" in c.tool_loading.core,
             "planning (model decides)": c.planning.effective_mode == "auto",
+            "auto-plan reminder": c.planning.auto_reminder_after_steps == 6,
             "plugin": c.plugins.enabled == ("security-review",),
             "api keys (secret in .env)": [dict(k) for k in c.api_keys] == [
                 {"name": "me", "tenant": "default", "role": "admin", "key_env": "AGENT_HARNESS_API_KEY"}],

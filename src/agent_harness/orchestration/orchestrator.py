@@ -37,6 +37,7 @@ from agent_harness.orchestration.context import (
 from agent_harness.orchestration.date_note import date_note, last_noted_date, with_date_note
 from agent_harness.orchestration.planning import (
     AUTO_CREATE_PLAN_SPEC,
+    AUTO_PLAN_REMINDER,
     CREATE_PLAN,
     CREATE_PLAN_SPEC,
     PLAN_TOOLS,
@@ -800,6 +801,7 @@ class AgentOrchestrator:
         if run.planning and run.plan is not None and await self._plan_next(run, events):
             return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
 
+        await self._auto_plan_reminder(run, events)
         await self._apply_steers(run, events)
         await self._perform_model_turn(run, events)
         return run.status.is_terminal
@@ -2987,6 +2989,33 @@ class AgentOrchestrator:
         run.plan = replace(plan, outbox="")
         await self._plan_inject(run, events, "\n\n".join(notes), {"phase": run.plan.phase})
         return True
+
+    async def _auto_plan_reminder(self, run: RunRecord, events: list[RunEvent]) -> None:
+        """Planning mode "auto": remind the model once per turn that it can plan and delegate.
+
+        Fires when the current turn (since the last user message) has made
+        ``auto_reminder_after_steps`` tool-calling steps, or summarized its context,
+        without a plan. The note is a stored user message, so a resumed run sees it too.
+        """
+
+        after = self._planning.auto_reminder_after_steps
+        if not after or not self._offers_auto_plan(run):
+            return
+        tool_steps = 0
+        for message in reversed(run.messages):
+            if message.role is Role.USER:
+                if message.content == AUTO_PLAN_REMINDER:
+                    return  # already reminded in this turn
+                break
+            if message.role is Role.ASSISTANT and message.tool_calls:
+                tool_steps += 1
+        turn_start = next((i for i in range(len(events) - 1, -1, -1)
+                           if events[i].type in {EventType.USER_MESSAGE_ADDED, EventType.RUN_CREATED}), 0)
+        summarized = any(e.type is EventType.CONTEXT_SUMMARIZED and e.payload.get("ok") is True
+                         for e in events[turn_start:])
+        if tool_steps >= after or (summarized and tool_steps > 0):
+            await self._plan_inject(run, events, AUTO_PLAN_REMINDER,
+                                    {"reminder": "auto_plan", "tool_steps": tool_steps})
 
     async def _plan_inject(
         self, run: RunRecord, events: list[RunEvent], text: str, payload: Mapping[str, Any]
