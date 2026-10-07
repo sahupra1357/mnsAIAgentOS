@@ -46,7 +46,11 @@ enabled = true
 adapter = "llama_cpp"
 model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
 endpoint = "http://127.0.0.1:9931/v1"
-context_window = 16384           # keep equal to the server's context size for this model
+context_window = 16384           # per run; see the server note below
+# The llama.cpp server's ctx-size is ONE KV cache shared by all concurrent requests
+# (kv_unified), not per request: set it to context_window x the number of runs that can
+# overlap (serve --workers), e.g. 32768 for 2. Too small, and llama.cpp aborts a stream
+# with "Context size has been exceeded" (the harness retries it).
 token_counting = "server"
 timeout_seconds = 600
 max_retries = 1
@@ -139,7 +143,9 @@ turn_max_wall_seconds = 900
 [context]
 chars_per_token = 3.0            # code and JSON use more tokens per character
 high_water_ratio = 0.85
-low_water_ratio = 0.60
+# Trim to 45% once the 85% mark is crossed: fewer, bigger trims, so fewer summary calls and
+# fewer full re-reads of the conversation (each trim changes the cached prefix).
+low_water_ratio = 0.45
 max_tool_output_chars = 16000
 
 # Summarize older turns instead of only dropping them (profiles with context_window).

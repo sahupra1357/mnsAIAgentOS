@@ -122,9 +122,11 @@ class FullConfigTests(unittest.TestCase):
                                        subdirectory_filenames=c.instructions.filenames,
                                        working_directory=lambda: ROOT)()
         self.assertIn("use web_search before answering", context.text)
+        self.assertIn("Use the agent tool (a subagent)", context.text)
         self.assertNotIn("Agent Harness Collaboration Guide", context.text)
         self.assertLess(len(context.text), 1500)
         self.assertEqual(c.web_search.max_results, 3)
+        self.assertEqual((c.context.high_water_ratio, c.context.low_water_ratio), (0.85, 0.45))
         self.assertEqual(c.web_search.max_chars_per_result, 800)
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date
 
