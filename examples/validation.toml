@@ -155,6 +155,35 @@ max_accuracy_drop = 0.17  # 1 of 6 items
 min_accuracy = 0.66
 max_error_rate = 0.34
 
+# Real tasks in the full application (../models.toml: every tool, CHAT.md, subagents, auto
+# planning, guardrails, summaries) with no instruction to plan or delegate. The other suites
+# set the stage for the model; this one checks the choices it makes on its own over a long
+# turn. Each item is graded on its answer (facts, optional judge rubric) and on how it worked
+# (expect: plan, delegate, plan_or_delegate, max_steps, tools, no_tools). The repo is the
+# workspace, read-only (write and command approvals are denied). Slow: up to 15 minutes per
+# item on a 27B Mac model (about 1-2 hours for 8 items). It is part of the full run;
+# `scripts/validate.sh agent-tasks` runs it alone, e.g. to compare models or after changing
+# prompts. repeats = 2 reports pass^k (pass_all_repeats). Set judge_profile
+# to a stronger profile when one is available; by default the model under test grades itself.
+[[benchmark]]
+name = "tasks"
+suite = "tasks"
+data = "bench/tasks_sample.jsonl"
+max_steps = 40
+max_wall_seconds = 900
+baseline = "../baselines/tasks-{profile}.json"
+[benchmark.options]
+repeats = 1
+score = "all"                     # "answer": how it worked is reported, not scored
+judge_max_tokens = 1536
+# judge_profile = "modal"
+[benchmark.thresholds]
+max_accuracy_drop = 0.13          # 1 of 8 items
+min_accuracy = 0.5
+max_error_rate = 0.25
+min_answer_accuracy = 0.6
+min_behavior_accuracy = 0.6
+
 # --- Earlier examples, kept for reference (enable any by removing the comments) ------
 # Pinning a profile compares providers side by side in one run (each still self-contained):
 # [[smoke]]
@@ -282,6 +311,12 @@ description = "Subagents, task lists, plans, plan-and-execute, parallel delegati
 tests = ["test_subagents_tasks", "test_planning_delegation", "test_example_subagents", "test_agents_suite"]
 scenarios = ["subagent_delegation", "task_tracking"]
 benchmarks = ["agents"]
+
+[[feature]]
+name = "agent-tasks"
+description = "Real tasks in the full config: answers and how the agent works (planning, delegation, tools)"
+tests = ["test_tasks_suite"]
+benchmarks = ["tasks"]
 
 [[feature]]
 name = "extensibility"

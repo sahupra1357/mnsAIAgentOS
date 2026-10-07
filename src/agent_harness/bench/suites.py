@@ -24,6 +24,11 @@ context    long conversations past the         {"needle", "question", "answer",
 memory     long-term memory: notes saved, then {"notes": [...], "question",
            found with memory_search (keyword,  "answer"}
            semantic, or hybrid search)
+agents     delegation when told to delegate    {"notes", "question", "answer"}
+           (only the agent tool is offered)    (synthetic; no download)
+tasks      real tasks in the full application  {"prompt", "facts", "rubric",
+           (the config under test): answer,    "expect", "workspace"}
+           and how the agent chose to work     (see TasksSuite)
 =========  ==================================  ===================================
 
 Scores are the harness's own approximations; for leaderboard-comparable numbers
@@ -849,8 +854,198 @@ class AgentsSuite:
         return result
 
 
+_TASK_EXPECT = {"plan", "delegate", "plan_or_delegate", "max_steps", "tools", "no_tools"}
+# Said to the agent when it asks the user a question during an evaluation.
+_TASK_ANSWER = "No one can answer questions during this evaluation; use your best judgment and continue."
+_TASK_DENIAL = "Not allowed during this evaluation; continue without it."
+
+
+class TasksSuite:
+    """Real tasks in the full application: the model chooses how to work.
+
+    Unlike the other suites, nothing is set up for the model: each item runs in the
+    application built from the config under test (its tools, instructions, subagents,
+    planning mode, guardrails, context policy, and summaries), with no instruction to
+    plan or delegate. An item is graded on its answer (``facts`` that must appear,
+    and an optional ``rubric`` for a judge model) and on how it worked (``expect``:
+    ``plan``, ``delegate``, ``plan_or_delegate``, ``max_steps``, ``tools``,
+    ``no_tools``). ``options.score = "answer"`` keeps how it worked report-only.
+    ``options.repeats = k`` runs each task k times (pass^k: every repeat correct).
+
+    ``workspace`` is ``"repo"`` (default: the config's own coding workspace, used
+    read-only: write and command approvals are denied) or a table of files written to
+    a temporary workspace (``approvals = "allow"`` lets the agent change them).
+    """
+
+    name = "tasks"
+    description = "Real tasks in the full application, graded on the answer and on how the agent worked."
+
+    def load(self, path: str | Path, options: Mapping[str, Any]) -> list[BenchItem]:
+        repeats = options.get("repeats", 1)
+        if not isinstance(repeats, int) or isinstance(repeats, bool) or repeats < 1:
+            raise BenchConfigError("tasks: options.repeats must be a positive integer")
+        items = []
+        for index, record in enumerate(load_records(path)):
+            prompt, facts, rubric = record.get("prompt"), record.get("facts", []), record.get("rubric")
+            expect, workspace = record.get("expect", {}), record.get("workspace", "repo")
+            approvals = record.get("approvals", "deny")
+            if isinstance(facts, str):
+                facts = [facts]
+            problems = []
+            if not isinstance(prompt, str) or not prompt.strip():
+                problems.append("a prompt")
+            if not isinstance(facts, list) or not all(isinstance(f, str) and f for f in facts):
+                problems.append("facts as a list of strings")
+            if rubric is not None and not isinstance(rubric, str):
+                problems.append("a rubric string")
+            if not facts and not rubric:
+                problems.append("facts or a rubric to grade the answer")
+            if not isinstance(expect, dict) or set(expect) - _TASK_EXPECT:
+                problems.append(f"expect with only {', '.join(sorted(_TASK_EXPECT))}")
+            if workspace != "repo" and not (isinstance(workspace, dict) and all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in workspace.items())):
+                problems.append('workspace "repo" or a table of file name -> text')
+            if approvals not in {"deny", "allow"}:
+                problems.append('approvals "deny" or "allow"')
+            if problems:
+                raise DatasetError(f"tasks record {index} needs " + "; ".join(problems))
+            task_id = str(record.get("id", f"task-{index}"))
+            task_input = {"task": task_id, "prompt": prompt, "rubric": rubric, "expect": dict(expect),
+                          "workspace": workspace, "approvals": approvals}
+            category = str(record.get("category", "default"))
+            for repeat in range(1, repeats + 1):
+                item_id = task_id if repeats == 1 else f"{task_id}#{repeat}"
+                items.append(BenchItem(item_id, task_input, list(facts), category))
+        return items
+
+    async def run(self, item: BenchItem, context: BenchContext) -> ItemResult:
+        from agent_harness.application import build_application
+        from agent_harness.coding import CODING_AGENT_SYSTEM_PROMPT
+        from agent_harness.domain import RunStatus
+
+        if context.config_path is None:
+            raise BenchConfigError("tasks: needs the config under test (run it from a benchmark spec)")
+        started = time.monotonic()
+        workspace = item.input["workspace"]
+        with tempfile.TemporaryDirectory(prefix="agent-harness-task-") as scratch:
+            root = Path(scratch)
+            overrides: dict[str, Any] = {"artifacts": {"directory": str(root / "artifacts")}}
+            if isinstance(workspace, Mapping):
+                files = root / "workspace"
+                for name, text in workspace.items():
+                    target = files / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(text, encoding="utf-8")
+                files.mkdir(exist_ok=True)
+                overrides["coding"] = {"workspace": str(files)}
+            app = build_application(
+                config_path=context.config_path, database_path=root / "runs.sqlite3",
+                config_overrides=overrides, model_resolver=context.models, telemetry=context.telemetry,
+            )
+            async with app:
+                await app.start_tools()
+                orchestrator = app.orchestrator
+                messages = []
+                if app.config.coding.enabled:
+                    messages.append(Message(Role.SYSTEM, CODING_AGENT_SYSTEM_PROMPT))
+                messages.append(Message(Role.USER, item.input["prompt"]))
+                run = await orchestrator.create_run(
+                    model_profile=context.profile, messages=messages, budget=context.budget,
+                    versions=app.run_versions(context.profile),
+                )
+                run = await orchestrator.run(run.id)
+                decisions = 0
+                while run.status is RunStatus.AWAITING_INPUT and decisions < 20:
+                    pending = await orchestrator.pending_approval(run.id)
+                    if pending is None:
+                        break
+                    decisions += 1
+                    if pending.kind == "question":
+                        await orchestrator.resolve_approval(run.id, call_id=pending.call_id, approved=True,
+                                                            answer=_TASK_ANSWER, actor="bench")
+                    else:
+                        allow = item.input["approvals"] == "allow"
+                        await orchestrator.resolve_approval(
+                            run.id, call_id=pending.call_id, approved=allow,
+                            feedback=None if allow else _TASK_DENIAL, actor="bench")
+                    run = await orchestrator.resume(run.id)
+                events = list(await app.store.list_events(run.id))
+        output = next((m.content for m in reversed(run.messages)
+                       if m.role is Role.ASSISTANT and not m.tool_calls and m.content.strip()), "")
+        behavior = task_behavior(events, run.step_count)
+        behavior["decisions"] = decisions
+        found = [fact for fact in item.expected if normalize_answer(fact) in normalize_answer(output)]
+        answer_ok = run.status is RunStatus.COMPLETED and len(found) == len(item.expected)
+        details: dict[str, Any] = {"task": item.input["task"], "facts_found": len(found),
+                                   "missing_facts": [f for f in item.expected if f not in found], **behavior}
+        if item.input["rubric"] and run.status is RunStatus.COMPLETED:
+            verdict = await judge_answer(context, item.input["prompt"], item.expected or ["(see the rubric)"],
+                                         output, rubric=item.input["rubric"])
+            details["judge"] = verdict
+            answer_ok = answer_ok and verdict["correct"] is True
+        elif item.input["rubric"]:
+            answer_ok = False
+        failures = behavior_failures(item.input["expect"], behavior)
+        behavior_ok = not failures
+        details.update(answer_ok=answer_ok, behavior_ok=behavior_ok, behavior_failures=failures)
+        scored = context.options.get("score", "all")
+        if scored not in {"all", "answer"}:
+            raise BenchConfigError('tasks: options.score must be "all" or "answer"')
+        correct = answer_ok and (behavior_ok or scored == "answer")
+        usage_tokens = run.consumed_tokens
+        return ItemResult(
+            id=item.id, category=item.category, correct=correct,
+            expected="; ".join(item.expected) or "(rubric)", predicted=output.strip()[-300:],
+            status=run.status.value, steps=run.step_count, tokens=usage_tokens,
+            cost_usd=run.consumed_cost_usd or 0.0, latency_seconds=time.monotonic() - started,
+            error=run.error, details=details,
+        )
+
+
+def task_behavior(events: Sequence[Any], steps: int) -> dict[str, Any]:
+    """How a run worked, read from its events (the ``tasks`` suite's behavior facts)."""
+
+    from agent_harness.domain import EventType
+
+    tools = [str(e.payload.get("tool")) for e in events if e.type is EventType.TOOL_REQUESTED]
+    return {
+        "steps": steps,
+        "tools_used": sorted(set(tools)),
+        "tool_calls": len(tools),
+        "planned": any(e.type is EventType.PLAN_CREATED for e in events),
+        "subagents": sum(e.type is EventType.SUBAGENT_STARTED for e in events),
+        "summaries": sum(e.type is EventType.CONTEXT_SUMMARIZED and e.payload.get("ok") is True for e in events),
+        "reminded": any(e.type is EventType.PLAN_STEP_UPDATED and e.payload.get("reminder") == "auto_plan"
+                        for e in events),
+        "guard_flags": sum(e.type is EventType.GUARDRAIL_DECIDED and e.payload.get("action") == "flag"
+                           for e in events),
+    }
+
+
+def behavior_failures(expect: Mapping[str, Any], behavior: Mapping[str, Any]) -> list[str]:
+    """Each way the run's behavior missed the item's ``expect`` table (empty: as expected)."""
+
+    failures = []
+    delegated = behavior["subagents"] > 0
+    if "plan" in expect and bool(expect["plan"]) != behavior["planned"]:
+        failures.append("made a plan" if behavior["planned"] else "made no plan")
+    if "delegate" in expect and bool(expect["delegate"]) != delegated:
+        failures.append("delegated" if delegated else "did not delegate")
+    if expect.get("plan_or_delegate") and not (behavior["planned"] or delegated):
+        failures.append("neither planned nor delegated")
+    if expect.get("max_steps") is not None and behavior["steps"] > int(expect["max_steps"]):
+        failures.append(f"took {behavior['steps']} steps (expected at most {expect['max_steps']})")
+    for tool in expect.get("tools", []):
+        if tool not in behavior["tools_used"]:
+            failures.append(f"did not use {tool}")
+    for tool in expect.get("no_tools", []):
+        if tool in behavior["tools_used"]:
+            failures.append(f"used {tool}")
+    return failures
+
+
 SUITES: dict[str, Suite] = {
     suite.name: suite
     for suite in (Gsm8kSuite(), QaSuite(), BfclSuite(), HumanEvalSuite(), GuardrailsSuite(), ContextSuite(),
-                  MemorySuite(), AgentsSuite())
+                  MemorySuite(), AgentsSuite(), TasksSuite())
 }

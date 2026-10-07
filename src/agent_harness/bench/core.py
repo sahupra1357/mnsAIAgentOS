@@ -115,6 +115,8 @@ class BenchContext:
     transcripts: Path | None = None
     # The embedding companion of the profile under test (``NAME.embed``), if it has one.
     embedding_profile: str | None = None
+    # The config file under test (the ``tasks`` suite builds the full application from it).
+    config_path: Path | None = None
 
     async def run_agent(
         self, messages: Sequence[Message], tools: ToolExecutor, *, budget: RunBudget | None = None,

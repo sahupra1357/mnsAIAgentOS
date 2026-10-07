@@ -14,6 +14,10 @@ class Thresholds:
     max_error_rate: float = 0.10
     max_latency_increase: float | None = None  # relative, e.g. 0.5 = +50% mean latency
     max_cost_increase: float | None = None  # relative
+    # The tasks suite (metrics["tasks"]): floors for answer, behavior, and pass^k.
+    min_answer_accuracy: float | None = None
+    min_behavior_accuracy: float | None = None
+    min_pass_all_repeats: float | None = None
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "Thresholds":
@@ -46,6 +50,17 @@ def compare_reports(
             accuracy >= thresholds.min_accuracy,
             f"{accuracy:.3f} >= {thresholds.min_accuracy:.3f}",
         ))
+    tasks = metrics.get("tasks") or {}
+    for name, key in (("min_answer_accuracy", "answer_accuracy"),
+                      ("min_behavior_accuracy", "behavior_accuracy"),
+                      ("min_pass_all_repeats", "pass_all_repeats")):
+        floor = getattr(thresholds, name)
+        if floor is None:
+            continue
+        if key not in tasks:
+            checks.append((name, False, f"the report has no tasks.{key}"))
+            continue
+        checks.append((name, float(tasks[key]) >= floor, f"{float(tasks[key]):.3f} >= {floor:.3f}"))
     error_rate = float(metrics["error_rate"])
     checks.append(("max_error_rate", error_rate <= thresholds.max_error_rate,
                    f"{error_rate:.3f} <= {thresholds.max_error_rate:.3f}"))

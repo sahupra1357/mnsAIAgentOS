@@ -672,6 +672,18 @@ An installed `agent-harness` script must be reinstalled (`pip install -e .`).
 - **Earlier claims corrected:** the "live on llama.cpp" checks in Phases 17–19 ran on Modal
   (`.env` had `AGENT_HARNESS_MODEL_PROFILE=modal`).
 
+**Phase 21 – Task evaluations** [harness-verification] — on `phase-21-task-evals`
+- **Why:** every earlier suite sets the stage (`agents` offers only `agent` and says to delegate;
+  all stop at 8 steps), so Qwen 27B passed them and still never planned or delegated in real chats.
+- **`tasks` suite** (`TasksSuite`): real prompts in the full application built from the config under
+  test, no instruction to plan or delegate, 40 steps and 15 minutes per item. Graded on the answer
+  (`facts`, judge `rubric`) and on behavior (`expect`: `plan`, `delegate`, `plan_or_delegate`,
+  `max_steps`, `tools`, `no_tools`); `options.repeats` gives pass^k (`pass_all_repeats`).
+- **Report and gates:** `metrics.tasks`; thresholds `min_answer_accuracy`, `min_behavior_accuracy`,
+  `min_pass_all_repeats`. `BenchContext.config_path` carries the config under test.
+- **Plan:** `[[benchmark]] name = "tasks"` (8 repo-grounded items in `examples/bench/tasks_sample.jsonl`,
+  workspace read-only) and feature `agent-tasks`. Slow on a 27B Mac model (1-2 hours).
+
 ## Validation
 
 `docs/VALIDATION.md` describes six stages: static, unit, scenarios, smoke, benchmarks,
