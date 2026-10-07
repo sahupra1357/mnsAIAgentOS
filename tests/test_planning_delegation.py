@@ -528,6 +528,63 @@ class AutoPlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(PLANNER_INSTRUCTIONS, [m.content for m in run.messages])
 
 
+class AutoPlanReminderTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 22: in "auto", one reminder per turn after N tool steps without a plan."""
+
+    def orchestrator(self, replies: list[ModelResponse], after: int = 3) -> AgentOrchestrator:
+        queue = list(replies)
+        self.model = RoutedModel(lambda request: asyncio.sleep(0, queue.pop(0)))
+        return AgentOrchestrator(models=self.model, tools=create_default_runtime(), store=InMemoryRunStore(),
+                                 planning=PlanningPolicy(auto=True, auto_reminder_after_steps=after))
+
+    @staticmethod
+    def reminded(request: ModelRequest) -> bool:
+        from agent_harness.orchestration.planning import AUTO_PLAN_REMINDER
+
+        return any(m.role is Role.USER and m.content == AUTO_PLAN_REMINDER for m in request.messages)
+
+    async def test_fires_once_after_n_tool_steps(self) -> None:
+        tool = lambda i: call("echo", {"text": str(i)}, f"c{i}")  # noqa: E731
+        orch = self.orchestrator([tool(1), tool(2), tool(3), tool(4), final("done")])
+        run = await orch.create_run(model_profile="p", messages=[Message(Role.USER, "explain the code")])
+        finished = await orch.run(run.id)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual([self.reminded(r) for r in self.model.requests], [False, False, False, True, True])
+        from agent_harness.orchestration.planning import AUTO_PLAN_REMINDER
+
+        self.assertEqual(sum(m.content == AUTO_PLAN_REMINDER for m in finished.messages), 1)
+
+    async def test_short_turns_planned_runs_and_off_get_none(self) -> None:
+        short = self.orchestrator([call("echo", {"text": "a"}), final("ok")])
+        run = await short.create_run(model_profile="p", messages=[Message(Role.USER, "q")])
+        await short.run(run.id)
+        self.assertFalse(any(self.reminded(r) for r in self.model.requests))
+        off = self.orchestrator([call("echo", {"text": str(i)}, f"c{i}") for i in range(4)] + [final("ok")], after=0)
+        run = await off.create_run(model_profile="p", messages=[Message(Role.USER, "q")])
+        await off.run(run.id)
+        self.assertFalse(any(self.reminded(r) for r in self.model.requests))
+        planned = self.orchestrator([final("x")])
+        run = await planned.create_run(model_profile="p", messages=[Message(Role.USER, "q")], planning=True)
+        self.assertFalse(planned._offers_auto_plan(run))  # a planning run is never reminded
+
+    async def test_a_new_turn_counts_again(self) -> None:
+        tool = lambda i: call("echo", {"text": str(i)}, f"c{i}")  # noqa: E731
+        orch = self.orchestrator([tool(1), tool(2), final("one"), tool(3), tool(4), final("two")], after=2)
+        run = await orch.create_run(model_profile="p", messages=[Message(Role.USER, "first")])
+        await orch.run(run.id)
+        await orch.continue_run(run.id, "second")
+        finished = await orch.run(run.id)
+        from agent_harness.orchestration.planning import AUTO_PLAN_REMINDER
+
+        self.assertEqual(sum(m.content == AUTO_PLAN_REMINDER for m in finished.messages), 2)
+
+    def test_description_judges_the_work_not_the_phrasing(self) -> None:
+        from agent_harness.orchestration.planning import AUTO_CREATE_PLAN_SPEC
+
+        self.assertIn("even if the request is phrased as a question", AUTO_CREATE_PLAN_SPEC.description)
+        self.assertNotIn("Do not use it for questions", AUTO_CREATE_PLAN_SPEC.description)
+
+
 class PlanningModeConfigTests(unittest.TestCase):
     def test_modes(self) -> None:
         from agent_harness.config.loader import ConfigError, PlanningConfig
@@ -546,6 +603,8 @@ class PlanningModeConfigTests(unittest.TestCase):
         from agent_harness.application import _planning
         from agent_harness.config.loader import PlanningConfig
 
+        policy = _planning(SimpleNamespace(planning=PlanningConfig(mode="auto", auto_reminder_after_steps=6)))  # type: ignore[arg-type]
+        self.assertEqual(policy.auto_reminder_after_steps, 6)
         cases = {"off": (False, False), "always": (True, False), "auto": (False, True)}
         for mode, expected in cases.items():
             policy = _planning(SimpleNamespace(planning=PlanningConfig(mode=mode)))  # type: ignore[arg-type]

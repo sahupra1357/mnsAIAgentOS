@@ -32,8 +32,14 @@ class PlanningPolicy:
     # Planning mode "auto": runs that do not plan are offered create_plan, and calling it
     # switches the run to plan-and-execute. The model decides; no extra model call.
     auto: bool = False
+    # In "auto": after this many tool-calling steps in one turn (or a context summary)
+    # without a plan, the orchestrator reminds the model once that it can plan and
+    # delegate. 0 = no reminder. A fixed rule, not a model call.
+    auto_reminder_after_steps: int = 0
 
     def __post_init__(self) -> None:
+        if self.auto_reminder_after_steps < 0:
+            raise ValueError("planning.auto_reminder_after_steps must not be negative")
         if not 1 <= self.max_plan_steps <= 100:
             raise ValueError("planning.max_plan_steps must be between 1 and 100")
         if not 0 <= self.max_replans <= 10:
@@ -86,11 +92,19 @@ CREATE_PLAN_SPEC = ToolSpec(
 AUTO_CREATE_PLAN_SPEC = replace(
     CREATE_PLAN_SPEC,
     description=(
-        "Optional. For a task with several dependent steps (many files, tools, or subagents), "
-        "call this first with a goal and concrete steps; the orchestrator then runs the plan step "
-        "by step. Give each step an id, a title, instructions, and depends_on; set agent to "
-        "delegate a step to that subagent. Do not use it for questions or one-step tasks."
+        "Use this when answering takes several steps of work (reading or searching many files, "
+        "or research across several sources), even if the request is phrased as a question. "
+        "Give each step an id, a title, instructions and depends_on; set agent on a step to "
+        "delegate it to that subagent, which works in its own context (independent steps run "
+        "in parallel). The orchestrator then runs the plan step by step. Skip it for answers "
+        "you can give directly or with one or two tool calls."
     ),
+)
+
+AUTO_PLAN_REMINDER = (
+    "[Plan] This task is taking many steps. If more reading or searching remains, call "
+    "create_plan and give the reading steps to a subagent (set agent on the step), so it "
+    "works in its own context; otherwise answer from what you already have."
 )
 
 UPDATE_PLAN_SPEC = ToolSpec(

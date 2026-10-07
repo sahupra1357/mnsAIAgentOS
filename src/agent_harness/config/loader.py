@@ -626,8 +626,11 @@ class PlanningConfig:
     max_plan_steps: int = 20
     max_replans: int = 2
     mode: str = ""
+    auto_reminder_after_steps: int = 0  # "auto": remind once after N tool steps (0 = never)
 
     def __post_init__(self) -> None:
+        if self.auto_reminder_after_steps < 0:
+            raise ConfigError("planning.auto_reminder_after_steps must not be negative")
         if self.mode not in {"", "off", "always", "auto"}:
             raise ConfigError('planning.mode must be "off", "always", or "auto"')
         if self.enabled and self.mode in {"off", "auto"}:

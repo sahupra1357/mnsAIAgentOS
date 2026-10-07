@@ -568,6 +568,7 @@ def _planning(config: HarnessConfig) -> PlanningPolicy:
         return PlanningPolicy(
             enabled=mode == "always",
             auto=mode == "auto",
+            auto_reminder_after_steps=config.planning.auto_reminder_after_steps,
             max_plan_steps=config.planning.max_plan_steps,
             max_replans=config.planning.max_replans,
         )
