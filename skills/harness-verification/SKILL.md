@@ -154,3 +154,19 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
   servers batch concurrent requests, so results are unchanged and throughput is higher.
 - **Estimates:** `Timings.profile` is written by every run, and estimates use only the same
   profile's history. Without that, a slow Ollama run made a llama.cpp run show over an hour left.
+
+## Phase 21: the `tasks` suite (how the agent chooses to work)
+
+- **Why:** the other suites set the stage (`agents` offers only `agent` and says to delegate;
+  every suite stops at 8 steps), so they measure what a model can do when told. A model that
+  passed them never planned or delegated in real chats. `tasks` runs real prompts in the full
+  application built from the config under test, with no such instruction.
+- **Grading:** `answer_ok` (completed, `facts` found, judge accepts `rubric`) and `behavior_ok`
+  (`expect`: `plan`, `delegate`, `plan_or_delegate`, `max_steps`, `tools`, `no_tools`);
+  `options.score = "answer"` keeps behavior report-only. `options.repeats = k` gives pass^k.
+- **Report and gates:** `metrics.tasks` (`answer_accuracy`, `behavior_accuracy`, `plan_rate`,
+  `delegate_rate`, `budget_exhausted`, `pass_all_repeats`); thresholds `min_answer_accuracy`,
+  `min_behavior_accuracy`, `min_pass_all_repeats`. Other suites' reports are unchanged.
+- **Isolation:** temporary run database, memory, and artifacts; the `"repo"` workspace is
+  read-only (approvals denied). Feature `agent-tasks`; tests in `tests/test_tasks_suite.py`.
+- **Add tasks from real failures,** with the `expect` that should have held.

@@ -132,6 +132,7 @@ async def execute_benchmark(
         options=spec.options,
         telemetry=telemetry,
         embedding_profile=config.companion(profile, "embed"),
+        config_path=spec.config,
     )
     out = spec.out or Path("bench-results") / f"{spec.name or spec.suite}-{profile}"
     out.mkdir(parents=True, exist_ok=True)

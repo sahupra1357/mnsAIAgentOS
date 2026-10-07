@@ -125,8 +125,44 @@ is stored in each item's `details.judge`.
 | `context` | Context handling past the window: trimming, `token_counting = "server"` (`context_capped` events), overflow recovery. The fact to recall sits in the newest part of a long conversation | Synthetic (no download): `examples/bench/context_sample.jsonl` | `{"needle", "question", "answer", "filler": "prose" \| "json" \| "code"}` |
 | `agents` | Subagents: the top-level agent can only use the `agent` tool, so it must delegate each independent part of the question to a `researcher` subagent (which reads notes), ideally in parallel, and then combine the answers. Correct means every expected fact is in the answer; delegation is reported, not scored (`subagents`, `max_parallel` in details) | Synthetic: `examples/bench/agents_sample.jsonl` | `{"notes": {name: text}, "question", "answer": [facts]}` |
 | `memory` | Long-term memory: notes are saved (and embedded), then found with `memory_search` using different wording | Synthetic: `examples/bench/memory_sample.jsonl` | `{"notes": [...], "question", "answer"}` |
+| `tasks` | Real tasks in the **full application** built from the config under test (its tools, instructions, subagents, planning mode, guardrails, summaries), with no instruction to plan or delegate. Graded on the answer (`facts`, optional judge `rubric`) **and** on how the agent worked (`expect`) | Repo-grounded: `examples/bench/tasks_sample.jsonl` | `{"prompt", "facts", "rubric", "expect", "workspace", "approvals"}` |
 
 List the suites with `agent-harness-bench suites`.
+
+**Why `tasks` exists.** Every other suite sets the stage for the model: `agents` offers only
+the `agent` tool and says to delegate, `bfcl` is one reply, and all of them stop at 8 steps.
+They show what a model *can* do when told. They cannot show what it *chooses* to do with
+30 tools, soft instructions, and a long turn, which is where agents fail in practice (a 27B
+model scored 6/6 on `agents` and never delegated in real chats). `tasks` measures that.
+
+- **Grading.** `answer_ok`: the run completed, every `facts` string is in the answer
+  (normalized), and the judge accepts the `rubric` when there is one. `behavior_ok`: every
+  `expect` key held:
+  - `plan` / `delegate`: true or false (whether it made a plan / started a subagent);
+  - `plan_or_delegate = true`: at least one of them;
+  - `max_steps`: at most this many steps (simple questions should stay short);
+  - `tools` / `no_tools`: tools it must / must not use.
+
+  An item is correct when both hold; `options.score = "answer"` makes behavior report-only.
+- **Details per item:** `planned`, `subagents`, `steps`, `tool_calls`, `tools_used`,
+  `summaries`, `reminded` (the auto-plan reminder fired), `guard_flags`, `decisions`
+  (approvals and questions answered), `behavior_failures`, `missing_facts`, `judge`.
+- **Report metrics** (`metrics.tasks`): `answer_accuracy`, `behavior_accuracy`, `plan_rate`,
+  `delegate_rate`, `budget_exhausted`, and `pass_all_repeats` (pass^k: the share of tasks
+  whose every repeat was correct; `options.repeats = k`). Gates: `min_answer_accuracy`,
+  `min_behavior_accuracy`, `min_pass_all_repeats`.
+- **Workspace.** `"repo"` (default) is the config's own coding workspace, used read-only:
+  write, command, and plan approvals are denied, and `ask_user` gets "use your best
+  judgment". A table of files makes a temporary workspace instead; `approvals = "allow"`
+  lets the agent change it. The run database, memory, and artifacts are temporary.
+- **Budgets and time.** The plan gives each item 40 steps and 15 minutes, like a real chat
+  turn. On a 27B model on a Mac the 8 sample items take 1-2 hours; a 3B-active MoE model is
+  several times faster. `scripts/validate.sh agent-tasks` runs it alone.
+- **Judge.** By default the model under test grades itself, which is lenient; set
+  `judge_profile` to a stronger profile when you have one.
+- **Write tasks from real failures.** The sample covers the patterns seen so far (simple
+  questions, independent parts, wide explanations, a search). Add a task whenever a real
+  chat goes wrong, with the `expect` that should have held.
 
 **Live checks of context and memory.** `context` is built to overflow a small window: JSON
 and code filler use more tokens per character than the estimate assumes, which is what
@@ -224,7 +260,7 @@ throwaway experiments.
 ## Baselines and regression gates
 
 **Allowed drop matches the sample size.** One item is worth 100/n accuracy points: 3.3 for
-gsm8k (30 items), 2.5 for bfcl (40), 5 for humaneval (20), 17 for agents (6), and 33 for
+gsm8k (30 items), 2.5 for bfcl (40), 5 for humaneval (20), 17 for agents (6), 13 for tasks (8), and 33 for
 context and memory (3). Each benchmark sets `max_accuracy_drop` to allow about 1-2 items of
 normal model variation and still fail on a real regression. For example, gsm8k allows 0.07,
 so 2 extra misses pass and 3 fail. guardrails allows 0.0, because its heuristics are

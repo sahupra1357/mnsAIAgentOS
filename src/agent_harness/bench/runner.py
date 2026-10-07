@@ -120,7 +120,29 @@ def summarize(results: Sequence[ItemResult]) -> dict[str, Any]:
             }
             for name, group in sorted(by_category.items())
         },
+        **_task_metrics(results),
     }
+
+
+def _task_metrics(results: Sequence[ItemResult]) -> dict[str, Any]:
+    """The ``tasks`` suite's split of accuracy into answer and behavior, and pass^k."""
+
+    graded = [r for r in results if "answer_ok" in r.details]
+    if not graded:
+        return {}
+    n = len(graded)
+    tasks: dict[str, list[bool]] = defaultdict(list)
+    for result in graded:
+        tasks[str(result.details.get("task", result.id))].append(result.correct)
+    return {"tasks": {
+        "answer_accuracy": sum(bool(r.details["answer_ok"]) for r in graded) / n,
+        "behavior_accuracy": sum(bool(r.details.get("behavior_ok")) for r in graded) / n,
+        "plan_rate": sum(bool(r.details.get("planned")) for r in graded) / n,
+        "delegate_rate": sum(int(r.details.get("subagents") or 0) > 0 for r in graded) / n,
+        "budget_exhausted": sum(r.status == "budget_exhausted" for r in graded),
+        "repeats": max(len(v) for v in tasks.values()),
+        "pass_all_repeats": sum(all(v) for v in tasks.values()) / len(tasks),
+    }}
 
 
 def build_report(
