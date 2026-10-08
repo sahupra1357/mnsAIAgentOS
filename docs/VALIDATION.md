@@ -146,7 +146,11 @@ model scored 6/6 on `agents` and never delegated in real chats). `tasks` measure
   An item is correct when both hold; `options.score = "answer"` makes behavior report-only.
   Expect what has to be true, not a route you prefer: when answering alone is fast and right
   (two short lookups), use `max_steps` rather than `delegate = true`. The sample's
-  independent-parts items did this after Qwen 27B answered both correctly in 4 steps.
+  independent-parts items did this after Qwen 27B answered both correctly in 4 steps, and
+  the explain items (now `max_steps = 16`) after Qwen 3.6 35B-A3B answered them correctly
+  in 5-8 steps without planning. Delegation is still graded by the `broad` item
+  (`adapter-retries`), which asks for every model adapter and is meant to exceed one
+  context.
 - **Details per item:** `planned`, `subagents`, `steps`, `tool_calls`, `tools_used`,
   `summaries`, `reminded` (the auto-plan reminder fired), `guard_flags`, `decisions`
   (approvals and questions answered), `behavior_failures`, `missing_facts`, `judge`.
@@ -159,18 +163,18 @@ model scored 6/6 on `agents` and never delegated in real chats). `tasks` measure
   judgment". A table of files makes a temporary workspace instead; `approvals = "allow"`
   lets the agent change it. The run database, memory, and artifacts are temporary.
 - **Budgets and time.** The plan gives each item 40 steps and 15 minutes, like a real chat
-  turn. On a 27B model on a Mac the 8 sample items take 1-2 hours; a 3B-active MoE model is
-  several times faster. `scripts/validate.sh agent-tasks` runs it alone.
+  turn. On a 27B model on a Mac the sample items take 1-2 hours; a 3B-active MoE model
+  (Qwen 3.6 35B-A3B) took about 5 minutes for 8 items. `scripts/validate.sh agent-tasks` runs it alone.
 - **Comparing models.** The baseline is per profile (`tasks-{profile}.json`), not per model.
   Swapping the model behind the same profile compares against the previous model's report;
   leave out `--update-baselines` for that run, or a passing run replaces the reference.
   When the dataset changed, the `same_dataset` check fails; `--update-baselines` then saves
   the report if it passes the other gates on its own (the old baseline cannot be compared).
-  With 8 items a difference of one or two items is within noise; use `repeats = 3` to compare.
+  With 9 items a difference of one or two items is within noise; use `repeats = 3` to compare.
 - **Judge.** By default the model under test grades itself, which is lenient; set
   `judge_profile` to a stronger profile when you have one.
 - **Write tasks from real failures.** The sample covers the patterns seen so far (simple
-  questions, independent parts, wide explanations, a search). Add a task whenever a real
+  questions, independent parts, wide explanations, a broad comparison, a search). Add a task whenever a real
   chat goes wrong, with the `expect` that should have held.
 
 **Live checks of context and memory.** `context` is built to overflow a small window: JSON
