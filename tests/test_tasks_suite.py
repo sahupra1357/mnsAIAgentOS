@@ -112,8 +112,8 @@ class TasksSuiteTests(unittest.IsolatedAsyncioTestCase):
     def test_registered_and_sample_loads(self) -> None:
         self.assertIs(type(SUITES["tasks"]), TasksSuite)
         items = TasksSuite().load(SAMPLE, {})
-        self.assertEqual(len(items), 8)
-        self.assertEqual({i.category for i in items}, {"simple", "independent-parts", "explain", "web"})
+        self.assertEqual(len(items), 9)
+        self.assertEqual({i.category for i in items}, {"simple", "independent-parts", "explain", "web", "broad"})
         self.assertTrue(all(i.input["workspace"] == "repo" for i in items))
 
     def test_repeats_expand_items_with_one_task_name(self) -> None:

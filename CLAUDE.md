@@ -688,7 +688,7 @@ An installed `agent-harness` script must be reinstalled (`pip install -e .`).
   `max_steps`, `tools`, `no_tools`); `options.repeats` gives pass^k (`pass_all_repeats`).
 - **Report and gates:** `metrics.tasks`; thresholds `min_answer_accuracy`, `min_behavior_accuracy`,
   `min_pass_all_repeats`. `BenchContext.config_path` carries the config under test.
-- **Plan:** `[[benchmark]] name = "tasks"` (8 repo-grounded items in `examples/bench/tasks_sample.jsonl`,
+- **Plan:** `[[benchmark]] name = "tasks"` (9 repo-grounded items in `examples/bench/tasks_sample.jsonl`,
   workspace read-only) and feature `agent-tasks`. Slow on a 27B Mac model (1-2 hours).
 
 ## Validation
