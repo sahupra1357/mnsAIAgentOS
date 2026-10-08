@@ -99,6 +99,9 @@ class FullHistoryContextBuilder:
 
 LimitsLookup = Callable[[str], ContextLimits | None]
 
+# The newest turn's tool outputs are never shortened below this (characters).
+_MIN_FITTED_OUTPUT = 200
+
 
 class BudgetedContextBuilder:
     """Fit history into each profile's context window.
@@ -181,6 +184,17 @@ class BudgetedContextBuilder:
             )
             head[-1] = replace(head[-1], content=head[-1].content + notice)
             total += self._text_tokens(notice)
+        if total > budget and units:
+            # Only the newest unit is left (the loop above omits every older one first).
+            # Its tool outputs are shortened together, in proportion to their size,
+            # instead of failing the step.
+            newest, shortened = self._fit_newest_unit(units[-1], total - budget, reasoning)
+            if shortened:
+                units[-1] = newest
+                trimmed_outputs += shortened
+                total = head_tokens + sum(self._message_tokens(m, reasoning) for m in newest)
+                if omitted and head:
+                    total += self._text_tokens(notice)
         if total > budget:
             raise ContextWindowExceededError(
                 f"estimated {total} tokens exceed the {budget}-token input budget for "
@@ -198,8 +212,39 @@ class BudgetedContextBuilder:
             omitted_through=rest_start + omitted if omitted else None,
         )
 
-    def _trim_tool_output(self, message: Message) -> Message:
-        limit = self._policy.max_tool_output_chars
+    def _fit_newest_unit(
+        self, unit: list[Message], excess_tokens: int, reasoning: bool
+    ) -> tuple[list[Message], int]:
+        """Shorten the unit's tool outputs by about ``excess_tokens``; returns (unit, count)."""
+
+        sizes = [len(m.content) if m.role is Role.TOOL else 0 for m in unit]
+        available = sum(size - _MIN_FITTED_OUTPUT for size in sizes if size > _MIN_FITTED_OUTPUT)
+        if available <= 0:
+            return unit, 0
+        before = sum(self._message_tokens(m, reasoning) for m in unit)
+        fitted = unit
+        for _ in range(3):  # the markers add a little; a retry or two absorbs it
+            # Room for each marker, so the estimate lands under the budget.
+            remove = math.ceil(excess_tokens * self._policy.chars_per_token) + 64 * len(unit)
+            ratio = max(0.0, 1 - remove / available)
+            fitted = [
+                self._trim_tool_output(message, max(
+                    _MIN_FITTED_OUTPUT,
+                    _MIN_FITTED_OUTPUT + math.floor((size - _MIN_FITTED_OUTPUT) * ratio),
+                ))
+                if size > _MIN_FITTED_OUTPUT else message
+                for message, size in zip(unit, sizes)
+            ]
+            after = sum(self._message_tokens(m, reasoning) for m in fitted)
+            if before - after >= excess_tokens or ratio == 0.0:
+                break
+            excess_tokens += excess_tokens - (before - after)
+        shortened = sum(new is not old for new, old in zip(fitted, unit))
+        return fitted, shortened
+
+    def _trim_tool_output(self, message: Message, limit: int | None = None) -> Message:
+        if limit is None:
+            limit = self._policy.max_tool_output_chars
         if limit is None or message.role is not Role.TOOL or len(message.content) <= limit:
             return message
         removed = len(message.content) - limit
