@@ -473,11 +473,21 @@ async def run_pipeline(
                         baseline = json.loads(spec.baseline.read_text())
                     gate = compare_reports(report, baseline, spec.thresholds)
                     note = "" if baseline is not None else " (no baseline yet)"
+                    # A baseline on another dataset cannot be compared with: when the dataset
+                    # changed, --update-baselines saves the report if its own gates pass.
+                    replaces_stale = (
+                        update_baselines and baseline is not None
+                        and any(name == "same_dataset" and not ok for name, ok, _ in gate.checks)
+                        and compare_reports(report, None, spec.thresholds).passed
+                    )
+                    if replaces_stale:
+                        note = " (dataset changed; the report replaces the baseline)"
                     add(StageResult(
                         f"gate:{spec.name}", "pass" if gate.passed else "fail",
                         "; ".join(gate.lines()) + note,
                     ))
-                    if update_baselines and spec.baseline is not None and (gate.passed or baseline is None):
+                    if update_baselines and spec.baseline is not None and (
+                            gate.passed or baseline is None or replaces_stale):
                         spec.baseline.parent.mkdir(parents=True, exist_ok=True)
                         spec.baseline.write_text(json.dumps(report, indent=2, sort_keys=True))
         if residency is not None and policy.restore:

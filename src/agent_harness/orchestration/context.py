@@ -411,9 +411,18 @@ class ContextSummarizer:
         *,
         profile: str,
         metadata: Mapping[str, str] | None = None,
+        task: str | None = None,
     ) -> ModelRequest:
+        """``task`` is the user's request, which stays in the context unsummarized: without
+        it the summarizer cannot tell what matters and reports that there is no goal."""
+
         transcript = "\n\n".join(self._render(message) for message in messages)
         parts = []
+        if task:
+            parts.append(
+                "The user's request (kept in full elsewhere; do not repeat it, use it to "
+                "decide what matters):\n" + _shorten(task.strip(), self._max_message_chars)
+            )
         if previous:
             parts.append("Previous summary:\n" + previous.strip())
         parts.append("New messages:\n" + transcript)

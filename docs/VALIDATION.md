@@ -164,6 +164,8 @@ model scored 6/6 on `agents` and never delegated in real chats). `tasks` measure
 - **Comparing models.** The baseline is per profile (`tasks-{profile}.json`), not per model.
   Swapping the model behind the same profile compares against the previous model's report;
   leave out `--update-baselines` for that run, or a passing run replaces the reference.
+  When the dataset changed, the `same_dataset` check fails; `--update-baselines` then saves
+  the report if it passes the other gates on its own (the old baseline cannot be compared).
   With 8 items a difference of one or two items is within noise; use `repeats = 3` to compare.
 - **Judge.** By default the model under test grades itself, which is lenient; set
   `judge_profile` to a stronger profile when you have one.
