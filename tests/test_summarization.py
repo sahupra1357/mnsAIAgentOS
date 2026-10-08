@@ -209,6 +209,27 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(request.max_output_tokens, 300)
         self.assertEqual(request.metadata["purpose"], "summary")
 
+    def test_request_starts_with_the_users_request(self) -> None:
+        # The question stays pinned outside the summarized range; without it the summarizer
+        # reported "the user has not provided a goal" (Qwen 27B, tasks suite).
+        request = ContextSummarizer().request("Old summary.", history(2)[2:], profile="p",
+                                              task="Explain the guardrails.")
+        text = request.messages[1].content
+        self.assertTrue(text.startswith("The user's request"))
+        self.assertLess(text.index("Explain the guardrails."), text.index("Previous summary:"))
+        self.assertNotIn("user's request", ContextSummarizer().request(None, history(2)[2:], profile="p")
+                         .messages[1].content)
+
+    def test_summary_task_skips_orchestrator_notes(self) -> None:
+        from agent_harness.orchestration.orchestrator import _summary_task
+
+        note = Message(role=Role.USER, content="[Plan] This task is taking many steps.")
+        self.assertEqual(_summary_task([SYSTEM, TASK, *tool_turn(0), note]), TASK.content)
+        follow_up = Message(role=Role.USER, content="Now check the tests.")
+        self.assertEqual(_summary_task([SYSTEM, TASK, follow_up, note]),
+                         f"{TASK.content}\n\nLatest message:\n{follow_up.content}")
+        self.assertIsNone(_summary_task([SYSTEM]))
+
     def test_transcript_is_bounded(self) -> None:
         big = [Message(role=Role.USER, content="z" * 50_000)] * 3
         summarizer = ContextSummarizer(max_input_chars=5_000, max_message_chars=1_000)
@@ -266,8 +287,10 @@ class OrchestratorSummaryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(finished.status, RunStatus.COMPLETED)
         self.assertGreaterEqual(len(model.summary_requests), 2)
+        # Every summary request carries the pinned question.
+        self.assertTrue(all(TASK.content in r.messages[1].content for r in model.summary_requests))
         # Later summaries fold in the previous one.
-        self.assertIn("Previous summary:\nSUMMARY-1", model.summary_requests[1].messages[1].content)
+        self.assertIn("\n\nPrevious summary:\nSUMMARY-1", model.summary_requests[1].messages[1].content)
         assert finished.context_summary is not None
         self.assertTrue(finished.context_summary.content.startswith(f"SUMMARY-{len(model.summary_requests)}"))
         last = model.requests[-1].messages

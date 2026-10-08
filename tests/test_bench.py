@@ -258,6 +258,20 @@ profile = "ollama"
             summary = json.loads(Path(directory, "out", "pipeline-summary.json").read_text())
             self.assertEqual(len(summary), 4)
 
+            # A baseline from another dataset is replaced when the report passes on its own.
+            baseline_path = Path(directory, "baselines", "gsm8k.json")
+            stale = json.loads(baseline_path.read_text())
+            stale["dataset"]["sha256"] = "an-older-dataset"
+            baseline_path.write_text(json.dumps(stale))
+            for path in Path(directory, "out").glob("*/results.jsonl"):
+                path.unlink()
+            third = await run_pipeline(plan, stages=("benchmarks", "gates"), update_baselines=True,
+                                       models=Oracle())
+            gate = next(r for r in third if r.stage == "gate:gsm8k")
+            self.assertEqual(gate.status, "fail")
+            self.assertIn("dataset changed; the report replaces the baseline", gate.detail)
+            self.assertNotEqual(json.loads(baseline_path.read_text())["dataset"]["sha256"], "an-older-dataset")
+
     async def test_offline_stages_ignore_harness_overrides(self) -> None:
         seen: dict[str, dict[str, str]] = {}
 

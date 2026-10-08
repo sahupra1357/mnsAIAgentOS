@@ -163,6 +163,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   applies only to profiles with `context_window`. The summary is a model call that
   counts against the budget and is persisted on the run (`context_summary`). A test
   model must answer requests with `metadata["purpose"] == "summary"`.
+  The summary request starts with the user's request (first and latest user messages,
+  not `[Plan]` notes): it is pinned outside the summarized range, and without it Qwen 27B
+  wrote "the user has not provided a goal".
 - `ModelResolver.resolve` is synchronous (no `await`). `Execution.md` was brought up to date
   with the Phase 1–6 flow and now shows it correctly.
 - **Subagent nesting (6c).** Subagents exist only when `[[agents]]` are defined; the

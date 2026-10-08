@@ -229,6 +229,20 @@ _MAX_CHECKPOINT_CONFLICTS = 5
 MAX_USER_MESSAGE_CHARS = 100_000
 
 
+def _summary_task(messages: Sequence[Message]) -> str | None:
+    """The user's request for the summarizer: the first user message and the latest one.
+
+    Orchestrator notes (``[Plan] ...``) are user messages too, and are skipped.
+    """
+
+    requests = [m.content for m in messages
+                if m.role is Role.USER and m.content.strip() and not m.content.startswith("[Plan]")]
+    if not requests:
+        return None
+    first, latest = requests[0], requests[-1]
+    return first if first == latest else f"{first}\n\nLatest message:\n{latest}"
+
+
 class AgentOrchestrator:
     """Advance persisted runs through deterministic model and tool boundaries.
 
@@ -1716,6 +1730,7 @@ class AgentOrchestrator:
             run.messages[start:target],
             profile=profile,
             metadata={"run_id": run.id, "step": str(run.step_count), "purpose": "summary"},
+            task=_summary_task(run.messages),
         )
         try:
             response = await self._models.resolve(profile).complete(request)
