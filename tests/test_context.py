@@ -168,6 +168,32 @@ class BudgetedContextBuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(ContextWindowExceededError, "even after omitting"):
             builder(max_tool_output_chars=None).build(messages, (), model_profile="small")
 
+    def test_newest_turn_tool_outputs_shrink_to_fit(self) -> None:
+        # Three parallel results that together overflow the window (run-lifecycle, 2026-10-08).
+        calls = tuple(ToolCall(f"c{i}", "lookup", {"query": f"q{i}"}) for i in range(3))
+        sizes = (2400, 3000, 1200)
+        results = [
+            Message(role=Role.TOOL, content=f"result {i} " + "x" * size, name="lookup", tool_call_id=f"c{i}")
+            for i, size in enumerate(sizes)
+        ]
+        messages = [SYSTEM, TASK, Message(role=Role.ASSISTANT, tool_calls=calls), *results]
+
+        view = builder().build(messages, (LOOKUP,), model_profile="small")
+
+        assert view.estimated_tokens is not None
+        self.assertLessEqual(view.estimated_tokens, 2000 - 200)
+        self.assertEqual(view.trimmed_tool_outputs, 3)
+        self.assertEqual(len(view.messages), len(messages))
+        assert_tool_pairs_intact(self, view.messages)
+        shortened = [m.content for m in view.messages[-3:]]
+        for index, content in enumerate(shortened):
+            self.assertTrue(content.startswith(f"result {index} "))
+            self.assertIn("characters truncated", content)
+        # In proportion: the largest result keeps the most.
+        self.assertGreater(len(shortened[1]), len(shortened[0]))
+        self.assertGreater(len(shortened[0]), len(shortened[2]))
+        self.assertEqual(len(messages[-2].content), len("result 1 ") + 3000)  # history unchanged
+
     def test_policy_and_limits_validation(self) -> None:
         with self.assertRaises(ValueError):
             ContextPolicy(high_water_ratio=0.5, low_water_ratio=0.6)

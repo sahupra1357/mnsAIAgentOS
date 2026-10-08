@@ -159,6 +159,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   others still send the full history. For Ollama's OpenAI-compatible mode, the server's
   own context (`OLLAMA_CONTEXT_LENGTH`) must also be at least that large, or the server
   truncates silently. See `skills/context-management/SKILL.md`.
+  When only the newest turn is left and it still does not fit (several large parallel tool
+  results), its tool outputs are shortened in proportion (`_fit_newest_unit`) instead of
+  raising `ContextWindowExceededError`; Qwen 3.6 35B-A3B hit this with three `search_files`
+  results (35K characters) in a 16K window.
 - **Summarization (Phase 2.3).** It is off unless `[summarization] enabled = true`, and
   applies only to profiles with `context_window`. The summary is a model call that
   counts against the budget and is persisted on the run (`context_summary`). A test

@@ -29,8 +29,11 @@ rewrite `RunRecord.messages` to fit a context window. Build a separate, per-call
 4. Drop or summarize the oldest middle turns first. If summarizing, the summary is a model
    call: record it as an event, count it against the run budget, and make it
    deterministic on resume by persisting the summary instead of regenerating it.
-5. If the minimum view (system + first user + latest turn) still exceeds the window, fail
-   with a clear, non-retryable error rather than sending a truncated request.
+5. If the minimum view (system + first user + latest turn) still exceeds the window, first
+   shorten the latest turn's tool outputs together, in proportion to their size (never below
+   200 characters each, with the usual truncation marker). Only if that is not enough (the
+   pinned head or a user message is too large), fail with a clear, non-retryable error
+   rather than sending a truncated request.
 
 ## Prefix-cache friendliness
 
