@@ -144,6 +144,9 @@ model scored 6/6 on `agents` and never delegated in real chats). `tasks` measure
   - `tools` / `no_tools`: tools it must / must not use.
 
   An item is correct when both hold; `options.score = "answer"` makes behavior report-only.
+  Expect what has to be true, not a route you prefer: when answering alone is fast and right
+  (two short lookups), use `max_steps` rather than `delegate = true`. The sample's
+  independent-parts items did this after Qwen 27B answered both correctly in 4 steps.
 - **Details per item:** `planned`, `subagents`, `steps`, `tool_calls`, `tools_used`,
   `summaries`, `reminded` (the auto-plan reminder fired), `guard_flags`, `decisions`
   (approvals and questions answered), `behavior_failures`, `missing_facts`, `judge`.
@@ -158,6 +161,10 @@ model scored 6/6 on `agents` and never delegated in real chats). `tasks` measure
 - **Budgets and time.** The plan gives each item 40 steps and 15 minutes, like a real chat
   turn. On a 27B model on a Mac the 8 sample items take 1-2 hours; a 3B-active MoE model is
   several times faster. `scripts/validate.sh agent-tasks` runs it alone.
+- **Comparing models.** The baseline is per profile (`tasks-{profile}.json`), not per model.
+  Swapping the model behind the same profile compares against the previous model's report;
+  leave out `--update-baselines` for that run, or a passing run replaces the reference.
+  With 8 items a difference of one or two items is within noise; use `repeats = 3` to compare.
 - **Judge.** By default the model under test grades itself, which is lenient; set
   `judge_profile` to a stronger profile when you have one.
 - **Write tasks from real failures.** The sample covers the patterns seen so far (simple
