@@ -144,9 +144,7 @@ class BenchContext:
         )
         finished = await orchestrator.run(run.id)
         events = await store.list_events(run.id)
-        item_id = CURRENT_ITEM.get()
-        if self.transcripts is not None and item_id is not None:
-            self._write_transcript(item_id, finished, events)
+        self.record_transcript(finished, events)
         output = next(
             (m.content for m in reversed(finished.messages) if m.role is Role.ASSISTANT and not m.tool_calls),
             "",
@@ -156,6 +154,13 @@ class BenchContext:
             e.type is EventType.TOOL_RESPONDED and e.payload.get("status") != "success" for e in events
         )
         return AgentOutcome(finished, output, calls, errors, list(events))
+
+    def record_transcript(self, run: RunRecord, events: Sequence[Any]) -> None:
+        """Save the current item's run (messages, events) when transcripts are on."""
+
+        item_id = CURRENT_ITEM.get()
+        if self.transcripts is not None and item_id is not None:
+            self._write_transcript(item_id, run, events)
 
     async def call_model(self, request: ModelRequest) -> ModelResponse:
         """One direct model call (suites that test raw model behaviour, such as BFCL).
