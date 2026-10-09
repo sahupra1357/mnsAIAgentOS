@@ -183,6 +183,10 @@ class OrchestratorSettings:
     # None keeps RunBudget's defaults and leaves continuations' budgets unchanged.
     turn_max_steps: int | None = None
     turn_max_wall_seconds: float | None = None
+    # On a run's last allowed step, tell the model to answer with what it has and send that
+    # request with tool_choice="none", so the step limit ends in an answer instead of a run
+    # that stops mid-search (a subagent's findings were otherwise lost to its parent).
+    final_answer_on_last_step: bool = False
 
     def __post_init__(self) -> None:
         if self.turn_max_steps is not None and self.turn_max_steps < 1:
@@ -229,14 +233,20 @@ _MAX_CHECKPOINT_CONFLICTS = 5
 MAX_USER_MESSAGE_CHARS = 100_000
 
 
+FINAL_STEP_NOTE = (
+    "[Budget] This is your last step: tools are no longer available. Answer now with what "
+    "you have found so far, and say briefly what you could not check."
+)
+
+
 def _summary_task(messages: Sequence[Message]) -> str | None:
     """The user's request for the summarizer: the first user message and the latest one.
 
-    Orchestrator notes (``[Plan] ...``) are user messages too, and are skipped.
+    Orchestrator notes (``[Plan] ...``, ``[Budget] ...``) are user messages too, and are skipped.
     """
 
     requests = [m.content for m in messages
-                if m.role is Role.USER and m.content.strip() and not m.content.startswith("[Plan]")]
+                if m.role is Role.USER and m.content.strip() and not m.content.startswith(("[Plan]", "[Budget]"))]
     if not requests:
         return None
     first, latest = requests[0], requests[-1]
@@ -816,6 +826,7 @@ class AgentOrchestrator:
             return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
 
         await self._auto_plan_reminder(run, events)
+        await self._final_step_note(run, events)
         await self._apply_steers(run, events)
         await self._perform_model_turn(run, events)
         return run.status.is_terminal
@@ -1479,7 +1490,8 @@ class AgentOrchestrator:
                     metadata={"run_id": run.id, "step": str(run.step_count)},
                     # Without tools the server constrains the reply itself.
                     response_schema=run.output_schema if not specs else None,
-                    tool_choice=SUBMIT_RESULT_TOOL if specs and _submit_forced(events) else None,
+                    tool_choice=(SUBMIT_RESULT_TOOL if specs and _submit_forced(events)
+                                 else "none" if specs and self._on_final_step(run) else None),
                 )
 
             request = make_request(view)
@@ -3032,6 +3044,25 @@ class AgentOrchestrator:
             await self._plan_inject(run, events, AUTO_PLAN_REMINDER,
                                     {"reminder": "auto_plan", "tool_steps": tool_steps})
 
+    def _on_final_step(self, run: RunRecord) -> bool:
+        """The model turn being made is the run's last allowed step (``final_answer_on_last_step``)."""
+
+        return (self._settings.final_answer_on_last_step and run.output_schema is None
+                and run.step_count >= run.budget.max_steps)
+
+    async def _final_step_note(self, run: RunRecord, events: list[RunEvent]) -> None:
+        """Before the last allowed step, tell the model to answer now (once; stored, so resume sees it)."""
+
+        if not (self._settings.final_answer_on_last_step and run.output_schema is None
+                and run.step_count + 1 >= run.budget.max_steps):
+            return
+        last_user = next((m for m in reversed(run.messages) if m.role is Role.USER), None)
+        if last_user is not None and last_user.content == FINAL_STEP_NOTE:
+            return
+        if not self._specs_for(run):
+            return  # without tools the next reply is an answer anyway
+        await self._plan_inject(run, events, FINAL_STEP_NOTE, {"reminder": "final_step"})
+
     async def _plan_inject(
         self, run: RunRecord, events: list[RunEvent], text: str, payload: Mapping[str, Any]
     ) -> None:
@@ -3070,7 +3101,11 @@ class AgentOrchestrator:
         output = next((m.content for m in reversed(child.messages)
                        if m.role is Role.ASSISTANT and not m.tool_calls), "")
         completed = child.status is RunStatus.COMPLETED
-        result = truncate_result(output if completed else f"did not finish ({child.status.value}): {child.error or ''}")
+        if completed:
+            text = output if output.strip() else "returned no answer." + _partial_findings(child)
+        else:
+            text = f"did not finish ({child.status.value}): {child.error or ''}" + _partial_findings(child)
+        result = truncate_result(text)
         plan = run.plan
         assert plan is not None
         status = PlanStepStatus.COMPLETED if completed else PlanStepStatus.FAILED
@@ -3454,7 +3489,12 @@ class AgentOrchestrator:
             final_output=output[:_HOOK_RESULT_PREVIEW_CHARS],
         ), call_id=call.id)
         completed = finished.status is RunStatus.COMPLETED
-        body = output if completed else f"The subagent did not finish ({finished.status.value}): {finished.error or ''}"
+        if completed:
+            # A thinking model can spend its last step's allowance reasoning and answer nothing.
+            body = output if output.strip() else "The subagent returned no answer." + _partial_findings(finished)
+        else:
+            body = (f"The subagent did not finish ({finished.status.value}): {finished.error or ''}"
+                    + _partial_findings(finished))
         result = ToolResult(
             call.id,
             call.name,
@@ -3873,6 +3913,14 @@ def _step_of_assistant(events: Sequence[RunEvent], *, cut_index: int, rewinds: i
     if cut_index - 1 < len(kept):
         return kept[cut_index - 1]
     return kept[-1] + 1 if kept else 1
+
+
+def _partial_findings(child: RunRecord) -> str:
+    """What an unfinished child had found: its context summary, when it wrote one."""
+
+    if child.context_summary is None or not child.context_summary.content.strip():
+        return ""
+    return "\nWhat it had found before it stopped (its context summary):\n" + child.context_summary.content.strip()
 
 
 def _waiting_child(events: Sequence[RunEvent]) -> RunEvent | None:

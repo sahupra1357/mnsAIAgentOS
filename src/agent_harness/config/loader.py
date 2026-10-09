@@ -573,6 +573,7 @@ class OrchestratorConfig:
     reserve_tokens_per_run: int = 0  # 0: reserve everything left (see OrchestratorSettings)
     turn_max_steps: int = 0          # 0: RunBudget's default (20), continuations unchanged
     turn_max_wall_seconds: float = 0.0  # 0: RunBudget's default (300 s)
+    final_answer_on_last_step: bool = False  # last allowed step: answer without tools
 
     def __post_init__(self) -> None:
         if self.turn_max_steps < 0 or self.turn_max_wall_seconds < 0:

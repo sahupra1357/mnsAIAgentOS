@@ -353,6 +353,9 @@ class DateNoteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(orchestrator_settings(OrchestratorConfig()).current_date_note)
         self.assertTrue(orchestrator_settings(OrchestratorConfig(current_date_note=True)).current_date_note)
+        self.assertFalse(orchestrator_settings(OrchestratorConfig()).final_answer_on_last_step)
+        self.assertTrue(orchestrator_settings(
+            OrchestratorConfig(final_answer_on_last_step=True)).final_answer_on_last_step)
 
 
 class TurnBudgetTests(unittest.IsolatedAsyncioTestCase):

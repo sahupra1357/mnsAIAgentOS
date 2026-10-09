@@ -64,6 +64,15 @@ user messages.
   - **Approvals:** a child that pauses for approval pauses the parent
     (`SUBAGENT_WAITING`). The other children still finish and their results are kept.
   - **Safety:** children are separate runs, so the store's lock keeps the writes safe.
+  - **Ending in an answer:** with `[orchestrator] final_answer_on_last_step = true`, a run's
+    last allowed step (a child's `max_steps`, or the parent's) gets the `[Budget]` note
+    (`FINAL_STEP_NOTE`) and `tool_choice = "none"`; the tools stay in the request, so the
+    cached prefix holds. A child that still does not finish reports its context summary to
+    the parent ("What it had found before it stopped"), not only its error. Measured on
+    2026-10-08: a researcher spent its 12 steps on 31 reads and returned nothing.
+    Checked live on llama.cpp (Qwen 3.6): `tool_choice = "none"` is honoured, but without the
+    note Qwen can write a tool call as plain text, so keep both. An empty answer (a thinking
+    model out of tokens) is reported as "returned no answer" plus the summary.
 
 ## Nesting
 

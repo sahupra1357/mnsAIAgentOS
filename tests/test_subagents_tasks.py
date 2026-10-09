@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -18,6 +19,7 @@ from agent_harness.orchestration.agents import AGENT_TOOL, TODO_TOOL, SubagentDe
 from agent_harness.application import build_application
 from agent_harness.config.loader import ConfigError
 from agent_harness.domain import (
+    ContextSummary,
     EventType,
     FinishReason,
     JsonObject,
@@ -35,7 +37,12 @@ from agent_harness.domain import (
 )
 from agent_harness.extensions.hooks import CallableHook, HookEvent, HookOutcome, HookRunner
 from agent_harness.model_gateway import HttpResponse
-from agent_harness.orchestration.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import (
+    FINAL_STEP_NOTE,
+    AgentOrchestrator,
+    OrchestratorSettings,
+    _partial_findings,
+)
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.tools import ApprovalMode, DefaultToolPolicy, ToolRegistry, ToolRuntime
 
@@ -183,6 +190,42 @@ class SubagentTests(unittest.IsolatedAsyncioTestCase):
         result = next(m.content for m in finished.messages if m.role is Role.TOOL)
         self.assertIn("[subagent researcher: budget_exhausted]", result)
         self.assertEqual(finished.status, RunStatus.COMPLETED)
+
+    async def test_last_step_answers_without_tools(self) -> None:
+        # Live run 2026-10-08: a researcher spent its 12 steps reading and returned nothing.
+        model = Model({
+            PARENT: [delegate(), answer("handled")],
+            RESEARCHER.prompt: [call("lookup", {}, "x1"), answer("Partial: the release is in May.")],
+        })
+        orchestrator, _, _ = harness(
+            model, settings=OrchestratorSettings(final_answer_on_last_step=True),
+            subagents=[SubagentDefinition(name="researcher", description="d", prompt=RESEARCHER.prompt,
+                                          tools=("lookup",), max_steps=2)])
+        finished = await start(orchestrator)
+
+        first, last = model.requests[RESEARCHER.prompt]
+        self.assertIsNone(first.tool_choice)
+        self.assertEqual(last.tool_choice, "none")
+        self.assertEqual(tool_names(last), tool_names(first))  # same tools: the cached prefix holds
+        self.assertEqual(last.messages[-1].content, FINAL_STEP_NOTE)
+        result = next(m.content for m in finished.messages if m.role is Role.TOOL)
+        self.assertIn("[subagent researcher: completed]", result)
+        self.assertIn("release is in May", result)
+        # The parent's own last step is not reached, so it gets no note.
+        self.assertTrue(all(r.tool_choice is None for r in model.requests[PARENT]))
+
+    async def test_unfinished_child_reports_its_summary(self) -> None:
+        self.assertEqual(_partial_findings(SimpleNamespace(context_summary=None)), "")
+        partial = _partial_findings(SimpleNamespace(context_summary=ContextSummary(5, "Read worker.py: leases.")))
+        self.assertIn("What it had found", partial)
+        self.assertIn("Read worker.py: leases.", partial)
+
+    async def test_empty_child_answer_is_reported_not_passed_on_blank(self) -> None:
+        model = Model({PARENT: [delegate(), answer("handled")], RESEARCHER.prompt: [answer("")]})
+        orchestrator, _, _ = harness(model)
+        finished = await start(orchestrator)
+        result = next(m.content for m in finished.messages if m.role is Role.TOOL)
+        self.assertIn("The subagent returned no answer.", result)
 
     async def test_child_approval_is_forwarded_through_the_parent(self) -> None:
         deployer = SubagentDefinition(name="deployer", description="Deploys.", prompt="You deploy.", tools=("deploy",))
