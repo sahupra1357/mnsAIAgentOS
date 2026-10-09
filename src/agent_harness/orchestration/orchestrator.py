@@ -86,6 +86,8 @@ from agent_harness.tools.validation import ArgumentValidationError, validate_arg
 from agent_harness.orchestration.interaction import ASK_USER_SPEC, ASK_USER_TOOL
 from agent_harness.guardrails import GuardDecision, Guardrails
 from agent_harness.domain import (
+    INVALID_ARGUMENTS_ERROR_KEY,
+    INVALID_ARGUMENTS_KEY,
     ContentPart,
     ApprovalRequest,
     ArtifactRef,
@@ -2190,12 +2192,32 @@ class AgentOrchestrator:
         await self._record_tool_result(run, events, result, attempt=0)
         return True
 
+    async def _reject_invalid_arguments(self, run: RunRecord, events: list[RunEvent], call: ToolCall) -> None:
+        """The model wrote arguments that are not a JSON object: tell it, run nothing."""
+
+        error = str(call.arguments.get(INVALID_ARGUMENTS_ERROR_KEY, "not valid JSON"))
+        raw = str(call.arguments.get(INVALID_ARGUMENTS_KEY, ""))
+        shown = raw if len(raw) <= 500 else raw[:500] + "..."
+        result = ToolResult(
+            call_id=call.id,
+            name=call.name,
+            status=ToolResultStatus.VALIDATION_ERROR,
+            output={"error": f"invalid JSON arguments: {error}"},
+            model_message=(f"The arguments for {call.name} were not valid JSON ({error}), so the tool "
+                           f"did not run. You sent: {shown}\nSend the call again with a valid JSON object."),
+        )
+        self._append_tool_message(run, result)
+        await self._record_tool_result(run, events, result, attempt=0)
+
     async def _execute_tool(
         self, run: RunRecord, events: list[RunEvent], call: ToolCall
     ) -> None:
         specs = self._spec_map(run)
         spec = specs.get(call.name)
         pending_request = _pending_tool_request(events, run.step_count, call.id)
+        if INVALID_ARGUMENTS_KEY in call.arguments:
+            await self._reject_invalid_arguments(run, events, call)
+            return
         if spec is not None and pending_request is None:
             if await self._reuse_same_reply_result(run, events, call, specs):
                 return
@@ -2848,6 +2870,8 @@ class AgentOrchestrator:
             spec = specs.get(call.name)
             if spec is None or _pending_tool_request(events, run.step_count, call.id) is not None:
                 continue
+            if INVALID_ARGUMENTS_KEY in call.arguments:
+                continue  # the sequential loop reports it
             if spec.risk is ToolRisk.READ_ONLY and _call_signature(call) in signatures:
                 continue  # a duplicate in this reply reuses its twin's result instead
             signatures.add(_call_signature(call))

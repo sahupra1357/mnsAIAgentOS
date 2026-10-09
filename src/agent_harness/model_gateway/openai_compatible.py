@@ -16,6 +16,8 @@ from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Mapping, S
 
 from agent_harness.config.loader import ModelProfile
 from agent_harness.domain import (
+    INVALID_ARGUMENTS_ERROR_KEY,
+    INVALID_ARGUMENTS_KEY,
     FinishReason,
     Message,
     ModelRequest,
@@ -673,11 +675,17 @@ def _parse_tool_calls(value: Any) -> tuple[ToolCall, ...]:
         name = _required_nonempty_string(function.get("name"), "tool call function name")
         arguments_value = function.get("arguments", "{}")
         if isinstance(arguments_value, str):
-            arguments = json.loads(arguments_value)
+            try:
+                arguments = json.loads(arguments_value or "{}")
+            except json.JSONDecodeError as exc:
+                # The model's mistake, not the server's: the orchestrator reports it back.
+                arguments = {INVALID_ARGUMENTS_KEY: arguments_value[:4000],
+                             INVALID_ARGUMENTS_ERROR_KEY: str(exc)}
         else:
             arguments = arguments_value
         if not isinstance(arguments, dict):
-            raise ValueError("tool call arguments must decode to an object")
+            arguments = {INVALID_ARGUMENTS_KEY: json.dumps(arguments)[:4000],
+                         INVALID_ARGUMENTS_ERROR_KEY: "the arguments must be a JSON object"}
         parsed.append(ToolCall(id=call_id, name=name, arguments=arguments))
     return tuple(parsed)
 

@@ -49,6 +49,10 @@ OpenAI-compatible endpoints are the baseline adapter because they cover hosted a
 
 - Validate normalized output before returning it.
 - Classify authentication, throttling, timeout, malformed-response, and provider errors.
+- Tool-call arguments that are not a JSON object are not a malformed response: `_parse_tool_calls`
+  keeps the raw text under `INVALID_ARGUMENTS_KEY` (and the error under `INVALID_ARGUMENTS_ERROR_KEY`),
+  and the orchestrator answers that call with a validation error instead of running it
+  (`_reject_invalid_arguments`). A Qwen 3.6 researcher once died on "Expecting ',' delimiter".
 - Retry only explicit transient failures with bounded backoff.
 - Do not silently route to a different model unless the selected routing policy permits fallback.
 - Return usage when provided; mark it unknown rather than inventing counts.

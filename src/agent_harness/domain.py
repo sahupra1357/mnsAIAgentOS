@@ -141,6 +141,13 @@ class ToolCall:
     arguments: JsonObject
 
 
+# A tool call whose arguments were not valid JSON keeps the raw text under this key (with the
+# parse error under INVALID_ARGUMENTS_ERROR_KEY); the orchestrator answers it with an error
+# result instead of running the tool, so one malformed call does not fail the run.
+INVALID_ARGUMENTS_KEY = "__invalid_arguments__"
+INVALID_ARGUMENTS_ERROR_KEY = "__invalid_arguments_error__"
+
+
 @dataclass(frozen=True, slots=True)
 class ContentPart:
     """An attachment to a message's text (Phase 12d): an image for vision models.
