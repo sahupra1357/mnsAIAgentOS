@@ -175,7 +175,7 @@ baseline = "../baselines/tasks-{profile}.json"
 [benchmark.options]
 repeats = 1
 score = "all"                     # "answer": how it worked is reported, not scored
-judge_max_tokens = 1536
+judge_max_tokens = 4096              # thinking judges reason first; Qwen 3.6 needed up to ~1,800
 # judge_profile = "modal"
 [benchmark.thresholds]
 max_accuracy_drop = 0.13          # 1 of 9 items (0.11)

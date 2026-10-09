@@ -119,8 +119,13 @@ Each suite exercises a different layer of the harness:
 the references, the optional `rubric`, and the answer to `judge_profile` (default: the
 profile under test). It expects `{"correct": true|false, "reason": "..."}` back. Use a
 different, stronger profile as the judge where you can: a model grading its own answers
-is lenient. `judge_max_tokens` (default 1024) leaves room for thinking models. The verdict
-is stored in each item's `details.judge`.
+is lenient. `judge_max_tokens` (default 1024) caps the judge's reply, and a thinking
+model's hidden reasoning counts against it: Qwen 3.6 35B-A3B needed up to ~1,800 tokens to
+grade a long answer, so the plan sets 4096 (a model that does not think still stops after
+its short verdict). A judge cut off by the cap reports "the judge ran out of tokens ...;
+raise judge_max_tokens" instead of an unreadable verdict. Keep the judge the same across
+runs you compare; when each model grades itself, part of a score difference is the judge.
+The verdict is stored in each item's `details.judge`.
 
 | `context` | Context handling past the window: trimming, `token_counting = "server"` (`context_capped` events), overflow recovery. The fact to recall sits in the newest part of a long conversation | Synthetic (no download): `examples/bench/context_sample.jsonl` | `{"needle", "question", "answer", "filler": "prose" \| "json" \| "code"}` |
 | `agents` | Subagents: the top-level agent can only use the `agent` tool, so it must delegate each independent part of the question to a `researcher` subagent (which reads notes), ideally in parallel, and then combine the answers. Correct means every expected fact is in the answer; delegation is reported, not scored (`subagents`, `max_parallel` in details) | Synthetic: `examples/bench/agents_sample.jsonl` | `{"notes": {name: text}, "question", "answer": [facts]}` |

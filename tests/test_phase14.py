@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_harness.bench.core import BenchContext, BenchItem
-from agent_harness.bench.suites import QaSuite, parse_verdict
+from agent_harness.bench.suites import QaSuite, judge_answer, parse_verdict
 from agent_harness.config.loader import ConfigError, HarnessConfig, ModelProfile, load_config
 from agent_harness.orchestration.context import context_policy_from_config
 from agent_harness.domain import (
@@ -293,6 +293,20 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
         result = await QaSuite().run(BenchItem("q", {"question": "?"}, ["12"]), context)
         self.assertFalse(result.correct)
         self.assertIsNone(result.details["judge"]["correct"])
+
+    async def test_judge_cut_off_by_its_token_limit_says_so(self) -> None:
+        class CutOff:
+            def resolve(self, name: str) -> Any:
+                class Client:
+                    async def complete(self, request: ModelRequest) -> ModelResponse:
+                        return ModelResponse(content="", finish_reason=FinishReason.LENGTH)
+                return Client()
+
+        context = BenchContext(models=CutOff(), profile="p", options={"judge_max_tokens": 1536})
+        verdict = await judge_answer(context, "?", ["12"], "12")
+        self.assertIsNone(verdict["correct"])
+        self.assertIn("ran out of tokens (1536", verdict["reason"])
+        self.assertIn("judge_max_tokens", verdict["reason"])
 
 
 # --- 5. Semantic memory -----------------------------------------------------------------------------------
