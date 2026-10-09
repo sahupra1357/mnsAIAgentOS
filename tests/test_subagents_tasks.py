@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import tempfile
@@ -9,6 +10,8 @@ import unittest
 from collections import deque
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -304,6 +307,60 @@ class SubagentTests(unittest.IsolatedAsyncioTestCase):
         finished = await start(orchestrator)
         result = next(m.content for m in finished.messages if m.role is Role.TOOL)
         self.assertIn("verified researcher (completed)", result)
+
+
+class LimitsAndBadCallsTests(unittest.IsolatedAsyncioTestCase):
+    """``[subagents] max_parallel`` (live run 2026-10-09)."""
+
+    async def test_max_parallel_limits_children_running_at_once(self) -> None:
+        for limit, expected in ((2, 2), (0, 3)):
+            with self.subTest(max_parallel=limit):
+                active, peak = 0, 0
+
+                class Counting(Model):
+                    async def complete(self, request: ModelRequest) -> ModelResponse:
+                        nonlocal active, peak
+                        system = next((m.content for m in request.messages if m.role is Role.SYSTEM), "")
+                        if system != RESEARCHER.prompt:
+                            return await super().complete(request)
+                        active += 1
+                        peak = max(peak, active)
+                        await asyncio.sleep(0.01)
+                        active -= 1
+                        return answer("found")
+
+                three = ModelResponse(tool_calls=tuple(
+                    ToolCall(f"c{i}", AGENT_TOOL, {"agent": "researcher", "task": f"part {i}"}) for i in range(3)),
+                    finish_reason=FinishReason.TOOL_CALLS)
+                model = Counting({PARENT: [three, answer("all parts")], RESEARCHER.prompt: []})
+                orchestrator, _, _ = harness(model, subagent_limits=SubagentLimits(max_parallel=limit))
+                finished = await start(orchestrator)
+                self.assertEqual(finished.status, RunStatus.COMPLETED)
+                self.assertEqual(peak, expected)
+                results = [m.content for m in finished.messages if m.role is Role.TOOL]
+                self.assertEqual(len(results), 3)
+                self.assertTrue(all("[subagent researcher: completed]" in r for r in results))
+
+    async def test_max_parallel_validation_and_config(self) -> None:
+        with self.assertRaises(ValueError):
+            SubagentLimits(max_parallel=-1)
+        self.assertEqual(SubagentLimits().max_parallel, 0)  # no limit unless configured
+
+    async def test_waiting_child_gets_no_more_time_than_its_parent_has_left(self) -> None:
+        clock = SimpleNamespace(now=datetime(2026, 10, 9, 12, tzinfo=UTC))
+        orchestrator, store, _ = harness(Model({PARENT: [], RESEARCHER.prompt: [answer("ok")]}),
+                                         clock=lambda: clock.now)
+        parent = await orchestrator.create_run(model_profile="p", messages=[Message(Role.SYSTEM, PARENT),
+                                               Message(Role.USER, "t")], budget=RunBudget(max_wall_seconds=900))
+        parent.status, parent.started_at = RunStatus.RUNNING, clock.now
+        await store.save_checkpoint(replace(parent, version=parent.version + 1), [],
+                                    expected_version=parent.version)
+        child = await orchestrator.create_run(
+            model_profile="p", messages=[Message(Role.SYSTEM, RESEARCHER.prompt), Message(Role.USER, "x")],
+            parent_run_id=parent.id, depth=1, budget=RunBudget(max_wall_seconds=900))
+        clock.now += timedelta(seconds=600)  # it waited 10 minutes for a slot
+        finished = await orchestrator.run(child.id)
+        self.assertEqual(finished.budget.max_wall_seconds, 300)
 
 
 class TodoTests(unittest.IsolatedAsyncioTestCase):

@@ -218,6 +218,9 @@ enabled = true                   # todo_write task list, shown by `status`
 [subagents]
 max_depth = 2
 max_per_run = 6
+# Children of one parent running at once; the rest wait. llama.cpp shares one KV cache
+# (ctx-size) across concurrent requests: five 16K children overflowed a 32K cache.
+max_parallel = 2
 
 [[agents]]
 name = "researcher"

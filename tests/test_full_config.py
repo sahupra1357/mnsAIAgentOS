@@ -132,6 +132,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date
         self.assertTrue(c.orchestrator.final_answer_on_last_step)  # the last step answers
         self.assertEqual(c.orchestrator.final_answer_reserve_seconds, 120)  # ...and near the time limit
+        self.assertEqual(c.subagents.max_parallel, 2)  # a local server shares one KV cache
 
     def test_live_files_are_tracked_not_ignored(self) -> None:
         c = self.config
@@ -158,6 +159,7 @@ class FullConfigTests(unittest.TestCase):
                 app = build_application(config_path=FULL, database_path=str(Path(directory, "db.sqlite3")))
                 async with app:
                     (plugin,) = app.plugins
+                    self.assertEqual(app.orchestrator._agent_limits.max_parallel, 2)  # config reaches it
                     return ([a.name for a in plugin.agents], [h.name for h in plugin.hooks],
                             sorted(app.templates), sorted(app.skills))
 

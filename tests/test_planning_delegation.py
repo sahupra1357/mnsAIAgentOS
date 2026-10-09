@@ -342,6 +342,32 @@ class DelegationTests(unittest.IsolatedAsyncioTestCase):
         budgets = [(await store.get_run(child)).budget.max_tokens for child in children]  # type: ignore[union-attr]
         self.assertEqual(budgets, [500, 500])  # remaining budget split between the two
 
+    async def test_ready_agent_steps_respect_max_parallel(self) -> None:
+        active, peak = 0, 0
+
+        async def handler(request: ModelRequest) -> ModelResponse:
+            nonlocal active, peak
+            if is_child(request):
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.01)
+                active -= 1
+                return final("part done")
+            if "All steps are finished" in last_user(request):
+                return final("final answer")
+            return call("create_plan", {"goal": "g", "steps": [
+                {"id": f"s{i}", "title": f"Part {i}", "agent": "researcher"} for i in range(3)]}, "p1")
+
+        orchestrator = AgentOrchestrator(models=RoutedModel(handler), tools=create_default_runtime(),
+                                         store=InMemoryRunStore(), subagents=AGENTS,
+                                         subagent_limits=SubagentLimits(max_parallel=2))
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")], planning=True)
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(peak, 2)
+        assert finished.plan is not None
+        self.assertEqual([s.status for s in finished.plan.steps], [PlanStepStatus.COMPLETED] * 3)
+
     async def test_plan_child_waiting_for_approval_pauses_the_parent(self) -> None:
         async def deploy(arguments: Mapping[str, Any]) -> dict[str, Any]:
             return {"deployed": True}

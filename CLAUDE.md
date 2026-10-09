@@ -183,6 +183,8 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   The same applies to a finished plan's answer step, and when less than
   `final_answer_reserve_seconds` (120; at most a quarter of the time budget) is left; an
   answer to that note ends a planned run with steps left.
+  `[subagents] max_parallel` (0 = no limit in code, 2 in the root config) caps one parent's
+  children running at once; llama.cpp's shared KV cache overflowed with five.
 - **Quotas (Phase 10).** Admission is atomic in the store (`reserve`). A run's budget is
   capped to its grant, so a new run cannot overshoot the day's remainder. One model call can
   still overshoot, because tokens are known only after it returns. Changing the orchestrator's

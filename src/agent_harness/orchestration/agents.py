@@ -52,8 +52,14 @@ class SubagentDefinition:
 class SubagentLimits:
     max_depth: int = 2  # a parent at depth 0 may spawn children at depth 1 (and 2 if 2)
     max_per_run: int = 8
+    # Children of one parent that run at the same time (agent calls in one reply, or ready
+    # plan steps); the rest wait for a free slot. 0: no limit. A local server shares one KV
+    # cache across concurrent requests, so 5 children at once overflowed llama.cpp's.
+    max_parallel: int = 0
 
     def __post_init__(self) -> None:
+        if not 0 <= self.max_parallel <= 100:
+            raise ValueError("subagents max_parallel must be between 0 (no limit) and 100")
         if not 1 <= self.max_depth <= 5:
             raise ValueError("subagents max_depth must be between 1 and 5")
         if not 1 <= self.max_per_run <= 100:
