@@ -186,13 +186,19 @@ class OrchestratorSettings:
     # On a run's last allowed step, tell the model to answer with what it has and send that
     # request with tool_choice="none", so the step limit ends in an answer instead of a run
     # that stops mid-search (a subagent's findings were otherwise lost to its parent).
+    # The same applies once a plan is finished (the answer step) and when less than
+    # final_answer_reserve_seconds of the wall-clock budget is left (at most a quarter of
+    # it); 0 turns the time check off.
     final_answer_on_last_step: bool = False
+    final_answer_reserve_seconds: float = 120.0
 
     def __post_init__(self) -> None:
         if self.turn_max_steps is not None and self.turn_max_steps < 1:
             raise ValueError("turn_max_steps must be at least 1")
         if self.turn_max_wall_seconds is not None and self.turn_max_wall_seconds <= 0:
             raise ValueError("turn_max_wall_seconds must be positive")
+        if self.final_answer_reserve_seconds < 0:
+            raise ValueError("final_answer_reserve_seconds must not be negative")
         if self.reserve_tokens_per_run is not None and self.reserve_tokens_per_run < 1:
             raise ValueError("reserve_tokens_per_run must be at least 1")
         if self.max_model_attempts < 1:
@@ -237,6 +243,27 @@ FINAL_STEP_NOTE = (
     "[Budget] This is your last step: tools are no longer available. Answer now with what "
     "you have found so far, and say briefly what you could not check."
 )
+PLAN_FINISHED_NO_TOOLS = (
+    "Tools are no longer available: answer from the step results above."
+)
+
+
+def _final_note_since_reply(messages: Sequence[Message]) -> bool:
+    """FINAL_STEP_NOTE was delivered after the model's latest reply (the next turn answers)."""
+
+    for message in reversed(messages):
+        if message.role is Role.ASSISTANT:
+            return False
+        if message.role is Role.USER and message.content == FINAL_STEP_NOTE:
+            return True
+    return False
+
+
+def _answered_final_note(messages: Sequence[Message]) -> bool:
+    """The model's latest reply answered FINAL_STEP_NOTE."""
+
+    last = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].role is Role.ASSISTANT), None)
+    return last is not None and _final_note_since_reply(messages[:last])
 
 
 def _summary_task(messages: Sequence[Message]) -> str | None:
@@ -2919,6 +2946,12 @@ class AgentOrchestrator:
 
         plan = run.plan
         text = run.messages[-1].content if run.messages else ""
+        if plan is not None and plan.phase != "done" and _answered_final_note(run.messages):
+            # Out of steps or time: this answer ends the run, whatever steps are left.
+            run.plan = replace(plan, phase="done")
+            await self._checkpoint(run, events, self._plan_event(
+                run, EventType.PLAN_STEP_UPDATED, {"phase": "done", "after": plan.phase, "final_step": True}))
+            return False
         if plan is None:
             reminder = "[Plan] Before answering, call create_plan with your plan for this task."
             if any(m.role is Role.USER and m.content == reminder for m in run.messages):
@@ -3009,7 +3042,8 @@ class AgentOrchestrator:
         elif all(s.status.is_terminal for s in plan.steps):
             plan = replace(plan, phase="finalizing")
             notes.append("[Plan] All steps are finished.\n" + plan_summary(plan)
-                         + "\nNow write the final answer for the user.")
+                         + "\nNow write the final answer for the user."
+                         + (" " + PLAN_FINISHED_NO_TOOLS if self._final_answers(run) else ""))
         if not notes:
             run.plan = plan
             return acted
@@ -3044,17 +3078,39 @@ class AgentOrchestrator:
             await self._plan_inject(run, events, AUTO_PLAN_REMINDER,
                                     {"reminder": "auto_plan", "tool_steps": tool_steps})
 
-    def _on_final_step(self, run: RunRecord) -> bool:
-        """The model turn being made is the run's last allowed step (``final_answer_on_last_step``)."""
+    def _final_answers(self, run: RunRecord) -> bool:
+        return self._settings.final_answer_on_last_step and run.output_schema is None
 
-        return (self._settings.final_answer_on_last_step and run.output_schema is None
-                and run.step_count >= run.budget.max_steps)
+    def _on_final_step(self, run: RunRecord) -> bool:
+        """The model turn being made must answer without tools (``final_answer_on_last_step``).
+
+        That is the run's last allowed step, the answer step of a finished plan, and the turn
+        after the time note (``_final_step_note``).
+        """
+
+        if not self._final_answers(run):
+            return False
+        return (run.step_count >= run.budget.max_steps
+                or (run.planning and run.plan is not None and run.plan.phase == "finalizing")
+                or _final_note_since_reply(run.messages))
+
+    def _near_wall_limit(self, run: RunRecord) -> bool:
+        """Less than the reserve (at most a quarter of the wall-clock budget) is left."""
+
+        reserve = min(self._settings.final_answer_reserve_seconds, run.budget.max_wall_seconds / 4)
+        if reserve <= 0 or run.started_at is None:
+            return False
+        elapsed = (self._clock() - run.started_at).total_seconds()
+        return run.budget.max_wall_seconds - elapsed <= reserve
 
     async def _final_step_note(self, run: RunRecord, events: list[RunEvent]) -> None:
-        """Before the last allowed step, tell the model to answer now (once; stored, so resume sees it)."""
+        """Before the last allowed step, or near the time limit, tell the model to answer now.
 
-        if not (self._settings.final_answer_on_last_step and run.output_schema is None
-                and run.step_count + 1 >= run.budget.max_steps):
+        Once, and stored, so resume sees it.
+        """
+
+        if not (self._final_answers(run)
+                and (run.step_count + 1 >= run.budget.max_steps or self._near_wall_limit(run))):
             return
         last_user = next((m for m in reversed(run.messages) if m.role is Role.USER), None)
         if last_user is not None and last_user.content == FINAL_STEP_NOTE:

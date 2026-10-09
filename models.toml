@@ -135,7 +135,10 @@ current_date_note = true
 # On a run's last allowed step (a subagent's max_steps, or the turn's), the model is told to
 # answer with what it found, and the request has tool_choice = "none". Without it a
 # researcher spent its 12 steps reading and returned nothing to its parent.
+# The same happens once a plan is finished (its answer step) and when less than
+# final_answer_reserve_seconds of the run's time is left (at most a quarter of it).
 final_answer_on_last_step = true
+final_answer_reserve_seconds = 120
 # A run without its own token limit reserves this many tokens of the daily quota per turn,
 # instead of everything left (which refused every other run with HTTP 429 while it was
 # active). Its budget stays open; [[quotas]] is still enforced at each step.

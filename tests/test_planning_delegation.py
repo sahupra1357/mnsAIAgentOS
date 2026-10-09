@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from datetime import UTC, datetime, timedelta
 import unittest
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -27,7 +28,12 @@ from agent_harness.domain import (
     Usage,
 )
 from agent_harness.extensions.hooks import CallableHook, HookEvent, HookRunner
-from agent_harness.orchestration.orchestrator import AgentOrchestrator
+from agent_harness.orchestration.orchestrator import (
+    FINAL_STEP_NOTE,
+    PLAN_FINISHED_NO_TOOLS,
+    AgentOrchestrator,
+    OrchestratorSettings,
+)
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.orchestration.planning import PLANNER_INSTRUCTIONS, PlanningPolicy, parse_steps
 from agent_harness.tools import ToolRegistry, ToolRuntime, create_default_runtime
@@ -613,3 +619,117 @@ class PlanningModeConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = datetime(2026, 10, 8, 12, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class FinalAnswerTests(unittest.IsolatedAsyncioTestCase):
+    """``final_answer_on_last_step`` for a finished plan and near the time limit.
+
+    Live run 2026-10-08 (tasks/run-lifecycle, Qwen 3.6 35B-A3B): five researcher steps finished, then
+    the parent re-read files for 15 steps instead of answering and hit the 15-minute limit with no answer.
+    """
+
+    def orchestrator(self, handler: Handler, *, on: bool = True, clock: Clock | None = None,
+                     reserve: float = 120.0) -> AgentOrchestrator:
+        self.model = RoutedModel(handler)
+        return AgentOrchestrator(
+            models=self.model, tools=create_default_runtime(), store=InMemoryRunStore(),
+            clock=clock or Clock(),
+            settings=OrchestratorSettings(final_answer_on_last_step=on, final_answer_reserve_seconds=reserve))
+
+    async def test_finished_plan_answers_without_tools(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            text = last_user(request)
+            if "[Plan] Execute step s1" in text:
+                return final("s1 done")
+            if "All steps are finished" in text:
+                return final("the answer")
+            return call("create_plan", {"goal": "g", "steps": [{"id": "s1", "title": "One"}]}, "p1")
+
+        for on in (True, False):
+            with self.subTest(on=on):
+                orchestrator = self.orchestrator(handler, on=on)
+                run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")],
+                                                    planning=True)
+                finished = await orchestrator.run(run.id)
+                self.assertEqual(finished.status, RunStatus.COMPLETED)
+                self.assertEqual(finished.messages[-1].content, "the answer")
+                *earlier, last = self.model.requests
+                self.assertTrue(all(r.tool_choice is None for r in earlier))
+                self.assertEqual(last.tool_choice, "none" if on else None)
+                self.assertEqual(PLAN_FINISHED_NO_TOOLS in last_user(last), on)
+                # Same tools as the step before: the cached prefix holds.
+                self.assertEqual([t.name for t in last.tools], [t.name for t in earlier[-1].tools])
+
+    async def test_near_the_time_limit_answers_without_tools(self) -> None:
+        clock = Clock()
+
+        async def handler(request: ModelRequest) -> ModelResponse:
+            clock.now += timedelta(seconds=100)
+            if last_user(request) == FINAL_STEP_NOTE:
+                return final("partial answer")
+            return call("list_directory", {"path": "."}, f"c{len(self.model.requests)}")
+
+        orchestrator = self.orchestrator(handler, clock=clock)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "explore")],
+                                            budget=RunBudget(max_steps=40, max_wall_seconds=600))
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(finished.messages[-1].content, "partial answer")
+        *earlier, last = self.model.requests
+        self.assertEqual(len(earlier), 5)  # the note comes once 500 s of 600 have passed
+        self.assertTrue(all(r.tool_choice is None for r in earlier))
+        self.assertEqual(last.tool_choice, "none")
+        self.assertEqual([t.name for t in last.tools], [t.name for t in earlier[-1].tools])
+
+    async def test_time_note_off_with_zero_reserve_or_without_the_setting(self) -> None:
+        for kwargs in ({"reserve": 0.0}, {"on": False}):
+            with self.subTest(**kwargs):
+                clock = Clock()
+
+                async def handler(request: ModelRequest) -> ModelResponse:
+                    clock.now += timedelta(seconds=100)
+                    return call("list_directory", {"path": "."}, f"c{len(self.model.requests)}")
+
+                orchestrator = self.orchestrator(handler, clock=clock, **kwargs)
+                run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "explore")],
+                                                    budget=RunBudget(max_steps=40, max_wall_seconds=600))
+                finished = await orchestrator.run(run.id)
+                self.assertEqual(finished.status, RunStatus.BUDGET_EXHAUSTED)
+                self.assertTrue(all(r.tool_choice is None for r in self.model.requests))
+                self.assertNotIn(FINAL_STEP_NOTE, [m.content for m in finished.messages])
+
+    async def test_answer_to_the_time_note_ends_a_plan_with_steps_left(self) -> None:
+        clock = Clock()
+
+        async def handler(request: ModelRequest) -> ModelResponse:
+            text = last_user(request)
+            if text == FINAL_STEP_NOTE:
+                return final("what I have so far")
+            if "[Plan] Execute step s1" in text:
+                clock.now += timedelta(seconds=550)
+                return call("list_directory", {"path": "."}, "l1")
+            if "[Plan] Execute step" in text or "All steps are finished" in text:
+                return final("should not be reached")
+            return call("create_plan", {"goal": "g", "steps": [
+                {"id": "s1", "title": "One"}, {"id": "s2", "title": "Two", "depends_on": ["s1"]}]}, "p1")
+
+        orchestrator = self.orchestrator(handler, clock=clock)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")], planning=True,
+                                            budget=RunBudget(max_steps=40, max_wall_seconds=600))
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(finished.messages[-1].content, "what I have so far")
+        assert finished.plan is not None
+        self.assertEqual(finished.plan.phase, "done")
+        self.assertEqual(finished.plan.steps[1].status, PlanStepStatus.PENDING)
+        self.assertEqual(self.model.requests[-1].tool_choice, "none")
