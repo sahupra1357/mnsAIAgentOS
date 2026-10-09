@@ -44,7 +44,8 @@ local = "ollama"                 # routes are aliases, not dependencies
 [models.llamacpp]
 enabled = true
 adapter = "llama_cpp"
-model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
+#model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
+model = "ggml-org/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
 endpoint = "http://127.0.0.1:9931/v1"
 context_window = 16384           # per run; see the server note below
 # The llama.cpp server's ctx-size is ONE KV cache shared by all concurrent requests
