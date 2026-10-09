@@ -130,6 +130,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual((c.context.high_water_ratio, c.context.low_water_ratio), (0.85, 0.45))
         self.assertEqual(c.web_search.max_chars_per_result, 800)
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date
+        self.assertTrue(c.orchestrator.final_answer_on_last_step)  # the last step answers
 
     def test_live_files_are_tracked_not_ignored(self) -> None:
         c = self.config

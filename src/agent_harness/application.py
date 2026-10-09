@@ -391,6 +391,7 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         reserve_tokens_per_run=section.reserve_tokens_per_run or None,
         turn_max_steps=section.turn_max_steps or None,
         turn_max_wall_seconds=section.turn_max_wall_seconds or None,
+        final_answer_on_last_step=section.final_answer_on_last_step,
     )
 
 

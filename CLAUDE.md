@@ -177,6 +177,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   subagent is itself offered `agent` and can start its own children. Set
   `max_depth = 1` to let only the top-level run delegate. `examples/subagents.toml` is a
   complete example.
+  `[orchestrator] final_answer_on_last_step` (off in code, on in the root config) makes a
+  run's last allowed step an answer: a `[Budget]` note plus `tool_choice = "none"`. An
+  unfinished child reports its context summary to the parent (`_partial_findings`).
 - **Quotas (Phase 10).** Admission is atomic in the store (`reserve`). A run's budget is
   capped to its grant, so a new run cannot overshoot the day's remainder. One model call can
   still overshoot, because tokens are known only after it returns. Changing the orchestrator's
