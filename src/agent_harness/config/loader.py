@@ -380,6 +380,7 @@ class AgentConfig:
 class SubagentsConfig:
     max_depth: int = 2
     max_per_run: int = 8
+    max_parallel: int = 0  # children of one parent running at once (0: no limit)
 
 
 @dataclass(frozen=True, slots=True)

@@ -673,6 +673,7 @@ class AgentOrchestrator:
             now = self._clock()
             run.status = RunStatus.RUNNING
             run.started_at = now
+            await self._cap_to_parent_deadline(run, now)
             await self._checkpoint(
                 run,
                 events,
@@ -857,6 +858,18 @@ class AgentOrchestrator:
         await self._apply_steers(run, events)
         await self._perform_model_turn(run, events)
         return run.status.is_terminal
+
+    async def _cap_to_parent_deadline(self, run: RunRecord, now: datetime) -> None:
+        """A child that waited for a free slot (``max_parallel``) gets no more time than its parent has left."""
+
+        if run.parent_run_id is None:
+            return
+        parent = await self._store.get_run(run.parent_run_id)
+        if parent is None or parent.started_at is None:
+            return
+        left = parent.budget.max_wall_seconds - (now - parent.started_at).total_seconds()
+        if left < run.budget.max_wall_seconds:
+            run.budget = replace(run.budget, max_wall_seconds=max(1.0, left))
 
     async def resume(self, run_id: str) -> RunRecord:
         """Alias that makes recovery intent explicit to application services."""
@@ -2872,7 +2885,19 @@ class AgentOrchestrator:
                                             share=len(agents)) is None:
                     children.append(child_id)
             if len(children) >= 2:
-                await asyncio.gather(*(self.run(child_id) for child_id in children))
+                await self._run_children(children)
+
+    async def _run_children(self, child_ids: Sequence[str]) -> list[RunRecord]:
+        """Run children concurrently, at most ``max_parallel`` at a time (0: all at once)."""
+
+        limit = self._agent_limits.max_parallel or len(child_ids)
+        slots = asyncio.Semaphore(max(1, limit))
+
+        async def one(child_id: str) -> RunRecord:
+            async with slots:
+                return await self.run(child_id)
+
+        return list(await asyncio.gather(*(one(child_id) for child_id in child_ids)))
 
     # -- plan-and-execute ------------------------------------------------------
 
@@ -2999,7 +3024,7 @@ class AgentOrchestrator:
                        if s.status is PlanStepStatus.IN_PROGRESS and s.agent and s.child_run_id]
             if not running:
                 break
-            finished = await asyncio.gather(*(self.run(str(s.child_run_id)) for s in running))
+            finished = await self._run_children([str(s.child_run_id) for s in running])
             acted = True
             waiting = None
             for step, child in zip(running, finished):

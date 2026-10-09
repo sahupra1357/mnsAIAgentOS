@@ -283,7 +283,8 @@ def build_application(
             default_mode=PermissionMode(config.permissions.mode),
             subagents=_subagents(config, agent_sources, tool_runtime),
             subagent_limits=SubagentLimits(
-                max_depth=config.subagents.max_depth, max_per_run=config.subagents.max_per_run
+                max_depth=config.subagents.max_depth, max_per_run=config.subagents.max_per_run,
+                max_parallel=config.subagents.max_parallel,
             ),
             task_tracking=config.tasks.enabled,
             ask_user=config.interaction.ask_user,

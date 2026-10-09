@@ -61,6 +61,11 @@ user messages.
   create their children one by one, then run them together with `asyncio.gather`.
   - **Budgets:** the parent's remaining tokens and cost are split evenly across the
     concurrent children.
+  - **How many at once:** `[subagents] max_parallel` (0 = no limit; the root config uses 2)
+    caps the children of one parent running together (`_run_children`); the rest wait for a
+    slot. A child that waited gets at most the time its parent has left
+    (`_cap_to_parent_deadline`). llama.cpp shares one KV cache (`ctx-size`) across concurrent
+    requests: five 16K children overflowed a 32K cache on 2026-10-09.
   - **Approvals:** a child that pauses for approval pauses the parent
     (`SUBAGENT_WAITING`). The other children still finish and their results are kept.
   - **Safety:** children are separate runs, so the store's lock keeps the writes safe.
