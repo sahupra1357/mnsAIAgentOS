@@ -131,6 +131,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(c.web_search.max_chars_per_result, 800)
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date
         self.assertTrue(c.orchestrator.final_answer_on_last_step)  # the last step answers
+        self.assertEqual(c.orchestrator.final_answer_reserve_seconds, 120)  # ...and near the time limit
 
     def test_live_files_are_tracked_not_ignored(self) -> None:
         c = self.config

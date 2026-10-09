@@ -73,6 +73,14 @@ user messages.
     Checked live on llama.cpp (Qwen 3.6): `tool_choice = "none"` is honoured, but without the
     note Qwen can write a tool call as plain text, so keep both. An empty answer (a thinking
     model out of tokens) is reported as "returned no answer" plus the summary.
+  - **Also a finished plan and the time limit:** the same setting sends the answer step of a
+    finished plan (`finalizing`) with `tool_choice = "none"` (the note adds
+    `PLAN_FINISHED_NO_TOOLS`). When less than `final_answer_reserve_seconds` (default 120, at most
+    a quarter of the wall-clock budget; 0 = off) is left, the `[Budget]` note and
+    `tool_choice = "none"` come early. An answer to that note ends a planned run even with steps
+    left (`phase = "done"`, `final_step: true`). Measured on 2026-10-08 (tasks/run-lifecycle,
+    Qwen 3.6 35B-A3B): after five researcher steps the parent re-read files for 15 steps,
+    each one summarized, lost the "write the final answer" note, and hit 15 minutes with no answer.
 
 ## Nesting
 

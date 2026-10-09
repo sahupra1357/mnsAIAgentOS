@@ -392,6 +392,7 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         turn_max_steps=section.turn_max_steps or None,
         turn_max_wall_seconds=section.turn_max_wall_seconds or None,
         final_answer_on_last_step=section.final_answer_on_last_step,
+        final_answer_reserve_seconds=section.final_answer_reserve_seconds,
     )
 
 
