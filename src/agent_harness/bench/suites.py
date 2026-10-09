@@ -48,7 +48,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from agent_harness.domain import HarnessError, Message, ModelRequest, Role, RunBudget, ToolSpec
+from agent_harness.domain import FinishReason, HarnessError, Message, ModelRequest, Role, RunBudget, ToolSpec
 from agent_harness.tools import ToolRegistry, ToolRuntime, create_default_runtime
 
 from .core import BenchConfigError, BenchContext, BenchItem, ItemResult
@@ -255,6 +255,10 @@ async def judge_answer(
     except HarnessError as exc:
         return {"correct": None, "reason": f"judge call failed: {exc}", "profile": profile}
     correct, reason = parse_verdict(reply.content)
+    if correct is None and reply.finish_reason is FinishReason.LENGTH:
+        # A thinking judge can spend the whole allowance reasoning and reply with nothing.
+        reason = (f"the judge ran out of tokens ({request.max_output_tokens}, finish_reason=length); "
+                  "raise judge_max_tokens")
     return {"correct": correct, "reason": reason, "profile": profile}
 
 
