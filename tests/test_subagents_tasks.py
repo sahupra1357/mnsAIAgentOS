@@ -22,6 +22,8 @@ from agent_harness.orchestration.agents import AGENT_TOOL, TODO_TOOL, SubagentDe
 from agent_harness.application import build_application
 from agent_harness.config.loader import ConfigError
 from agent_harness.domain import (
+    INVALID_ARGUMENTS_ERROR_KEY,
+    INVALID_ARGUMENTS_KEY,
     ContextSummary,
     EventType,
     FinishReason,
@@ -310,7 +312,7 @@ class SubagentTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LimitsAndBadCallsTests(unittest.IsolatedAsyncioTestCase):
-    """``[subagents] max_parallel`` (live run 2026-10-09)."""
+    """``[subagents] max_parallel`` and tool calls with unreadable arguments (live run 2026-10-09)."""
 
     async def test_max_parallel_limits_children_running_at_once(self) -> None:
         for limit, expected in ((2, 2), (0, 3)):
@@ -361,6 +363,23 @@ class LimitsAndBadCallsTests(unittest.IsolatedAsyncioTestCase):
         clock.now += timedelta(seconds=600)  # it waited 10 minutes for a slot
         finished = await orchestrator.run(child.id)
         self.assertEqual(finished.budget.max_wall_seconds, 300)
+
+    async def test_unreadable_arguments_get_an_error_and_the_run_goes_on(self) -> None:
+        bad = {INVALID_ARGUMENTS_KEY: '{"query": "x" "path": "y"}',
+               INVALID_ARGUMENTS_ERROR_KEY: "Expecting ',' delimiter: line 1 column 15 (char 14)"}
+        both = ModelResponse(tool_calls=(ToolCall("b1", "lookup", bad), ToolCall("g1", "lookup", {"n": 1})),
+                             finish_reason=FinishReason.TOOL_CALLS)
+        model = Model({PARENT: [both, answer("done")]})
+        orchestrator, _, tools = harness(model)
+        finished = await start(orchestrator)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(tools.calls, ["lookup"])  # only the readable call ran (prefetch skipped the bad one)
+        bad_result, good_result = [m for m in finished.messages if m.role is Role.TOOL]
+        self.assertEqual(bad_result.tool_call_id, "b1")
+        self.assertIn("were not valid JSON (Expecting ',' delimiter", bad_result.content)
+        self.assertIn("Send the call again", bad_result.content)
+        self.assertIn("lookup result", good_result.content)
 
 
 class TodoTests(unittest.IsolatedAsyncioTestCase):

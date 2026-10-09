@@ -185,6 +185,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   answer to that note ends a planned run with steps left.
   `[subagents] max_parallel` (0 = no limit in code, 2 in the root config) caps one parent's
   children running at once; llama.cpp's shared KV cache overflowed with five.
+- **Unreadable tool arguments.** Arguments that are not a JSON object come back marked
+  (`INVALID_ARGUMENTS_KEY` in `domain.py`) and get a validation-error tool result; the run goes
+  on. Before, `MalformedResponseError` failed the run.
 - **Quotas (Phase 10).** Admission is atomic in the store (`reserve`). A run's budget is
   capped to its grant, so a new run cannot overshoot the day's remainder. One model call can
   still overshoot, because tokens are known only after it returns. Changing the orchestrator's

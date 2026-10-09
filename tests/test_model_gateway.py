@@ -5,6 +5,8 @@ import unittest
 
 from agent_harness.config.loader import HarnessConfig, ModelProfile
 from agent_harness.domain import (
+    INVALID_ARGUMENTS_ERROR_KEY,
+    INVALID_ARGUMENTS_KEY,
     FinishReason,
     Message,
     ModelRequest,
@@ -213,8 +215,17 @@ class OpenAICompatibleClientTests(unittest.IsolatedAsyncioTestCase):
         )
         client = OpenAICompatibleClient(profile(), transport=transport, environ={})
 
+        # Unreadable arguments are the model's mistake: the call comes back marked, and the
+        # orchestrator answers it with an error instead of failing the run (live run
+        # 2026-10-09: a researcher died on "Expecting ',' delimiter"). A broken body still raises.
+        response = await client.complete(ModelRequest(messages=()))
+        (call,) = response.tool_calls
+        self.assertEqual(call.arguments[INVALID_ARGUMENTS_KEY], "not-json")
+        self.assertIn("Expecting value", call.arguments[INVALID_ARGUMENTS_ERROR_KEY])
+        broken = OpenAICompatibleClient(profile(), transport=FakeTransport([HttpResponse(200, {}, b"{oops")]),
+                                        environ={})
         with self.assertRaises(MalformedResponseError):
-            await client.complete(ModelRequest(messages=()))
+            await broken.complete(ModelRequest(messages=()))
 
     async def test_timeout_is_retried_only_up_to_configured_bound(self) -> None:
         transport = FakeTransport(
