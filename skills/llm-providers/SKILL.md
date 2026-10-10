@@ -66,7 +66,7 @@ branch on a provider name. Read `skills/model-gateway/SKILL.md` as well.
   A missing variable for either layer is a `ModelConfigurationError` before any
   request. A 401/403 is an `AuthenticationError`. Error text must say which layer is
   missing without echoing values.
-- Server launch reference (deploy script lives in `examples/modal/`):
+- Server launch reference (deploy script lives in `deploy/modal/`):
   - vLLM: `vllm serve <model> --api-key $KEY --enable-auto-tool-choice
     --tool-call-parser <hermes|llama3_json|mistral|...> --max-model-len <N>`
   - SGLang: `python -m sglang.launch_server --model-path <model> --api-key $KEY
@@ -181,7 +181,7 @@ must appear in the orchestrator.
   `_cached_input_tokens`, `_cold_start_timeout`).
 - `model_gateway/ollama.py`, `llama_cpp.py`, `modal.py`: provider subclasses.
 - `model_gateway/diagnostics.py`: `diagnose()`, used by `agent-harness doctor`.
-- `examples/modal/vllm_server.py`, `examples/modal/sglang_server.py`: deploy scripts.
+- `deploy/modal/vllm_server.py`, `deploy/modal/sglang_server.py`: deploy scripts.
 - `tests/test_providers.py`: fake-transport tests for all of the above.
 
 Cached-token counts are currently exposed as `ModelResponse.metadata["cached_input_tokens"]`.
@@ -220,9 +220,9 @@ guard_endpoint = "https://WORKSPACE--agent-harness-vllm-guard-serve.modal.run/v1
 ```
 
 Modal deploy scripts:
-- `examples/modal/vllm_embed_server.py`: uses `--runner pooling --trust-remote-code`
+- `deploy/modal/vllm_embed_server.py`: uses `--runner pooling --trust-remote-code`
   (NomicBertModel). Checked against the vLLM 0.30.0 source.
-- `examples/modal/vllm_guard_server.py`: Llama Guard 3 1B, which is gated, so the
+- `deploy/modal/vllm_guard_server.py`: Llama Guard 3 1B, which is gated, so the
   `agent-harness-hf` secret must hold `HF_TOKEN`.
 
 They share the `agent-harness-llm` bearer secret and proxy auth with the chat deployment.

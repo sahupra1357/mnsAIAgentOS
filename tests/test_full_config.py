@@ -169,6 +169,29 @@ class FullConfigTests(unittest.TestCase):
         with self.assertRaises(CommandRejected):
             guardrails.validate(["find", ".", "-delete"])
 
+    def test_modal_deploy_scripts_match_the_profile(self) -> None:
+        # The live Modal scripts are in deploy/modal/ (examples/modal/ keeps reference copies).
+        # Read their constants without importing modal: the served model and length must match
+        # [models.modal], or requests name a model the server does not serve.
+        import ast
+
+        def constants(name: str) -> dict:
+            tree = ast.parse((ROOT / "deploy" / "modal" / name).read_text(encoding="utf-8"))
+            return {target.id: node.value.value for node in tree.body
+                    if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                    for target in node.targets if isinstance(target, ast.Name)}
+
+        modal = load_config(FULL, environ={"AGENT_HARNESS_MODEL__MODAL__ENABLED": "true"}).models["modal"]
+        chat = constants("vllm_server.py")
+        self.assertEqual(chat["MODEL_NAME"], modal.model)
+        self.assertEqual(chat["MAX_MODEL_LEN"], modal.context_window)
+        self.assertEqual(constants("vllm_embed_server.py")["MODEL_NAME"], modal.embedding_model)
+        self.assertEqual(constants("vllm_guard_server.py")["MODEL_NAME"], modal.guard_model)
+        self.assertIn("deploy/modal/vllm_server.py", FULL.read_text())
+        self.assertNotIn("examples/modal", FULL.read_text())
+        for name in ("vllm_server.py", "vllm_embed_server.py", "vllm_guard_server.py", "sglang_server.py"):
+            self.assertTrue((ROOT / "examples" / "modal" / name).is_file())  # reference copy kept
+
     def test_live_files_are_tracked_not_ignored(self) -> None:
         c = self.config
         paths = [agent.prompt_file for agent in c.agents] + [hook.command[1] for hook in c.hooks]

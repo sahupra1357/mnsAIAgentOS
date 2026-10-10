@@ -245,7 +245,7 @@ Per provider:
 - **Ollama.** `ollama pull nomic-embed-text` on the same server.
 - **Modal.** One deployment serves one model, so the `modal` profile names three, all with
   the same Modal auth:
-  - `examples/modal/vllm_server.py` (chat, `endpoint`)
+  - `deploy/modal/vllm_server.py` (chat, `endpoint`)
   - `vllm_embed_server.py` (`embedding_endpoint`)
   - `vllm_guard_server.py` (Llama Guard, `guard_endpoint`; needs an `agent-harness-hf`
     secret with `HF_TOKEN`, because the model is gated)
@@ -265,9 +265,23 @@ Built-in adapters: `openai_compatible`, `ollama`, `llama_cpp`, and `modal`.
 | `llama_cpp` | `llama-server -m model.gguf --jinja -c N` | `--jinja` is required for tool calls. 503 while loading is retried.                        |
 | `modal`     | vLLM or SGLang on Modal (`server = "vllm"` or `"sglang"`) | Requires both the server bearer key (`api_key_env`) and Modal proxy auth (`headers_env` for `Modal-Key` and `Modal-Secret`). The first request uses `cold_start_timeout_seconds` (default 600). |
 
-Deploy scripts for Modal are in `examples/modal/`. They keep prefix caching on, turn
-on cached-token reporting, and set container options that keep a run on one warm KV
-cache.
+Deploy scripts for Modal are in `deploy/modal/` (`examples/modal/` keeps the reference
+copies). They keep prefix caching on, turn on cached-token reporting, and set container
+options that keep a run on one warm KV cache.
+
+**A stronger model on Modal.** `deploy/modal/vllm_server.py` serves Qwen2.5-7B on an L40S
+by default; it often answers without using tools. To serve the model the local profile
+runs (Qwen 3.6 35B-A3B), change its constants as the comment in the script shows:
+1. `MODEL_NAME = "Qwen/Qwen3.6-35B-A3B"`, `TOOL_CALL_PARSER = "qwen3_coder"`,
+   `REASONING_PARSER = "qwen3"`, and `GPU = "H200"` (about 70 GB of BF16 weights). Keep
+   `MAX_MODEL_LEN` equal to the profile's `context_window`.
+2. `modal deploy deploy/modal/vllm_server.py`. The first start downloads the weights into
+   the `agent-harness-hf-cache` volume, which takes a while; later starts reuse them.
+3. In `models.toml`, set `[models.modal] model` to the same name, and
+   `[models.modal.pricing] gpu_usd_per_second` to the GPU's rate on modal.com/pricing.
+4. `agent-harness doctor --model-profile modal`, then restart `serve`.
+
+The embedding and guard deployments are separate and do not change.
 
 Extra profile fields (all optional):
 
