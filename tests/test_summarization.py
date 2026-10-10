@@ -19,6 +19,7 @@ from agent_harness.orchestration.context import (
     ContextPolicy,
     ContextSummarizer,
     FullHistoryContextBuilder,
+    latest_request_index,
     summary_input_chars,
 )
 from agent_harness.domain import (
@@ -195,6 +196,59 @@ class BuilderWithSummaryTests(unittest.TestCase):
             ContextSummary(covers=2, content="  ")
 
 
+LATEST = "[Latest user message - answer this one]\n"
+QUESTION = Message(role=Role.USER, content="agent-harness approve RUN_ID --allow")
+NOTE = Message(role=Role.USER, content="[Plan] This task is taking many steps.")
+
+
+def two_turns() -> list[Message]:
+    """First request answered, then a second request with tool turns and a [Plan] note."""
+
+    return [SYSTEM, TASK, *tool_turn(0), Message(role=Role.ASSISTANT, content="First answer."),
+            QUESTION, *tool_turn(1), NOTE, *tool_turn(2)]
+
+
+class LatestRequestTests(unittest.TestCase):
+    """2026-10-10 /ui chat: a summary covered the second question, the view kept only the first
+    user message verbatim, and the model explained agent-harness again instead of answering."""
+
+    def test_summary_covering_the_newest_request_keeps_its_words(self) -> None:
+        messages = two_turns()
+        summary = ContextSummary(covers=8, content="The user then provided a command.")
+        view = builder(window=20_000).build(messages, (LOOKUP,), model_profile="small", summary=summary)
+        head = view.messages[1].content
+        self.assertTrue(head.startswith(TASK.content))
+        self.assertIn("The user then provided a command." + "\n\n" + LATEST + QUESTION.content, head)
+        self.assertNotIn(NOTE.content, head)  # an orchestrator note is not the user's request
+        self.assertEqual(view.messages[2:], tuple(messages[8:]))
+        self.assertEqual(sum(QUESTION.content in m.content for m in view.messages), 1)
+
+    def test_newest_request_still_in_view_is_not_repeated(self) -> None:
+        messages = two_turns()
+        summary = ContextSummary(covers=5, content="Answered the first request.")
+        view = builder(window=20_000).build(messages, (LOOKUP,), model_profile="small", summary=summary)
+        self.assertNotIn(LATEST, view.messages[1].content)
+        self.assertEqual(view.messages[2:], tuple(messages[5:]))
+
+    def test_omitted_newest_request_is_kept_in_the_notice(self) -> None:
+        messages = [SYSTEM, TASK, Message(role=Role.ASSISTANT, content="First answer."), QUESTION]
+        for index in range(12):
+            messages.extend(tool_turn(index))
+        view = builder().build(messages, (LOOKUP,), model_profile="small")
+        self.assertGreater(view.omitted_messages, 2)  # the question (index 3) was cut
+        head = view.messages[1].content
+        self.assertIn("earlier messages were omitted", head)
+        self.assertIn(LATEST + QUESTION.content, head)
+        self.assertLessEqual(view.estimated_tokens, 2000 - 200)
+
+    def test_latest_request_index(self) -> None:
+        messages = two_turns()
+        self.assertEqual(latest_request_index(messages), 5)
+        self.assertEqual(latest_request_index(messages, start=6), None)
+        self.assertEqual(latest_request_index([SYSTEM, TASK]), 1)
+        self.assertIsNone(latest_request_index([SYSTEM, TASK], start=2))
+
+
 class SummarizerTests(unittest.TestCase):
     def test_request_renders_transcript_with_previous_summary(self) -> None:
         summarizer = ContextSummarizer(max_output_tokens=300)
@@ -311,6 +365,24 @@ class OrchestratorSummaryTests(unittest.IsolatedAsyncioTestCase):
         stats = [e.payload["context"] for e in events
                  if e.type is EventType.MODEL_RESPONDED and "context" in e.payload]
         self.assertGreater(stats[-1]["summarized_messages"], 0)
+
+    async def test_second_question_survives_its_summary(self) -> None:
+        question = "what is 17*7"
+        model = RoutingModel(scripted_run(2) + [call(10 + i) for i in range(8)]
+                             + [ModelResponse(content="119", finish_reason=FinishReason.STOP)])
+        orchestrator = self.orchestrator(model)
+        run = await self.start(orchestrator)
+        await orchestrator.run(run.id)
+        await orchestrator.continue_run(run.id, question)
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        asked = max(i for i, m in enumerate(finished.messages) if m.content == question)
+        assert finished.context_summary is not None
+        self.assertGreater(finished.context_summary.covers, asked)  # the question was summarized
+        last = model.requests[-1].messages
+        self.assertIn(LATEST + question, last[1].content)  # ...and the model still sees it
+        self.assertTrue(last[1].content.startswith(TASK.content))
 
     async def test_views_between_summaries_extend_each_other(self) -> None:
         model = RoutingModel(scripted_run(15))

@@ -85,6 +85,14 @@ prefix, so the context view must keep its prefix stable:
   the first user message. It then runs the same hysteresis over the rest.
   - A summary that no longer applies is ignored: past the end, starting on a tool result,
     or inside the head.
+  - **The newest request stays verbatim.** When the summary (or an omission) covers the
+    newest user message the user wrote (`latest_request_index`, which skips
+    `ORCHESTRATOR_NOTE_PREFIXES` `[Plan]`/`[Budget]` notes), its text is appended after the
+    summary or omission notice as `[Latest user message - answer this one]`. Only the first
+    user message is pinned as a message, so on 2026-10-10 a /ui chat's second question
+    ("agent-harness approve RUN_ID --allow") survived only as a summary line, and the model
+    answered the first question again. The orchestrator's `_summary_task` uses the same
+    prefixes.
   - `FullHistoryContextBuilder` and profiles without limits ignore it.
 - **Protocol:** `ContextBuilder` is unchanged. The orchestrator passes `summary=` only
   when the run has one, so custom builders keep working until summarization is used.

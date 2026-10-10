@@ -149,10 +149,16 @@ class BudgetedContextBuilder:
         rest_start = summary.covers if summary is not None else head_end
         units = _group_units(prepared[rest_start:])
         summarized = rest_start - head_end
+        latest = latest_request_index(prepared, start=head_end)
 
         budget = limits.context_window - limits.output_reserve_tokens - self._tools_tokens(tools)
         if summary is not None:
             block = f"\n\n[Summary of {summarized} earlier messages]\n{summary.content.strip()}"
+            if latest is not None and latest < rest_start:
+                # The newest request is inside the summary: keep its words, or the model
+                # answers the first (pinned) message again. Seen 2026-10-10 in a /ui chat.
+                block += _latest_request_block(prepared[latest])
+                latest = None
             head[-1] = replace(head[-1], content=head[-1].content + block)
         reasoning = limits.counts_reasoning
         head_tokens = sum(self._message_tokens(message, reasoning) for message in head)
@@ -182,6 +188,8 @@ class BudgetedContextBuilder:
                 f"\n\n[Context note: {omitted} earlier messages were omitted "
                 "to fit the model's context window.]"
             )
+            if latest is not None and latest < rest_start + omitted:
+                notice += _latest_request_block(prepared[latest])  # omitted too: keep it
             head[-1] = replace(head[-1], content=head[-1].content + notice)
             total += self._text_tokens(notice)
         if total > budget and units:
@@ -330,6 +338,25 @@ def _summary_applies(summary: ContextSummary, messages: Sequence[Message], head_
     if not head_end <= summary.covers <= len(messages):
         return False
     return summary.covers == len(messages) or messages[summary.covers].role is not Role.TOOL
+
+
+ORCHESTRATOR_NOTE_PREFIXES = ("[Plan]", "[Budget]")
+"""Prefixes of the user messages the orchestrator injects; they are not the user's requests."""
+
+
+def latest_request_index(messages: Sequence[Message], *, start: int = 0) -> int | None:
+    """Index of the newest user message from ``start`` on that the user wrote, or None."""
+
+    for index in range(len(messages) - 1, start - 1, -1):
+        message = messages[index]
+        if (message.role is Role.USER and message.content.strip()
+                and not message.content.startswith(ORCHESTRATOR_NOTE_PREFIXES)):
+            return index
+    return None
+
+
+def _latest_request_block(message: Message) -> str:
+    return f"\n\n[Latest user message - answer this one]\n{message.content.strip()}"
 
 
 def _pinned_head_end(messages: Sequence[Message]) -> int:
