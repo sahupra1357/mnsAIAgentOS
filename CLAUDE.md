@@ -170,6 +170,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   The summary request starts with the user's request (first and latest user messages,
   not `[Plan]` notes): it is pinned outside the summarized range, and without it Qwen 27B
   wrote "the user has not provided a goal".
+  The model's view keeps the newest request too: when a summary or omission covers it, its
+  text follows the summary as `[Latest user message - answer this one]`. Before, only the
+  first user message survived verbatim, and a chat's second question was answered as the first.
 - `ModelResolver.resolve` is synchronous (no `await`). `Execution.md` was brought up to date
   with the Phase 1–6 flow and now shows it correctly.
 - **Subagent nesting (6c).** Subagents exist only when `[[agents]]` are defined; the

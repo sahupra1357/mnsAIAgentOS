@@ -28,6 +28,7 @@ from agent_harness.orchestration.agents import (
 from agent_harness.orchestration.runcontext import CURRENT_RUN_ID
 from agent_harness.server.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
 from agent_harness.orchestration.context import (
+    ORCHESTRATOR_NOTE_PREFIXES,
     ContextPolicy,
     ContextSummarizer,
     FullHistoryContextBuilder,
@@ -275,7 +276,8 @@ def _summary_task(messages: Sequence[Message]) -> str | None:
     """
 
     requests = [m.content for m in messages
-                if m.role is Role.USER and m.content.strip() and not m.content.startswith(("[Plan]", "[Budget]"))]
+                if m.role is Role.USER and m.content.strip()
+                and not m.content.startswith(ORCHESTRATOR_NOTE_PREFIXES)]
     if not requests:
         return None
     first, latest = requests[0], requests[-1]
