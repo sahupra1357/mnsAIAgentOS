@@ -197,10 +197,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   binary files get their own messages, and `search_files` skips unreadable files.
 - **Modal deploy scripts live in `deploy/modal/`.** `examples/modal/` keeps the reference
   copies (examples are reference only). `deploy/modal/vllm_server.py` serves
-  `Qwen/Qwen3.6-35B-A3B-FP8` on one `A100-80GB` (`qwen3_coder` / `qwen3` parsers, `EXTRA_ARGS`),
-  with BF16-on-H200 and Qwen2.5-7B-on-L40S presets in comments; `[models.modal]` matches it
-  (price $0.000694/s, `cold_start_timeout_seconds = 1200`). FP8 MoE on an A100 (no FP8 hardware,
-  weight-only Marlin) is not yet confirmed live; fall back to the H200 preset if it fails.
+  `Qwen/Qwen3.6-35B-A3B` (BF16, 71.9 GB) on one `H200` (`qwen3_coder` / `qwen3` parsers,
+  `EXTRA_ARGS`), with FP8-on-A100 (untested: no FP8 hardware for this MoE) and Qwen2.5-7B-on-L40S
+  presets in comments; `[models.modal]` matches it (price $0.001261/s,
+  `cold_start_timeout_seconds = 1200`).
   `tests/test_full_config.py` checks the model, length, GPU, and parsers against `[models.modal]`.
 - **Instruction headers.** Configured files are named without their directory
   (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.

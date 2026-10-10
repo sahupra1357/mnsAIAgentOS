@@ -171,7 +171,7 @@ model scored 6/6 on `agents` and never delegated in real chats). `tasks` measure
   turn. On a 27B model on a Mac the sample items take 1-2 hours; a 3B-active MoE model
   (Qwen 3.6 35B-A3B) took about 5 minutes for 8 items. `scripts/validate.sh agent-tasks` runs it alone.
 - **Modal.** `AGENT_HARNESS_MODEL_PROFILE=modal scripts/validate.sh agent-tasks` validates the
-  Modal deployment (Qwen 3.6 35B-A3B FP8 on an A100 80 GB), with its own baselines
+  Modal deployment (Qwen 3.6 35B-A3B BF16 on an H200), with its own baselines
   (`tasks-modal.json`); the first run has none. Reports include `cost_usd` from
   `[models.modal.pricing]`.
 - **Comparing models.** The baseline is per profile (`tasks-{profile}.json`), not per model.

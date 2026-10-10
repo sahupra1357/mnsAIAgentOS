@@ -22,27 +22,24 @@ import subprocess
 
 import modal
 
-# Qwen 3.6 35B-A3B, the model the local llama.cpp profile runs (a 3B-active MoE), in Qwen's
-# official FP8 build: 37.5 GB of weights (checked on Hugging Face 2026-10-10: public, not
-# gated), so one A100 80 GB keeps about 30 GB for the KV cache. Flags from the vLLM recipe
-# (recipes.vllm.ai/Qwen/Qwen3.6-35B-A3B; needs vLLM >= 0.17).
-# Not yet run on an A100: the A100 has no FP8 hardware, so vLLM must run the FP8 weights as
-# weight-only Marlin (W8A16), which its docs confirm for dense models but not for every MoE
-# layout; the recipe lists H100/H200 for FP8. If startup fails on the MoE layers, use the BF16
-# preset below on an H200 instead.
-MODEL_NAME = "Qwen/Qwen3.6-35B-A3B-FP8"
+# Qwen 3.6 35B-A3B, the model the local llama.cpp profile runs (a 3B-active MoE), in BF16:
+# 71.9 GB of weights (Hugging Face, checked 2026-10-10: public, not gated). One H200 (141 GB;
+# vLLM uses 90%) keeps about 55 GB for the KV cache. An H200 is the recipe's tested hardware,
+# with these flags (recipes.vllm.ai/Qwen/Qwen3.6-35B-A3B; needs vLLM >= 0.17).
+MODEL_NAME = "Qwen/Qwen3.6-35B-A3B"
 TOOL_CALL_PARSER = "qwen3_coder"  # must match the model family (hermes, llama3_json, ...)
 REASONING_PARSER = "qwen3"  # thinking goes to reasoning_content ("" for non-thinking models)
 MAX_MODEL_LEN = 32768  # keep equal to the profile's context_window
-GPU = "A100-80GB"
+GPU = "H200"
 # The model also has a vision encoder; this harness sends text (and optional images).
-# Uncomment to load only the language model, if this vLLM version accepts the flag:
+# To load only the language model, if this vLLM version accepts the flag:
 EXTRA_ARGS: list[str] = []  # e.g. ["--language-model-only"]
 
 # Other presets (change MODEL_NAME, TOOL_CALL_PARSER, REASONING_PARSER, GPU together, then
 # [models.modal] model and [models.modal.pricing] in models.toml):
-#   BF16 on one H200 (~70 GB of weights; the recipe's tested hardware):
-#     "Qwen/Qwen3.6-35B-A3B", "qwen3_coder", "qwen3", "H200"
+#   FP8 on one A100 80 GB (37.5 GB of weights; cheaper GPU, but untested: the A100 has no FP8
+#   hardware, and vLLM documents weight-only FP8 Marlin for dense models, not this MoE):
+#     "Qwen/Qwen3.6-35B-A3B-FP8", "qwen3_coder", "qwen3", "A100-80GB"
 #   The earlier small default (often answers without using tools):
 #     "Qwen/Qwen2.5-7B-Instruct", "hermes", "", "L40S"
 
