@@ -91,9 +91,9 @@ num_predict = 1024
 # MODAL_PROXY_TOKEN_SECRET, and your workspace in the endpoints. Then enable it.
 # One deployment serves one model, so the profile names three deployments, all with the
 # same Modal auth (one profile, one set of credentials):
-#   modal deploy examples/modal/vllm_server.py         # chat        -> endpoint
-#   modal deploy examples/modal/vllm_embed_server.py   # embeddings  -> embedding_endpoint
-#   modal deploy examples/modal/vllm_guard_server.py   # Llama Guard -> guard_endpoint
+#   modal deploy deploy/modal/vllm_server.py         # chat        -> endpoint
+#   modal deploy deploy/modal/vllm_embed_server.py   # embeddings  -> embedding_endpoint
+#   modal deploy deploy/modal/vllm_guard_server.py   # Llama Guard -> guard_endpoint
 [models.modal]
 enabled = false
 adapter = "modal"
@@ -124,7 +124,7 @@ temperature = 0.2
 max_tokens = 2048
 
 # Estimated cost: request latency x the GPU's rate, so `cost_usd` is reported and
-# max_cost_usd / cost quotas can stop a run. L40S (examples/modal/vllm_server.py) is
+# max_cost_usd / cost quotas can stop a run. L40S (deploy/modal/vllm_server.py) is
 # $0.000542/s on modal.com/pricing (checked 2026-10-10); change it with the GPU. Latency
 # includes cold starts and retries, and concurrent requests share one GPU, so this is an
 # upper bound. Container CPU and memory are billed separately and are not included.
