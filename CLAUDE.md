@@ -204,6 +204,11 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   `tests/test_full_config.py` checks the model, length, GPU, and parsers against `[models.modal]`.
 - **Instruction headers.** Configured files are named without their directory
   (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.
+- **Cut-off answers (`max_answer_continuations`).** A final answer with `finish_reason = length` is
+  continued (`CONTINUE_ANSWER_NOTE`, `tool_choice = "none"`) and the reply is joined into the cut
+  message, so stored history has one answer message; the joined `MODEL_RESPONDED` says
+  `continuation`, and rewind's step mapping skips it. 0 in code, 2 in the root config; still cut off
+  afterwards, `run_completed` has `answer_truncated`.
 - **Unreadable tool arguments.** Arguments that are not a JSON object come back marked
   (`INVALID_ARGUMENTS_KEY` in `domain.py`) and get a validation-error tool result; the run goes
   on. Before, `MalformedResponseError` failed the run.

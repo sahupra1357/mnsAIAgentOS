@@ -345,6 +345,11 @@ Assistant response
     ↓
 Steer queued meanwhile? → reopen the turn
     ↓
+Cut off at the output limit (finish_reason "length")?
+    → "[Budget] ... continue it exactly where it stopped" (tool_choice = "none");
+      the reply is joined to the cut answer (MODEL_RESPONDED "continuation": n)
+      at most max_answer_continuations times, while the step budget allows
+    ↓
 Plan-and-execute? → the answer completes the current step; the orchestrator
                     gives the next step (or asks for the final answer)
     ↓
@@ -355,7 +360,9 @@ RUN_COMPLETED
 Return final answer
 ```
 
-The final answer is printed to stdout.
+The final answer is printed to stdout. If it was still cut off after the continuations,
+`RUN_COMPLETED` carries `answer_truncated: true`. Rewind counts a joined continuation as part
+of the answer it continued, not as its own step.
 
 ### Tool-call path
 

@@ -576,12 +576,15 @@ class OrchestratorConfig:
     turn_max_wall_seconds: float = 0.0  # 0: RunBudget's default (300 s)
     final_answer_on_last_step: bool = False  # last allowed step: answer without tools
     final_answer_reserve_seconds: float = 120.0  # ...also this close to the time limit (0: off)
+    max_answer_continuations: int = 0  # continue an answer cut off at max_tokens (0: off)
 
     def __post_init__(self) -> None:
         if self.turn_max_steps < 0 or self.turn_max_wall_seconds < 0:
             raise ConfigError("orchestrator.turn_max_steps and turn_max_wall_seconds must not be negative")
         if self.final_answer_reserve_seconds < 0:
             raise ConfigError("orchestrator.final_answer_reserve_seconds must not be negative")
+        if self.max_answer_continuations < 0:
+            raise ConfigError("orchestrator.max_answer_continuations must not be negative")
         if self.reserve_tokens_per_run < 0:
             raise ConfigError("orchestrator.reserve_tokens_per_run must not be negative")
         if self.max_model_attempts < 1 or self.max_tool_attempts < 1:

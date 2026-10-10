@@ -158,6 +158,11 @@ current_date_note = true
 # final_answer_reserve_seconds of the run's time is left (at most a quarter of it).
 final_answer_on_last_step = true
 final_answer_reserve_seconds = 120
+# A final answer cut off at max_tokens (finish_reason "length") is continued: the model is
+# asked to go on where it stopped, with tool_choice = "none", and the parts are joined into one
+# answer. Up to this many extra turns (0 = off); still cut off after that, run_completed says
+# answer_truncated. On 2026-10-10 two answers (Modal, Qwen 3.6) ended mid-sentence at 2048.
+max_answer_continuations = 2
 # A run without its own token limit reserves this many tokens of the daily quota per turn,
 # instead of everything left (which refused every other run with HTTP 429 while it was
 # active). Its budget stays open; [[quotas]] is still enforced at each step.

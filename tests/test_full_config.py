@@ -136,6 +136,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date
         self.assertTrue(c.orchestrator.final_answer_on_last_step)  # the last step answers
         self.assertEqual(c.orchestrator.final_answer_reserve_seconds, 120)  # ...and near the time limit
+        self.assertEqual(c.orchestrator.max_answer_continuations, 2)  # cut-off answers are continued
         self.assertEqual(c.subagents.max_parallel, 2)  # a local server shares one KV cache
 
     def test_read_only_commands_run_without_a_pause(self) -> None:

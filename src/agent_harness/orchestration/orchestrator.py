@@ -194,6 +194,11 @@ class OrchestratorSettings:
     # it); 0 turns the time check off.
     final_answer_on_last_step: bool = False
     final_answer_reserve_seconds: float = 120.0
+    # A final answer cut off at the output limit (finish_reason "length", no tool calls) is
+    # continued up to this many times: CONTINUE_ANSWER_NOTE, then a turn with
+    # tool_choice="none" whose text is joined to the cut answer. 0 = off (the cut answer is
+    # accepted as it is, and run_completed records answer_truncated).
+    max_answer_continuations: int = 0
 
     def __post_init__(self) -> None:
         if self.turn_max_steps is not None and self.turn_max_steps < 1:
@@ -202,6 +207,8 @@ class OrchestratorSettings:
             raise ValueError("turn_max_wall_seconds must be positive")
         if self.final_answer_reserve_seconds < 0:
             raise ValueError("final_answer_reserve_seconds must not be negative")
+        if self.max_answer_continuations < 0:
+            raise ValueError("max_answer_continuations must not be negative")
         if self.reserve_tokens_per_run is not None and self.reserve_tokens_per_run < 1:
             raise ValueError("reserve_tokens_per_run must be at least 1")
         if self.max_model_attempts < 1:
@@ -249,6 +256,25 @@ FINAL_STEP_NOTE = (
 PLAN_FINISHED_NO_TOOLS = (
     "Tools are no longer available: answer from the step results above."
 )
+CONTINUE_ANSWER_NOTE = (
+    "[Budget] Your answer was cut off at the output limit. Continue it exactly where it "
+    "stopped: do not repeat what you already wrote, and do not start over."
+)
+
+
+def _continuing_answer(messages: Sequence[Message]) -> bool:
+    """The latest message asks the model to continue its cut-off answer."""
+
+    return bool(messages) and messages[-1].role is Role.USER and messages[-1].content == CONTINUE_ANSWER_NOTE
+
+
+def _answer_cut_off(events: Sequence[RunEvent]) -> bool:
+    """The latest accepted model response ended at the output limit."""
+
+    latest = _latest_state_event(events)
+    return (latest is not None and latest.type is EventType.MODEL_RESPONDED
+            and latest.payload.get("ok") is True and latest.payload.get("finish_reason") == "length"
+            and not latest.payload.get("tool_call_count"))
 
 
 def _final_note_since_reply(messages: Sequence[Message]) -> bool:
@@ -832,6 +858,8 @@ class AgentOrchestrator:
             if _refused(events):
                 await self._complete(run, events)  # a guardrail refusal ends the turn as it is
                 return True
+            if await self._continue_cut_answer(run, events):
+                return False
             if run.output_schema is not None and run.output is None:
                 if await self._check_final_output(run, events):
                     return run.status.is_terminal
@@ -839,7 +867,7 @@ class AgentOrchestrator:
                 return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
             if await self._stop_hook_continues(run, events):
                 return False
-            await self._complete(run, events)
+            await self._complete(run, events, answer_truncated=_answer_cut_off(events))
             return True
 
         if _has_pending_model_attempt(events, run.step_count):
@@ -853,6 +881,12 @@ class AgentOrchestrator:
         if budget_reason is not None:
             await self._exhaust_budget(run, events, budget_reason)
             return True
+
+        if _continuing_answer(run.messages):
+            # The continuation note is the turn's only new message: no plan step, reminder,
+            # or steer may land between it and the answer it continues.
+            await self._perform_model_turn(run, events)
+            return run.status.is_terminal
 
         if run.planning and run.plan is not None and await self._plan_next(run, events):
             return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
@@ -1535,7 +1569,9 @@ class AgentOrchestrator:
                     # Without tools the server constrains the reply itself.
                     response_schema=run.output_schema if not specs else None,
                     tool_choice=(SUBMIT_RESULT_TOOL if specs and _submit_forced(events)
-                                 else "none" if specs and self._on_final_step(run) else None),
+                                 else "none" if specs and (self._on_final_step(run)
+                                                           or _continuing_answer(run.messages))
+                                 else None),
                 )
 
             request = make_request(view)
@@ -1899,14 +1935,16 @@ class AgentOrchestrator:
             run.consumed_tokens += usage_tokens
         if response.usage.cost_usd is not None:
             run.consumed_cost_usd += response.usage.cost_usd
-        run.messages.append(
-            Message(
-                role=Role.ASSISTANT,
-                content=response.content,
-                tool_calls=response.tool_calls,
-                reasoning=response.reasoning,
+        continuation = self._join_continuation(run, events, response)
+        if continuation is None:
+            run.messages.append(
+                Message(
+                    role=Role.ASSISTANT,
+                    content=response.content,
+                    tool_calls=response.tool_calls,
+                    reasoning=response.reasoning,
+                )
             )
-        )
         payload: dict[str, Any] = {
             "ok": True,
             "attempt": attempt,
@@ -1917,6 +1955,8 @@ class AgentOrchestrator:
             "cost_usd": response.usage.cost_usd,
             "provider_request_id": response.provider_request_id,
         }
+        if continuation is not None:
+            payload["continuation"] = continuation  # joined into the previous assistant message
         if response.usage.cached_input_tokens is not None:
             payload["cached_input_tokens"] = response.usage.cached_input_tokens
         if response.reasoning:
@@ -3132,6 +3172,53 @@ class AgentOrchestrator:
     def _final_answers(self, run: RunRecord) -> bool:
         return self._settings.final_answer_on_last_step and run.output_schema is None
 
+    async def _continue_cut_answer(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Ask the model to continue a final answer that ended at the output limit.
+
+        Only plain-text answers (no output schema), at most ``max_answer_continuations``
+        times in a row, and only while the step budget has room for another turn.
+        """
+
+        limit = self._settings.max_answer_continuations
+        latest = _latest_state_event(events)
+        if (not limit or run.output_schema is not None or latest is None
+                or not _answer_cut_off(events) or not run.messages[-1].content.strip()):
+            return False
+        done = int(latest.payload.get("continuation", 0))
+        if done >= limit or self._budget_reason(run) is not None:
+            return False
+        await self._plan_inject(run, events, CONTINUE_ANSWER_NOTE,
+                                {"reminder": "continue_answer", "continuation": done + 1})
+        return True
+
+    def _join_continuation(
+        self, run: RunRecord, events: Sequence[RunEvent], response: ModelResponse
+    ) -> int | None:
+        """Join a continuation reply to the answer it continues; return its number, or None.
+
+        The note is removed and the text appended to the cut answer, so the run keeps one
+        answer message: the CLI, API, chat clients, a subagent's parent, and the plan all
+        read the whole answer. The MODEL_RESPONDED event says ``continuation``, so rewind
+        does not count it as a separate assistant message.
+        """
+
+        if response.tool_calls or not _continuing_answer(run.messages) or len(run.messages) < 2:
+            return None
+        previous = run.messages[-2]
+        if previous.role is not Role.ASSISTANT or previous.tool_calls:
+            return None
+        summary = run.context_summary
+        if summary is not None and summary.covers > len(run.messages) - 2:
+            return None  # the cut answer is inside a summary: keep the reply as its own message
+        note = next((e for e in reversed(events) if e.type is EventType.PLAN_STEP_UPDATED
+                     and e.payload.get("reminder") == "continue_answer"), None)
+        run.messages.pop()
+        reasoning = "\n".join(part for part in (previous.reasoning, response.reasoning) if part) or None
+        run.messages[-1] = replace(previous, content=previous.content + response.content,
+                                   reasoning=reasoning)
+        run.guarded_through = min(run.guarded_through, len(run.messages))
+        return int(note.payload.get("continuation", 1)) if note is not None else 1
+
     def _on_final_step(self, run: RunRecord) -> bool:
         """The model turn being made must answer without tools (``final_answer_on_last_step``).
 
@@ -3692,7 +3779,9 @@ class AgentOrchestrator:
             )
         )
 
-    async def _complete(self, run: RunRecord, events: list[RunEvent]) -> RunRecord:
+    async def _complete(
+        self, run: RunRecord, events: list[RunEvent], *, answer_truncated: bool = False
+    ) -> RunRecord:
         now = self._clock()
         run.status = RunStatus.COMPLETED
         run.completed_at = now
@@ -3702,6 +3791,8 @@ class AgentOrchestrator:
             RunEvent(
                 run_id=run.id,
                 type=EventType.RUN_COMPLETED,
+                # The final answer still ended at the output limit (no continuation left).
+                payload={"answer_truncated": True} if answer_truncated else {},
                 step=run.step_count,
                 created_at=now,
             ),
@@ -4015,7 +4106,8 @@ def _step_of_assistant(events: Sequence[RunEvent], *, cut_index: int, rewinds: i
         if event.type is EventType.REWOUND:
             archived = int(event.payload.get("to_step", 1)) - 1
             kept = kept[:archived]
-        elif event.type is EventType.MODEL_RESPONDED and event.payload.get("ok") is True:
+        elif (event.type is EventType.MODEL_RESPONDED and event.payload.get("ok") is True
+              and not event.payload.get("continuation")):  # joined into the previous message
             kept.append(event.step)
     if cut_index - 1 < len(kept):
         return kept[cut_index - 1]
