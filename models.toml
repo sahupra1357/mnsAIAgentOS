@@ -117,7 +117,19 @@ Modal-Secret = "MODAL_PROXY_TOKEN_SECRET"
 
 [models.modal.parameters]
 temperature = 0.2
-max_tokens = 1024
+# Also the output reserve: input budget = context_window (32768) - max_tokens, so 2048 leaves
+# about 30K for input, more than llama.cpp's whole 16K window (1024 cut long answers off; 4096
+# would still leave 28K). Keep it set: Modal's proxy does not cancel abandoned vLLM requests,
+# so an uncapped reply keeps the GPU busy.
+max_tokens = 2048
+
+# Estimated cost: request latency x the GPU's rate, so `cost_usd` is reported and
+# max_cost_usd / cost quotas can stop a run. L40S (examples/modal/vllm_server.py) is
+# $0.000542/s on modal.com/pricing (checked 2026-10-10); change it with the GPU. Latency
+# includes cold starts and retries, and concurrent requests share one GPU, so this is an
+# upper bound. Container CPU and memory are billed separately and are not included.
+[models.modal.pricing]
+gpu_usd_per_second = 0.000542
 
 # --- Orchestrator and context ---------------------------------------------------
 [orchestrator]

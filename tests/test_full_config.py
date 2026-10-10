@@ -48,6 +48,10 @@ class FullConfigTests(unittest.TestCase):
         enabled = load_config(FULL, environ={"AGENT_HARNESS_MODEL__MODAL__ENABLED": "true"})
         self.assertIn("modal", enabled.models)
         self.assertEqual(enabled.routes["strong"], "modal")
+        modal = enabled.models["modal"]
+        self.assertGreaterEqual(modal.parameters["max_tokens"], 2048)  # 1024 cut answers off
+        self.assertGreater(modal.context_window - modal.parameters["max_tokens"], 16384)
+        self.assertEqual(modal.pricing.gpu_usd_per_second, 0.000542)  # cost_usd is estimated
 
     def test_every_self_contained_feature_is_on(self) -> None:
         c = self.config
