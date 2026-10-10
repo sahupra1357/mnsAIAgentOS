@@ -22,24 +22,35 @@ import subprocess
 
 import modal
 
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
-TOOL_CALL_PARSER = "hermes"  # must match the model family (hermes, llama3_json, mistral, ...)
-REASONING_PARSER = ""  # thinking models: e.g. "qwen3" puts the thinking in reasoning_content
+# Qwen 3.6 35B-A3B, the model the local llama.cpp profile runs (a 3B-active MoE), in Qwen's
+# official FP8 build: 37.5 GB of weights (checked on Hugging Face 2026-10-10: public, not
+# gated), so one A100 80 GB keeps about 30 GB for the KV cache. Flags from the vLLM recipe
+# (recipes.vllm.ai/Qwen/Qwen3.6-35B-A3B; needs vLLM >= 0.17).
+# Not yet run on an A100: the A100 has no FP8 hardware, so vLLM must run the FP8 weights as
+# weight-only Marlin (W8A16), which its docs confirm for dense models but not for every MoE
+# layout; the recipe lists H100/H200 for FP8. If startup fails on the MoE layers, use the BF16
+# preset below on an H200 instead.
+MODEL_NAME = "Qwen/Qwen3.6-35B-A3B-FP8"
+TOOL_CALL_PARSER = "qwen3_coder"  # must match the model family (hermes, llama3_json, ...)
+REASONING_PARSER = "qwen3"  # thinking goes to reasoning_content ("" for non-thinking models)
 MAX_MODEL_LEN = 32768  # keep equal to the profile's context_window
-GPU = "L40S"
+GPU = "A100-80GB"
+# The model also has a vision encoder; this harness sends text (and optional images).
+# Uncomment to load only the language model, if this vLLM version accepts the flag:
+EXTRA_ARGS: list[str] = []  # e.g. ["--language-model-only"]
 
-# A stronger model: the one the local llama.cpp profile runs (Qwen 3.6 35B-A3B, a 3B-active
-# MoE; ~70 GB of BF16 weights, so one 141 GB H200 holds it with room for the KV cache). Flags
-# from the vLLM recipe (recipes.vllm.ai/Qwen/Qwen3.6-35B-A3B; needs vLLM >= 0.19). Swap these in,
-# then set [models.modal] model to MODEL_NAME and [models.modal.pricing] to the H200 rate.
-#   MODEL_NAME = "Qwen/Qwen3.6-35B-A3B"
-#   TOOL_CALL_PARSER = "qwen3_coder"
-#   REASONING_PARSER = "qwen3"
-#   GPU = "H200"
+# Other presets (change MODEL_NAME, TOOL_CALL_PARSER, REASONING_PARSER, GPU together, then
+# [models.modal] model and [models.modal.pricing] in models.toml):
+#   BF16 on one H200 (~70 GB of weights; the recipe's tested hardware):
+#     "Qwen/Qwen3.6-35B-A3B", "qwen3_coder", "qwen3", "H200"
+#   The earlier small default (often answers without using tools):
+#     "Qwen/Qwen2.5-7B-Instruct", "hermes", "", "L40S"
+
 # Pin vLLM. Unpinned, pip may backtrack to an old release that has no wheel and must
 # be compiled against CUDA, which fails in the image builder ("CUDA_HOME is not set").
-# 0.30.0 is checked to accept every flag used below. When upgrading, check that the
-# flags still exist.
+# 0.30.0 was checked to accept the flags below for Qwen2.5 on an L40S; --reasoning-parser
+# qwen3 and --tool-call-parser qwen3_coder come from the Qwen 3.6 recipe (vLLM >= 0.17) and
+# are not yet checked on this pin. When upgrading, check that the flags still exist.
 VLLM_PACKAGE = "vllm==0.30.0"
 PORT = 8000
 
@@ -105,4 +116,5 @@ def serve() -> None:
     ]
     if REASONING_PARSER:
         argv += ["--reasoning-parser", REASONING_PARSER]
+    argv += EXTRA_ARGS
     subprocess.Popen(argv)

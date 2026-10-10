@@ -51,7 +51,7 @@ class FullConfigTests(unittest.TestCase):
         modal = enabled.models["modal"]
         self.assertGreaterEqual(modal.parameters["max_tokens"], 2048)  # 1024 cut answers off
         self.assertGreater(modal.context_window - modal.parameters["max_tokens"], 16384)
-        self.assertEqual(modal.pricing.gpu_usd_per_second, 0.000542)  # cost_usd is estimated
+        self.assertEqual(modal.pricing.gpu_usd_per_second, 0.000694)  # A100 80 GB: cost_usd is estimated
 
     def test_every_self_contained_feature_is_on(self) -> None:
         c = self.config
@@ -184,6 +184,9 @@ class FullConfigTests(unittest.TestCase):
         modal = load_config(FULL, environ={"AGENT_HARNESS_MODEL__MODAL__ENABLED": "true"}).models["modal"]
         chat = constants("vllm_server.py")
         self.assertEqual(chat["MODEL_NAME"], modal.model)
+        self.assertEqual(chat["GPU"], "A100-80GB")  # the pricing above is for this GPU
+        self.assertEqual((chat["TOOL_CALL_PARSER"], chat["REASONING_PARSER"]), ("qwen3_coder", "qwen3"))
+        self.assertGreaterEqual(modal.cold_start_timeout_seconds, 1200)  # 37.5 GB first load
         self.assertEqual(chat["MAX_MODEL_LEN"], modal.context_window)
         self.assertEqual(constants("vllm_embed_server.py")["MODEL_NAME"], modal.embedding_model)
         self.assertEqual(constants("vllm_guard_server.py")["MODEL_NAME"], modal.guard_model)

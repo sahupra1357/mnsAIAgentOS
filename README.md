@@ -269,19 +269,32 @@ Deploy scripts for Modal are in `deploy/modal/` (`examples/modal/` keeps the ref
 copies). They keep prefix caching on, turn on cached-token reporting, and set container
 options that keep a run on one warm KV cache.
 
-**A stronger model on Modal.** `deploy/modal/vllm_server.py` serves Qwen2.5-7B on an L40S
-by default; it often answers without using tools. To serve the model the local profile
-runs (Qwen 3.6 35B-A3B), change its constants as the comment in the script shows:
-1. `MODEL_NAME = "Qwen/Qwen3.6-35B-A3B"`, `TOOL_CALL_PARSER = "qwen3_coder"`,
-   `REASONING_PARSER = "qwen3"`, and `GPU = "H200"` (about 70 GB of BF16 weights). Keep
-   `MAX_MODEL_LEN` equal to the profile's `context_window`.
-2. `modal deploy deploy/modal/vllm_server.py`. The first start downloads the weights into
-   the `agent-harness-hf-cache` volume, which takes a while; later starts reuse them.
-3. In `models.toml`, set `[models.modal] model` to the same name, and
-   `[models.modal.pricing] gpu_usd_per_second` to the GPU's rate on modal.com/pricing.
-4. `agent-harness doctor --model-profile modal`, then restart `serve`.
+**The Modal chat model.** `deploy/modal/vllm_server.py` serves the model the local profile
+runs, Qwen 3.6 35B-A3B, in Qwen's FP8 build (`Qwen/Qwen3.6-35B-A3B-FP8`, 37.5 GB of
+weights, public) on one **A100 80 GB**, with `--tool-call-parser qwen3_coder` and
+`--reasoning-parser qwen3` from the vLLM recipe. The earlier Qwen2.5-7B on an L40S often
+answered without using tools. Only the chat model moved: the embedding and guard
+deployments stay separate, on an L4 each, and scale to zero when idle.
 
-The embedding and guard deployments are separate and do not change.
+| Setting | Value | Where |
+|---|---|---|
+| Model | `Qwen/Qwen3.6-35B-A3B-FP8` | `MODEL_NAME` in the script = `[models.modal] model` (a test checks it) |
+| GPU and price | `A100-80GB`, $0.000694/s | `GPU` in the script, `[models.modal.pricing] gpu_usd_per_second` |
+| Context | 32768 | `MAX_MODEL_LEN` = `context_window` |
+| First start | up to 20 minutes (37.5 GB download into the `agent-harness-hf-cache` volume) | `cold_start_timeout_seconds = 1200` |
+| Thinking | returned as reasoning; off for summaries | `REASONING_PARSER`, `[summarization] parameters` |
+
+To deploy:
+1. `modal deploy deploy/modal/vllm_server.py` (and the embed and guard scripts, once).
+2. `agent-harness doctor --model-profile modal`, then restart `serve`.
+
+**Not yet run on an A100.** The A100 has no FP8 hardware, so vLLM runs FP8 weights as
+weight-only Marlin (W8A16). vLLM documents that for dense models; the recipe lists only
+H100/H200 for this FP8 build, so check the container log on the first start. If the MoE
+layers fail to load, switch to the script's BF16 preset (`Qwen/Qwen3.6-35B-A3B` on one
+`H200`, about 70 GB) and update `model` and the price in `models.toml`. The model also has a
+vision encoder; `EXTRA_ARGS = ["--language-model-only"]` skips it if your vLLM accepts the
+flag.
 
 Extra profile fields (all optional):
 

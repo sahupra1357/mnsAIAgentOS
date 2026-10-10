@@ -68,7 +68,11 @@ branch on a provider name. Read `skills/model-gateway/SKILL.md` as well.
   missing without echoing values.
 - Server launch reference (deploy script lives in `deploy/modal/`):
   - vLLM: `vllm serve <model> --api-key $KEY --enable-auto-tool-choice
-    --tool-call-parser <hermes|llama3_json|mistral|...> --max-model-len <N>`
+    --tool-call-parser <hermes|llama3_json|mistral|qwen3_coder|...> --max-model-len <N>`
+    plus `--reasoning-parser <qwen3|...>` for a thinking model, so its thinking arrives as
+    `reasoning_content`. The root deployment is `Qwen/Qwen3.6-35B-A3B-FP8` on an A100 80 GB
+    with `qwen3_coder` and `qwen3` (vLLM recipe for Qwen 3.6); the FP8 MoE path on Ampere
+    (weight-only Marlin) is not yet confirmed live.
   - SGLang: `python -m sglang.launch_server --model-path <model> --api-key $KEY
     --tool-call-parser <qwen25|llama3|mistral|...> --context-length <N>`
   Without a tool-call parser, tool calls come back as plain text. `doctor` should detect
