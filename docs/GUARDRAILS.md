@@ -91,7 +91,18 @@ profile = "guard"          # a profile or route
 check = ["input", "output"]
 on_error = "allow"         # guard model down or unparseable: "allow" (flagged) or "block"
 parallel = false           # true: check input alongside the main model call
+action = "block"           # "flag": record an unsafe verdict and let the turn go on
 ```
+
+- **`action = "flag"`.** An unsafe verdict becomes a `guardrail_decided` event with
+  `action: flag`, and the turn continues. The root config uses it because Llama Guard 3 1B
+  misreads code: on 30 coding prompts it wrongly flagged 8–10 (for example "Explain
+  src/agent_harness/cli/repl.py" as `violent_crimes`), while the 8B flagged none and caught
+  12 of 12 harmful prompts. The 8B does not fit next to a 27B chat model on a 36 GB Mac.
+  `on_error` still decides guard failures on its own.
+- **llama.cpp needs `--no-prefill-assistant`** for the guard model (preset:
+  `no-prefill-assistant = true`). Otherwise the server prefills the reply being checked,
+  the guard echoes it back, and the check is recorded as a `guard_error` naming the flag.
 
 - **Replies.** Llama Guard answers `safe` or `unsafe` with hazard codes (S1–S14:
   violent crimes, hate, self-harm, and so on). Codes are recorded as category names.

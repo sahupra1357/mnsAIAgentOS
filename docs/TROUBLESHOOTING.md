@@ -45,7 +45,9 @@ one.
 | Ollama log | `~/.ollama/logs/server.log` | Model loads, out-of-memory errors, request errors |
 | llama.cpp router log | `/tmp/llama-server.log` (the `--log-file` of `llama serve`) | Loads and unloads, `Compute error`, Metal out of memory |
 | Modal log | `modal app logs <app>` | Image build, cold start, vLLM startup errors, requests |
-| A run from `agent-harness run` | The SQLite database (`--database`, default `agent-harness.sqlite3`) | `agent-harness status RUN_ID`, `agent-harness runs --status failed`, and the event log (below) |
+| A run from `agent-harness run`, `serve`, or `/ui` | The SQLite database (`--database`, default `agent-harness.sqlite3` in the directory the command started in) | `agent-harness status RUN_ID`, `agent-harness runs --status failed`, and the event log (below) |
+| Messages, tool calls, and the model's reasoning | `runs.snapshot_json` in the same database (`messages[i].content`, `.tool_calls`, `.reasoning`); `GET /runs/{id}/messages?reasoning=true` | The text the events leave out. Reasoning is stored even with `reasoning_history = "drop"`, which only keeps it out of later requests |
+| Tool calls as the hooks saw them | `.agent-harness/hook-audit.jsonl` (root config's audit hook) | Every tool call with its arguments and decision |
 
 The event log of a stored run is the most detailed record of what the harness did:
 
@@ -192,6 +194,19 @@ none exists. A baseline recorded from a broken run must be deleted by hand.
 | Context errors or silent truncation on llama.cpp | `context_window` is larger than the server's `ctx-size` | Keep them equal |
 | Benchmark fails at 100% errors, and resume "fixes nothing" | Older versions reused errored items | Current versions rerun them; delete the bad baseline |
 | Benchmarks print `resuming: … already has results` and finish instantly; telemetry is empty | Older versions of the pipeline reused earlier answers | Current versions use a new run folder each time, unless `--resume` is given |
+| A chat asks to approve `ls` or `find`, then each one fails with `command 'ls' is not allowlisted` | The allowlist is checked when the command runs, after approval; `ls`/`find` were not in `allowed_commands` | Fixed in the root config: they are allowlisted and pre-approved. For your own config, add read-only commands to `[coding] allowed_commands` (repeating the defaults) and to `[permissions] allow` |
+| `find ... is forbidden: find may only list files` | `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fls`, `-fprint*` would change the host's files through the read-write mount | Intended. Use `find` to list, and other tools to read or change files |
+| A plain chat question starts with `run_command` or reads the workspace | `[coding] enabled = true` gives every run (including `/ui`) the coding prompt and tools | Expected for now; `AGENT_HARNESS_SET__CODING__ENABLED=false` for a chat-only server |
+| The model explores `.agent-harness/` when asked about "agent-harness" | Older versions put the instruction file's full path in the system prompt header | Update: headers now name the file only (`## Instructions from CHAT.md`) |
+| `Tool execution failed.` for `read_file`, or `Tool returned an invalid result.` for a `cwd` | Older versions did not translate missing files, bad directories, binary or unreadable files | Update: the message now says `no such file or directory: X; search_files can find the right path` (and similar) |
+| Every `search_files` call fails | Older versions stopped at the first file they could not read | Update: unreadable files are skipped |
+| In a chat's second turn, the model answers the first question again | Older versions kept only the first user message verbatim; a summary turned the new question into a passing remark | Update: the newest request follows the summary as `[Latest user message - answer this one]` |
+| Subagents fail with `Context size has been exceeded` (llama.cpp, retryable 500) | Concurrent children share one llama.cpp KV cache (`ctx-size`) | `[subagents] max_parallel = 2` (root config), or raise `ctx-size` |
+| A run failed with `MalformedResponseError` about tool-call arguments | Older versions failed the run when the model wrote broken JSON arguments | Update: the call gets a validation error and the model can retry |
+| A run hits `max_steps` or the time limit with no answer | `final_answer_on_last_step` is off | `[orchestrator] final_answer_on_last_step = true` (root config); `final_answer_reserve_seconds` (120) sets how early the time-limit answer comes |
+| The model re-reads files it already read, right after a `context_summarized` event | The summary replaced the file contents in the view, so the model fetches them again | Known. A larger input budget (smaller `parameters.max_tokens`, larger `context_window`) makes summaries rarer |
+| `agent-harness-bench run --option repeats=3` fails with `options.repeats must be a positive integer` | `--option` values are passed as strings | Known bug. Put the options in a `[[benchmark]]` entry of a plan TOML and run `pipeline PLAN --stages benchmarks` |
+| `guardrail_decided` with `action: flag` and `violent_crimes` on ordinary coding chats | Llama Guard 3 1B misreads code and repository text | Expected with `action = "flag"` (no effect on the run); the 8B model does not do this |
 
 ## Reporting a harness bug
 
