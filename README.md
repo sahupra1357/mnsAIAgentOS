@@ -112,9 +112,10 @@ repository root starts with everything on:
 | On | Section |
 |----|---------|
 | llama.cpp default, serving chat and embeddings from one router; Ollama self-contained as an alternative; Modal switched off (`enabled = false`) | `[models.*]`, `[routes]` |
-| Coding tools in a warm per-run Docker container (`python:3.12`, has git) | `[coding]`, `[coding.docker]` |
+| Coding tools in a warm per-run Docker container (`python:3.12`, has git); `ls`, `cat`, `head`, `wc`, and `find` allowlisted and pre-approved | `[coding]`, `[coding.docker]`, `[permissions]` |
 | Permission rules, an audit hook (`examples/hooks/audit_hook.py`), `ask_user`, approval and question deadlines, task list | `[permissions]`, `[[hooks]]`, `[interaction]`, `[tasks]` |
-| Three subagents (`examples/agents/`), nesting depth 2 | `[[agents]]`, `[subagents]` |
+| Three subagents (`examples/agents/`), nesting depth 2, at most 2 running at once | `[[agents]]`, `[subagents]` |
+| Planning offered when it helps (`mode = "auto"`, with a reminder after 6 tool steps); an answer on the last step and near the time limit; today's date in the first message | `[planning]`, `[orchestrator]` |
 | Instruction files, skills (`examples/skills/`), templates (`examples/templates/`) | `[instructions]`, `[skills]`, `[templates]` |
 | Summarization, context policy | `[summarization]`, `[context]` |
 | Python and HTTP tool sources, `web_fetch`, `web_search`, hybrid memory, artifacts, dynamic tool loading | `[[tools]]`, `[web_fetch]`, `[web_search]`, `[memory]`, `[artifacts]`, `[tool_loading]` |
@@ -135,6 +136,11 @@ every listed feature stays on and every path in the file exists.
 
 Turn a feature off by editing its section, or for one process with
 `AGENT_HARNESS_SET__SECTION__KEY=value`, e.g. `AGENT_HARNESS_SET__GUARDRAILS__ENABLED=false`.
+
+**Coding is on for every run.** With `[coding] enabled = true`, every run (CLI, `/ui`,
+`/v1`, the REPL) gets the coding system prompt and the coding tools, including
+`run_command`, even for a plain chat question. There is no per-run switch yet; turn it
+off with `AGENT_HARNESS_SET__CODING__ENABLED=false` for a chat-only server.
 
 ## Pointing at Different Models
 
@@ -527,6 +533,7 @@ enabled = true                    # offer todo_write: the model keeps a visible 
 [subagents]
 max_depth = 2                     # how deep delegation may nest
 max_per_run = 8
+max_parallel = 2                  # children of one parent running at once (0 = no limit)
 
 [[agents]]
 name = "researcher"
@@ -556,6 +563,15 @@ hand a self-contained task to a subagent:
   delegate.
 - **Working example.** `examples/subagents.toml` defines a `researcher`, `reviewer`, and
   `test-runner` with prompt files in `examples/agents/`.
+- **How many at once.** `max_parallel` caps the children of one parent that run
+  together; the rest wait for a slot. A child that waited gets no more time than its
+  parent has left. A local llama.cpp server shares one KV cache (`ctx-size`) between
+  concurrent requests: five 16K-token children overflowed a 32K cache ("Context size has
+  been exceeded"), so the root config uses 2.
+- **Ending with an answer.** With `[orchestrator] final_answer_on_last_step = true` (root
+  config), a subagent's last allowed step is an answer: a `[Budget]` note and
+  `tool_choice = "none"`. A child that still does not finish reports what it had found
+  (its context summary) to the parent, not only its error.
 
 **Task list.** `agent-harness status RUN_ID` and `GET /runs/{id}` show the task list
 and the subagents.
@@ -587,6 +603,11 @@ With `subdirectories = true`, a run started from `services/api/` also loads
 `services/AGENTS.md` and then `services/api/AGENTS.md` (relative to the config file's
 directory), after `files`. Directories outside the project, and symlinks that point
 outside it, are ignored.
+Each file gets a header naming the file only (`## Instructions from CHAT.md`); a file
+found in a subdirectory keeps its relative path (`services/api/AGENTS.md`), since its
+rules apply there. A full path such as `.agent-harness/instructions/CHAT.md` in the
+prompt led a model to read "explain how agent-harness works" as a question about that
+folder.
 
 **Templates.** `agent-harness run --arg focus=security "/review app.py"` fills
 `$ARGUMENTS`, `$1`, and `${focus}`, and records the template in the run. List them
@@ -743,9 +764,24 @@ The plan is stored on the run and changes are recorded as `plan_created`,
 ```toml
 [planning]
 enabled = false        # default for new runs; --plan / --no-plan override per run
+mode = ""              # "off" | "always" | "auto"; empty keeps `enabled` (true = "always")
+auto_reminder_after_steps = 0   # "auto": remind once after N tool steps in a turn (0 = never)
 max_plan_steps = 20
 max_replans = 2
 ```
+
+**Planning when it helps (`mode = "auto"`, the root config).** Top-level runs without an
+output schema are offered `create_plan` but are not asked to plan. A successful call turns
+the run into a planned run (`plan_created` with `auto: true`). With
+`auto_reminder_after_steps = 6`, a turn that has made 6 tool-calling steps without a plan,
+or whose context was summarized, gets one `[Plan]` reminder: plan and give the reading to
+a subagent, or answer from what it has.
+
+**Finishing.** With `[orchestrator] final_answer_on_last_step = true`, the answer step of a
+finished plan is sent with `tool_choice = "none"`, so the model writes the answer instead
+of reading more. The `[Budget]` last-step note also comes early when less than
+`final_answer_reserve_seconds` (default 120, at most a quarter of the time budget) is
+left, and an answer to it ends a planned run even with steps left.
 
 **Parallel work without a plan.** When one model response asks for several things, the
 orchestrator runs independent work concurrently:
@@ -942,7 +978,10 @@ self-running animated SVG, and an editable Excalidraw file. They cover:
 Profiles that set `context_window` get a bounded view of the history on every model call.
 The stored run history is never modified.
 
-- **Always kept:** system messages and the first user message.
+- **Always kept:** system messages and the first user message. When a summary or trim
+  covers the newest message the user wrote (`[Plan]`/`[Budget]` notes do not count), its
+  text is added after the summary as `[Latest user message - answer this one]`, so the
+  second question of a chat is never answered as the first.
 - **Tool call pairs:** an assistant tool call always stays together with its tool results.
 - **Large tool outputs:** shortened in the view to head + tail (default 16,000 characters).
 - **Trimming:** when the estimate reaches 85% of the input budget, the oldest turns are
@@ -1092,6 +1131,23 @@ Approve or deny it explicitly:
 ```
 
 Use `--deny` to return the denial to the model. Approval is never a bypass for dangerous-command guardrails. The default Docker runtime uses no network, a workspace-only bind mount, dropped capabilities, `no-new-privileges`, CPU/memory/PID limits, a read-only root filesystem, and a bounded `/tmp`. Local execution requires `allow_local_execution = true` and is intended only for trusted development.
+
+**Commands.** `run_command` runs only commands in `allowed_commands`: by default `cargo`,
+`git`, `go`, `make`, `npm`, `npx`, `pnpm`, `py.test`, `pytest`, `python`, `python3`, `uv`,
+`yarn`. The setting replaces that list, so repeat the defaults when you add to it. The root
+config adds `ls`, `cat`, `head`, `wc`, and `find`, and pre-approves them with
+`[permissions] allow` rules (`run_command(argv.0=ls)`, ...), while `ask` rules keep a pause
+for a `.env` argument. `find` may only list files: `-delete`, `-exec`, `-execdir`, `-ok`,
+`-okdir`, `-fls`, and `-fprint*` are refused, because the workspace is mounted read-write
+and permission rules only see `argv[0]` (`find . -exec rm {} ;` would pass an `rm` deny
+rule). The allowlist is checked when the command runs, after any approval, so a command
+outside it is refused even if you approved it.
+
+**Wrong paths.** File tools answer in words the model can act on, using the path as it was
+given: `no such file or directory: src/x.py; search_files can find the right path`,
+`file could not be read: X (Permission denied)`, or `not a UTF-8 text file`. A bad `cwd`
+for `run_command` or the `git_*` tools gets the same message. `search_files` skips files it
+cannot read.
 
 The coding tools and policy details are in [`skills/coding-agent/SKILL.md`](skills/coding-agent/SKILL.md). Pull requests are disabled by default; enabling them requires adding `gh` to `coding.allowed_commands`, setting `coding.enable_pull_requests = true`, explicitly enabling Docker networking, and providing GitHub credentials outside the repository.
 
@@ -1448,6 +1504,18 @@ Around the budget, the loop has its own guards (`[orchestrator]`, see
 [Limits, Deadlines, and Overrides](#limits-deadlines-and-overrides)): provider attempts per
 step, repeated identical tool calls, tool calls per reply, and context-overflow retries.
 Tenant and end-user quotas cap the budget at admission and are re-checked at every step.
+
+**Ending in an answer.** By default a run that reaches `max_steps` or `max_wall_seconds`
+stops with `budget_exhausted`. With `[orchestrator] final_answer_on_last_step = true` (on
+in the root config), the last allowed step, and any step taken when less than
+`final_answer_reserve_seconds` is left, gets a `[Budget]` note ("This is your last step:
+tools are no longer available...") and `tool_choice = "none"`. The tools stay in the
+request, so the cached prompt prefix holds. Runs with an `output_schema` are unaffected.
+
+**Unreadable tool arguments.** A tool call whose arguments are not a JSON object does not
+fail the run: the call gets a validation error ("The arguments for X were not valid JSON
+... Send the call again with a valid JSON object."), it is not run or prefetched, and the
+model can try again.
 
 Run state and boundary events are checkpointed after accepted model and tool results. SQLite checkpoints update the run snapshot and append events atomically, using a version field to reject concurrent stale writes.
 

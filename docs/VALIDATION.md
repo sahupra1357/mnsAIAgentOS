@@ -178,6 +178,15 @@ model scored 6/6 on `agents` and never delegated in real chats). `tasks` measure
   With 9 items a difference of one or two items is within noise; use `repeats = 3` to compare.
 - **Judge.** By default the model under test grades itself, which is lenient; set
   `judge_profile` to a stronger profile when you have one.
+- **Options on the command line.** `agent-harness-bench run --option KEY=VALUE` passes every
+  value as a string, so `--option repeats=3` is rejected ("options.repeats must be a
+  positive integer"). Set numeric options in a `[[benchmark]]` entry of a plan TOML and run
+  `agent-harness-bench pipeline PLAN --stages benchmarks` instead.
+- **Delegation and the output reserve.** On run-lifecycle (2026-10-09, Qwen 3.6 35B-A3B),
+  `parameters.max_tokens = 2048` planned in 4 of 6 runs and 4096 in 0 of 4. The output
+  reserve is subtracted from the input budget, so at 4096 the summary that follows the
+  auto-plan reminder covered every file the model had read; seeing only the summary, the
+  model re-read files instead of planning. All answers were correct either way.
 - **Write tasks from real failures.** The sample covers the patterns seen so far (simple
   questions, independent parts, wide explanations, a broad comparison, a search). Add a task whenever a real
   chat goes wrong, with the `expect` that should have held.

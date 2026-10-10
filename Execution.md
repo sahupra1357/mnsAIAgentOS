@@ -194,6 +194,13 @@ over 24 hours, plus concurrent runs.
 1. **System context:** for top-level runs, the instruction files and the skills index are
    inserted as one system message. They are read once and stay fixed for the run. In
    plan-and-execute mode the planner instructions are added as well.
+   - Each file's header names the file only (`## Instructions from CHAT.md`); a file found
+     in a subdirectory keeps its relative path. The full paths are in the run's
+     `context_sources`.
+   - With `[coding] enabled = true`, the CLI and the API (including `/ui`) also add the
+     coding agent's system prompt to every run, whatever the request.
+   - With `[orchestrator] current_date_note = true`, the first user message gets
+     `[Current date: ...]` (the system prompt stays fixed, so the cache is unaffected).
 2. **`user_prompt` hook:** it can block the prompt or add context.
 3. **Version record:** it computes the hashes of the system prompt, tool specs, model
    profile, and instruction context, plus the harness version.
@@ -251,6 +258,14 @@ At the start of each step the orchestrator:
   agent steps, or give the model its next step, before calling it (section 18).
 - **Applies steering:** messages queued with `agent-harness steer` are injected at this model
   turn boundary (`STEER_APPLIED`).
+- **Reminds about planning:** with `[planning] mode = "auto"` and
+  `auto_reminder_after_steps = N`, a turn that has made N tool-calling steps without a
+  plan, or summarized its context, gets one `[Plan]` note (`plan_step_updated` with
+  `reminder: auto_plan`).
+- **Asks for the answer:** with `[orchestrator] final_answer_on_last_step = true`, the last
+  allowed step, or a step taken with less than `final_answer_reserve_seconds` left, gets
+  the `[Budget]` note (`reminder: final_step`), and the request is sent with
+  `tool_choice = "none"`. The same applies to a finished plan's answer step.
 
 ## 6. Model request
 
@@ -290,7 +305,9 @@ provider-specific format; all supported servers use OpenAI-compatible `/chat/com
 
 - **Context window:** for profiles with `context_window`, the view is trimmed in large
   chunks (85% → 60% of the input budget) and keeps the system prompt, the first user
-  message, and tool-call pairs. With `[summarization] enabled = true`, the omitted turns are
+  message, and tool-call pairs. If the newest user-written message falls inside the
+  summary or the omitted range, its text follows the summary as
+  `[Latest user message - answer this one]`. With `[summarization] enabled = true`, the omitted turns are
   replaced by a persisted summary (`CONTEXT_SUMMARIZED`) instead of being dropped. If even
   the minimum view does not fit, the run fails with `ContextWindowExceededError`.
 - **Context overflow:** the view is built from an estimate, so a server can still reject
@@ -349,6 +366,8 @@ Assistant reply with tool calls
     ↓
 More than max_tool_calls_per_turn (32)?  → refuse every call; ask again
     ↓
+Arguments not a JSON object?  → validation error for that call; the run goes on
+    ↓
 Repeated-call check (per call)
     ↓
 pre_tool hook
@@ -361,6 +380,11 @@ Execute, request approval, or refuse
 The tool call is not executed blindly. A reply with more tool calls than
 `[orchestrator] max_tool_calls_per_turn` is refused as a whole before any call runs: each
 call gets a refusal result, and the run fails after `max_refused_repeats` such replies.
+
+Arguments the model wrote as broken JSON are marked by the adapter
+(`INVALID_ARGUMENTS_KEY` in `domain.py`) instead of failing the response. The call gets a
+`validation_error` result ("The arguments for X were not valid JSON ..."), it is neither
+run nor prefetched, and the model can send it again.
 
 ## 8. Tool decision and validation
 
@@ -412,10 +436,17 @@ For coding tools, additional controls apply:
 
 - Workspace boundary checks
 - Protected file checks
-- Command allowlists
-- Dangerous command rejection
+- Command allowlists (`[coding] allowed_commands`; checked when the command runs, after
+  any approval)
+- Dangerous command rejection, including `find -delete`, `-exec`, `-execdir`, `-ok`,
+  `-okdir`, `-fls`, and `-fprint*`
 - Structured argv
 - Docker sandbox execution
+
+A wrong path is reported as `no such file or directory: X; search_files can find the right
+path` (also for a bad `cwd`), an unreadable file as `file could not be read: X`, and a
+binary file as `not a UTF-8 text file`. These messages name the path as given, never the
+host path.
 
 These guardrails apply in every permission mode, including `bypass`.
 
@@ -465,6 +496,10 @@ Example tools that usually need approval:
 - `run_command`
 - `git_commit`
 - `create_pull_request`
+
+Allow rules remove the pause: the root config pre-approves `run_tests`,
+`run_command(argv.0=pytest)`, and the read-only commands `ls`, `cat`, `head`, `wc`, and
+`find`, while `ask` rules keep a pause for a `.env` argument.
 
 The handler is not executed before approval.
 
@@ -591,7 +626,9 @@ condition.
 
 ## 13. Stopping conditions
 
-Every run is bounded by its `RunBudget`:
+Every run is bounded by its `RunBudget`. With `[orchestrator] final_answer_on_last_step =
+true`, the step and time limits end in an answer instead (section 5); without it, the run
+stops with `BUDGET_EXHAUSTED`.
 
 | Budget             | Default | Notes                                                         |
 |--------------------|---------|---------------------------------------------------------------|
@@ -656,7 +693,11 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
 (`SUBAGENT_FINISHED`), and the child's usage rolls up into the parent.
 - **Limits:** depth and count are limited by `max_depth` (default 2, so subagents may
   start their own) and `max_per_run`.
-- **Parallel calls:** several `agent` calls in one response run concurrently.
+- **Parallel calls:** several `agent` calls in one response run concurrently, at most
+  `[subagents] max_parallel` at a time (0 = no limit; 2 in the root config). A child that
+  waited for a slot gets no more time than its parent has left.
+- **Unfinished children:** a child that stops without an answer reports its context
+  summary to the parent ("What it had found before it stopped"), not only its error.
 - **Examples:** `examples/subagents.toml` has three working definitions.
 
 ## 15. Other entry points
@@ -799,7 +840,9 @@ The final assistant response is written to stdout. Operational information such 
 
 ## 18. Plan-and-execute
 
-Turn it on with `run --plan`, `"planning": true` on the API, or `[planning] enabled = true`.
+Turn it on with `run --plan`, `"planning": true` on the API, or `[planning] enabled = true`
+(`mode = "always"`). With `mode = "auto"`, top-level runs are offered `create_plan`, and a
+successful call makes the run a planned one (`plan_created` with `auto: true`).
 The model proposes the plan, and the orchestrator owns and drives it. Diagrams:
 `docs/diagrams/06-plan-and-execute`.
 
@@ -827,6 +870,10 @@ All steps finished → "[Plan] … write the final answer" → final answer → 
   starting new ones, and an approval inside a child pauses the parent.
 - **Events:** `plan_created`, `plan_step_updated`, and `plan_revised`. `status` and
   `GET /runs/{id}` show the plan.
+- **The answer step:** with `final_answer_on_last_step`, the "write the final answer" note
+  says tools are no longer available and the request uses `tool_choice = "none"`. An answer
+  to the time-limit `[Budget]` note ends a planned run even with steps left (`phase:
+  "done"`, `final_step: true`).
 
 ## 19. Tool sources, the catalog, and MCP
 
