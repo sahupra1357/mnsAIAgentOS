@@ -29,6 +29,7 @@ from agent_harness.domain import (
 )
 from agent_harness.extensions.hooks import CallableHook, HookEvent, HookRunner
 from agent_harness.orchestration.orchestrator import (
+    CONTINUE_ANSWER_NOTE,
     FINAL_STEP_NOTE,
     PLAN_FINISHED_NO_TOOLS,
     AgentOrchestrator,
@@ -759,3 +760,132 @@ class FinalAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished.plan.phase, "done")
         self.assertEqual(finished.plan.steps[1].status, PlanStepStatus.PENDING)
         self.assertEqual(self.model.requests[-1].tool_choice, "none")
+
+
+def cut(text: str) -> ModelResponse:
+    """A final answer that ended at the output limit."""
+
+    return ModelResponse(content=text, finish_reason=FinishReason.LENGTH)
+
+
+class AnswerContinuationTests(unittest.IsolatedAsyncioTestCase):
+    """``max_answer_continuations``: a final answer cut off at max_tokens is continued and joined.
+
+    Live run 2026-10-10 (Modal, Qwen 3.6 35B-A3B, max_tokens 2048): the researcher's report and the
+    parent's answer both ended mid-sentence with finish_reason "length", and the run completed as if
+    nothing was wrong.
+    """
+
+    def orchestrator(self, handler: Handler, *, limit: int = 2, **kwargs: Any) -> AgentOrchestrator:
+        self.model = RoutedModel(handler)
+        self.store = InMemoryRunStore()
+        return AgentOrchestrator(models=self.model, tools=create_default_runtime(), store=self.store,
+                                 settings=OrchestratorSettings(max_answer_continuations=limit), **kwargs)
+
+    async def completed_payload(self, run_id: str) -> dict:
+        events = await self.store.list_events(run_id)
+        return next(e.payload for e in events if e.type is EventType.RUN_COMPLETED)
+
+    async def test_cut_answer_is_continued_and_joined(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            if last_user(request) == CONTINUE_ANSWER_NOTE:
+                return final("and here is the end.")
+            if len(self.model.requests) == 1:
+                return call("list_directory", {"path": "."})
+            return cut("The harness has four parts, ")
+
+        orchestrator = self.orchestrator(handler)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "explain")])
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        # One answer message with both parts; the note is gone from the history.
+        self.assertEqual(finished.messages[-1].role, Role.ASSISTANT)
+        self.assertEqual(finished.messages[-1].content, "The harness has four parts, and here is the end.")
+        self.assertNotIn(CONTINUE_ANSWER_NOTE, [m.content for m in finished.messages])
+        first, tool_turn, continuation = self.model.requests
+        self.assertIsNone(tool_turn.tool_choice)
+        self.assertEqual(continuation.tool_choice, "none")  # an answer, not more reading
+        self.assertEqual([t.name for t in continuation.tools], [t.name for t in tool_turn.tools])
+        self.assertEqual(continuation.messages[-2].content, "The harness has four parts, ")
+        events = await self.store.list_events(run.id)
+        responded = [e.payload for e in events if e.type is EventType.MODEL_RESPONDED]
+        self.assertEqual([p.get("continuation") for p in responded], [None, None, 1])
+        self.assertEqual(await self.completed_payload(run.id), {})
+
+        # Rewind still maps steps to assistant messages: the joined reply is not one of them.
+        plan = await orchestrator.rewind(run.id, 2)
+        self.assertEqual(plan.archived_messages, 1)  # only the joined answer
+        with self.assertRaises(ValueError):
+            await orchestrator.rewind(run.id, 3)
+
+    async def test_still_cut_after_the_limit_is_marked_truncated(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            return cut(f"part{len(self.model.requests)} ")
+
+        orchestrator = self.orchestrator(handler, limit=2)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "explain")])
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(len(self.model.requests), 3)  # the answer and two continuations
+        self.assertEqual(finished.messages[-1].content, "part1 part2 part3 ")
+        self.assertEqual([m.role for m in finished.messages], [Role.USER, Role.ASSISTANT])
+        self.assertEqual(await self.completed_payload(run.id), {"answer_truncated": True})
+
+    async def test_off_or_out_of_steps_keeps_the_cut_answer(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            return cut("cut here")
+
+        for limit, budget in ((0, RunBudget()), (2, RunBudget(max_steps=1))):
+            with self.subTest(limit=limit, max_steps=budget.max_steps):
+                orchestrator = self.orchestrator(handler, limit=limit)
+                run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "x")],
+                                                    budget=budget)
+                finished = await orchestrator.run(run.id)
+                self.assertEqual(finished.status, RunStatus.COMPLETED)
+                self.assertEqual(len(self.model.requests), 1)
+                self.assertEqual(finished.messages[-1].content, "cut here")
+                self.assertEqual(await self.completed_payload(run.id), {"answer_truncated": True})
+
+    async def test_a_subagents_cut_report_reaches_the_parent_whole(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            if is_child(request):
+                if last_user(request) == CONTINUE_ANSWER_NOTE:
+                    return final("second half of the report.")
+                return cut("First half, ")
+            if any(m.role is Role.TOOL for m in request.messages):
+                return final("parent answer")
+            return call("agent", {"agent": "researcher", "task": "read the repo"})
+
+        orchestrator = self.orchestrator(handler, subagents=AGENTS)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "explain")])
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        report = next(m.content for m in finished.messages if m.role is Role.TOOL)
+        self.assertIn("First half, second half of the report.", report)
+
+    async def test_planned_runs_answer_is_continued_before_the_plan_moves_on(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            text = last_user(request)
+            if text == CONTINUE_ANSWER_NOTE:
+                return final("rest of the summary.")
+            if "[Plan] Execute step s1" in text:
+                return final("s1 done")
+            if "All steps are finished" in text:
+                return cut("Summary: ")
+            return call("create_plan", {"goal": "g", "steps": [{"id": "s1", "title": "One"}]}, "p1")
+
+        orchestrator = self.orchestrator(handler)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")],
+                                            planning=True)
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(finished.messages[-1].content, "Summary: rest of the summary.")
+        self.assertEqual(finished.plan.phase, "done")
+        # No orchestrator note landed between the cut answer and its continuation.
+        continuation = self.model.requests[-1]
+        self.assertEqual(last_user(continuation), CONTINUE_ANSWER_NOTE)
+        self.assertEqual(continuation.messages[-2].content, "Summary: ")

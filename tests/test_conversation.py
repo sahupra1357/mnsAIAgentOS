@@ -359,6 +359,15 @@ class DateNoteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(orchestrator_settings(OrchestratorConfig()).final_answer_reserve_seconds, 120.0)
         self.assertEqual(orchestrator_settings(
             OrchestratorConfig(final_answer_reserve_seconds=0)).final_answer_reserve_seconds, 0)
+        self.assertEqual(orchestrator_settings(OrchestratorConfig()).max_answer_continuations, 0)  # off
+        self.assertEqual(orchestrator_settings(
+            OrchestratorConfig(max_answer_continuations=2)).max_answer_continuations, 2)
+        from agent_harness.config.loader import ConfigError
+        from agent_harness.orchestration.orchestrator import OrchestratorSettings
+        with self.assertRaises(ConfigError):
+            OrchestratorConfig(max_answer_continuations=-1)
+        with self.assertRaises(ValueError):
+            OrchestratorSettings(max_answer_continuations=-1)
 
 
 class TurnBudgetTests(unittest.IsolatedAsyncioTestCase):

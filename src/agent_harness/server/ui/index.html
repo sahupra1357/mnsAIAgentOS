@@ -359,7 +359,8 @@ function addEvent(event) {
   if (event.index < state.events) return;  // already shown (stream and refresh overlap)
   state.events = event.index + 1;
   const payload = event.payload || {};
-  const detail = payload.tool || payload.hook_event || payload.status || payload.decision || payload.model_profile || "";
+  const detail = (payload.answer_truncated ? "answer cut off at the output limit" : "")
+    || payload.tool || payload.hook_event || payload.status || payload.decision || payload.model_profile || "";
   const box = $("events");
   box.prepend(el("div", {}, `#${event.index} ${event.type}${detail ? " · " + detail : ""}`));
 }

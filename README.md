@@ -1537,6 +1537,16 @@ in the root config), the last allowed step, and any step taken when less than
 tools are no longer available...") and `tool_choice = "none"`. The tools stay in the
 request, so the cached prompt prefix holds. Runs with an `output_schema` are unaffected.
 
+**Answers cut off at the output limit.** `parameters.max_tokens` caps every reply, so a long
+final answer can end mid-sentence (`finish_reason: "length"`). With `[orchestrator]
+max_answer_continuations = N` (2 in the root config; 0 = off in code), the harness sends a
+`[Budget]` note asking the model to continue exactly where it stopped, with
+`tool_choice = "none"`, and **joins the continuation to the cut answer**, so the run still
+has one answer message (the CLI, API, `/ui`, `/v1`, a subagent's parent, and the plan all see
+the whole text). At most N extra turns, and only while the step budget allows. An answer
+still cut off after that completes with `run_completed {"answer_truncated": true}`, shown in
+`/ui` as "answer cut off at the output limit". Runs with an `output_schema` are not continued.
+
 **Unreadable tool arguments.** A tool call whose arguments are not a JSON object does not
 fail the run: the call gets a validation error ("The arguments for X were not valid JSON
 ... Send the call again with a valid JSON object."), it is not run or prefetched, and the

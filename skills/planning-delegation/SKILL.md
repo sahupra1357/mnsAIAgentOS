@@ -78,6 +78,14 @@ user messages.
     Checked live on llama.cpp (Qwen 3.6): `tool_choice = "none"` is honoured, but without the
     note Qwen can write a tool call as plain text, so keep both. An empty answer (a thinking
     model out of tokens) is reported as "returned no answer" plus the summary.
+  - **Cut-off answers:** `[orchestrator] max_answer_continuations` (0 = off; 2 in the root
+    config) continues a final answer that ended with `finish_reason = length`:
+    `CONTINUE_ANSWER_NOTE`, a `tool_choice = "none"` turn, and `_join_continuation` appends the
+    reply to the cut answer and drops the note (one answer message; `MODEL_RESPONDED` has
+    `continuation: n`, which `_step_of_assistant` skips for rewind). A pending note goes
+    straight to the model, before plan steps or reminders. Still cut off at the end:
+    `RUN_COMPLETED {"answer_truncated": true}`. Measured on 2026-10-10 (Modal, Qwen 3.6, 2048
+    tokens): a researcher's report and the parent's answer both ended mid-sentence.
   - **Also a finished plan and the time limit:** the same setting sends the answer step of a
     finished plan (`finalizing`) with `tool_choice = "none"` (the note adds
     `PLAN_FINISHED_NO_TOOLS`). When less than `final_answer_reserve_seconds` (default 120, at most
