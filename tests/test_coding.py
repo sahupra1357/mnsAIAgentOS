@@ -214,6 +214,22 @@ class GuardrailTests(unittest.TestCase):
             with self.assertRaises(CommandRejected):
                 guardrails.validate(argv)
 
+    def test_find_may_only_list_files(self) -> None:
+        # The workspace mount is read-write, so find must not delete files or run programs.
+        self.assertNotIn("find", CommandGuardrails().allowed_commands)  # opt-in only
+        guardrails = CommandGuardrails(allowed_commands=("find", "ls"))
+        self.assertEqual(
+            guardrails.validate(["find", "src", "-name", "*.py", "-type", "f"]),
+            ("find", "src", "-name", "*.py", "-type", "f"),
+        )
+        for action in ("-delete", "-exec", "-execdir", "-ok", "-okdir",
+                       "-fls", "-fprint", "-fprint0", "-fprintf"):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(CommandRejected, f"find {action} is forbidden"):
+                    guardrails.validate(["find", ".", "-name", "*.tmp", action, "rm", "{}", ";"])
+        # Only find's own actions are refused; the same word is fine for other commands.
+        self.assertEqual(guardrails.validate(["ls", "-delete"]), ("ls", "-delete"))
+
     def test_docker_runtime_builds_restricted_command(self) -> None:
         calls: list[tuple[str, ...]] = []
 

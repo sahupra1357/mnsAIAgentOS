@@ -134,6 +134,37 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(c.orchestrator.final_answer_reserve_seconds, 120)  # ...and near the time limit
         self.assertEqual(c.subagents.max_parallel, 2)  # a local server shares one KV cache
 
+    def test_read_only_commands_run_without_a_pause(self) -> None:
+        # ls/cat/head/wc/find are allowlisted and pre-approved; find cannot delete or run
+        # programs, a .env file still asks, and rm is still denied.
+        from agent_harness.coding.guardrails import CommandGuardrails, CommandRejected
+        from agent_harness.domain import PermissionMode, ToolCall, ToolRisk, ToolSpec
+        from agent_harness.extensions.permissions import PermissionPolicy
+
+        c = self.config
+        policy = PermissionPolicy.from_lists(allow=c.permissions.allow, ask=c.permissions.ask,
+                                             deny=c.permissions.deny)
+        guardrails = CommandGuardrails(allowed_commands=c.coding.allowed_commands)
+        spec = ToolSpec(name="run_command", description="", input_schema={"type": "object"},
+                        risk=ToolRisk.HIGH_RISK)
+
+        def action(argv: list[str]) -> str | None:
+            call = ToolCall(id="c", name="run_command", arguments={"argv": argv})
+            return policy.decide(spec, call, PermissionMode.DEFAULT).action
+
+        for argv in (["ls", "-la"], ["cat", "README.md"], ["head", "-n", "5", "README.md"],
+                     ["wc", "-l", "README.md"], ["find", "src", "-name", "*.py"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(action(argv), "allow")
+                guardrails.validate(argv)
+        self.assertIn("git", c.coding.allowed_commands)  # the defaults are kept
+        self.assertEqual(action(["cat", ".env"]), "ask")
+        self.assertEqual(action(["head", "-n", "5", ".env"]), "ask")
+        self.assertEqual(action(["rm", "-rf", "."]), "deny")
+        self.assertIsNone(action(["python3", "x.py"]))  # other commands still pause
+        with self.assertRaises(CommandRejected):
+            guardrails.validate(["find", ".", "-delete"])
+
     def test_live_files_are_tracked_not_ignored(self) -> None:
         c = self.config
         paths = [agent.prompt_file for agent in c.agents] + [hook.command[1] for hook in c.hooks]
