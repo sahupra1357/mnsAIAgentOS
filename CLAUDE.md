@@ -196,9 +196,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   can find the right path" (`WorkspacePathNotFound`), not "Tool execution failed."; unreadable and
   binary files get their own messages, and `search_files` skips unreadable files.
 - **Modal deploy scripts live in `deploy/modal/`.** `examples/modal/` keeps the reference
-  copies (examples are reference only). `deploy/modal/vllm_server.py` adds `REASONING_PARSER`
-  and a commented Qwen 3.6 35B-A3B preset (`qwen3_coder` / `qwen3`, H200).
-  `tests/test_full_config.py` checks that its `MAX_MODEL_LEN` and `MODEL_NAME` match `[models.modal]`.
+  copies (examples are reference only). `deploy/modal/vllm_server.py` serves
+  `Qwen/Qwen3.6-35B-A3B` (BF16, 71.9 GB) on one `H200` (`qwen3_coder` / `qwen3` parsers,
+  `EXTRA_ARGS`), with FP8-on-A100 (untested: no FP8 hardware for this MoE) and Qwen2.5-7B-on-L40S
+  presets in comments; `[models.modal]` matches it (price $0.001261/s,
+  `cold_start_timeout_seconds = 1200`).
+  `tests/test_full_config.py` checks the model, length, GPU, and parsers against `[models.modal]`.
 - **Instruction headers.** Configured files are named without their directory
   (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.
 - **Unreadable tool arguments.** Arguments that are not a JSON object come back marked

@@ -98,11 +98,17 @@ num_predict = 1024
 enabled = false
 adapter = "modal"
 server = "vllm"
-model = "Qwen/Qwen2.5-7B-Instruct"
+# Qwen 3.6 35B-A3B (the model llamacpp runs), BF16 on one H200; must equal
+# MODEL_NAME in deploy/modal/vllm_server.py (a test checks it). It thinks: vLLM's qwen3
+# reasoning parser returns the thinking as reasoning_content, and summaries turn it off
+# ([summarization] parameters). Thinking counts against max_tokens below.
+model = "Qwen/Qwen3.6-35B-A3B"
 endpoint = "https://WORKSPACE--agent-harness-vllm-serve.modal.run/v1"
 api_key_env = "MODAL_LLM_API_KEY"
-timeout_seconds = 120
-cold_start_timeout_seconds = 600
+timeout_seconds = 180
+# The first start downloads 71.9 GB of weights into the hf-cache volume and loads them; the
+# deploy script allows 20 minutes (startup_timeout), so the first request may wait as long.
+cold_start_timeout_seconds = 1200
 max_retries = 1
 context_window = 32768
 token_counting = "server"
@@ -124,12 +130,13 @@ temperature = 0.2
 max_tokens = 2048
 
 # Estimated cost: request latency x the GPU's rate, so `cost_usd` is reported and
-# max_cost_usd / cost quotas can stop a run. L40S (deploy/modal/vllm_server.py) is
-# $0.000542/s on modal.com/pricing (checked 2026-10-10); change it with the GPU. Latency
-# includes cold starts and retries, and concurrent requests share one GPU, so this is an
-# upper bound. Container CPU and memory are billed separately and are not included.
+# max_cost_usd / cost quotas can stop a run. H200 (GPU in deploy/modal/vllm_server.py) is
+# $0.001261/s on modal.com/pricing (checked 2026-10-10; A100 80 GB $0.000694, L40S $0.000542);
+# change it with the GPU. Latency includes cold starts and retries, and
+# concurrent requests share one GPU, so this is an upper bound. Container CPU and memory, and
+# the embed and guard deployments (an L4 each), are billed separately and not included.
 [models.modal.pricing]
-gpu_usd_per_second = 0.000542
+gpu_usd_per_second = 0.001261
 
 # --- Orchestrator and context ---------------------------------------------------
 [orchestrator]
