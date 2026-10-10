@@ -76,6 +76,53 @@ class CodingToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(applied.status, ToolResultStatus.SUCCESS)
             self.assertIn("print('new')", (root / "main.py").read_text(encoding="utf-8"))
 
+    async def test_wrong_paths_get_a_clear_message(self) -> None:
+        # On 2026-10-10 read_file("src/agent_harness/orchestrator.py") (moved in Phase 18)
+        # came back as "Tool execution failed.", so the model could not tell the path was wrong.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "pkg").mkdir()
+            (root / "pkg" / "main.py").write_text("x = 1\n", encoding="utf-8")
+            (root / "data.bin").write_bytes(b"\x00\x01binary")
+            execution = FakeExecution()
+            runtime = create_coding_tool_runtime(
+                CodingAgentConfig(enabled=True, workspace=directory),
+                execution_runtime=execution,
+            )
+
+            async def message(name: str, arguments: dict, approved: bool = False) -> str:
+                result = await runtime.execute(
+                    ToolCall(name, name, arguments), idempotency_key=f"k:{name}", approved=approved
+                )
+                self.assertEqual(result.status, ToolResultStatus.PERMANENT_ERROR)
+                self.assertEqual(result.output["error"], "request_rejected")
+                self.assertNotIn(str(root.resolve()), result.model_message)  # no host paths
+                return result.model_message
+
+            self.assertEqual(
+                await message("read_file", {"path": "src/missing.py"}),
+                "no such file or directory: src/missing.py; search_files can find the right path",
+            )
+            self.assertIn(  # a file used as a directory
+                "no such file or directory: pkg/main.py/x",
+                await message("read_file", {"path": "pkg/main.py/x"}),
+            )
+            self.assertEqual(await message("read_file", {"path": "data.bin"}), "not a UTF-8 text file")
+            self.assertIn(
+                "no such file or directory: nowhere",
+                await message("apply_patch", {"path": "nowhere/new.py", "new_text": "x",
+                                              "create": True}, approved=True),
+            )
+            self.assertIn(
+                "no such file or directory: build",
+                await message("run_command", {"argv": ["ls"], "cwd": "build"}, approved=True),
+            )
+            self.assertIn(
+                "no such file or directory: gone.py",
+                await message("git_diff", {"path": "gone.py"}),
+            )
+            self.assertEqual(execution.calls, [])  # nothing ran
+
     async def test_coding_agent_pauses_and_resumes_exact_tool_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -192,6 +239,26 @@ class GuardrailTests(unittest.TestCase):
                 boundary.apply_patch(
                     "main.py", old_text="x = 1", new_text="x = 2"
                 )
+
+    def test_unreadable_file_is_skipped_by_search_and_named_by_read(self) -> None:
+        import os
+
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root can read any file")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ok.txt").write_text("needle\n", encoding="utf-8")
+            locked = root / "locked.txt"
+            locked.write_text("needle\n", encoding="utf-8")
+            locked.chmod(0)
+            try:
+                boundary = WorkspaceBoundary(root)
+                found = boundary.search("needle")
+                self.assertEqual([m["path"] for m in found["matches"]], ["ok.txt"])
+                with self.assertRaisesRegex(WorkspaceViolation, "file could not be read: locked.txt"):
+                    boundary.read_file("locked.txt")
+            finally:
+                locked.chmod(0o600)
 
     def test_docker_config_rejects_unsafe_values(self) -> None:
         with self.assertRaises(ValueError):
