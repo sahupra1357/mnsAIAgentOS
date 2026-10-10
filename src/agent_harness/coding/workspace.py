@@ -14,6 +14,13 @@ class WorkspaceViolation(ValueError):
     """A requested file operation escaped or violated the workspace policy."""
 
 
+class WorkspacePathNotFound(WorkspaceViolation):
+    """The path (or its parent directory) does not exist in the workspace.
+
+    The message names the path as the model gave it, never the host's absolute path.
+    """
+
+
 _SKIP_DIRECTORIES = {".git", ".venv", "node_modules", "__pycache__"}
 _SENSITIVE_NAMES = {".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519"}
 _SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx"}
@@ -180,11 +187,17 @@ class WorkspaceBoundary:
         if raw.is_absolute() or ".." in raw.parts:
             raise WorkspaceViolation("path must stay inside the workspace")
         candidate = self.root / raw
-        if must_exist:
-            resolved = candidate.resolve(strict=True)
-        else:
-            parent = candidate.parent.resolve(strict=True)
-            resolved = parent / candidate.name
+        try:
+            if must_exist:
+                resolved = candidate.resolve(strict=True)
+            else:
+                parent = candidate.parent.resolve(strict=True)
+                resolved = parent / candidate.name
+        except (FileNotFoundError, NotADirectoryError):
+            # Before, these fell through to the tool runtime's catch-all, and the model only
+            # saw "Tool execution failed." for a wrong path.
+            missing = relative_path if must_exist else raw.parent.as_posix()
+            raise WorkspacePathNotFound(f"no such file or directory: {missing}") from None
         if not resolved.is_relative_to(self.root):
             raise WorkspaceViolation("path escapes the workspace")
         return resolved
@@ -210,7 +223,13 @@ class WorkspaceBoundary:
             raise WorkspaceViolation("writes through symlinks are forbidden")
 
     def _read_text(self, path: Path) -> str:
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except OSError as exc:  # e.g. permission denied; search skips such files
+            relative = path.relative_to(self.root).as_posix()
+            raise WorkspaceViolation(
+                f"file could not be read: {relative} ({exc.strerror or type(exc).__name__})"
+            ) from None
         if len(data) > self.max_file_bytes:
             raise WorkspaceViolation("file exceeds the configured size limit")
         if b"\x00" in data:

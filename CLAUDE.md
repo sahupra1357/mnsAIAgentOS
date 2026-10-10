@@ -189,6 +189,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   `head`, `wc`, and `find`; `[permissions] allow` pre-approves them, and `ask` keeps a pause for a
   `.env` argument. The guardrails refuse find's `-delete`/`-exec`/`-execdir`/`-ok`/`-okdir`/
   `-fls`/`-fprint*`: the workspace is mounted read-write, and permission rules only see `argv[0]`.
+- **Workspace errors.** A wrong path is reported as "no such file or directory: X; search_files
+  can find the right path" (`WorkspacePathNotFound`), not "Tool execution failed."; unreadable and
+  binary files get their own messages, and `search_files` skips unreadable files.
 - **Instruction headers.** Configured files are named without their directory
   (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.
 - **Unreadable tool arguments.** Arguments that are not a JSON object come back marked

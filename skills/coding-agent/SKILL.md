@@ -26,6 +26,14 @@ Read-only inspection tools can run automatically. File writes, test/code executi
 - Read bounded UTF-8 text only; skip binary and oversized files during search.
 - Apply one exact text replacement atomically and reject ambiguous matches.
 - Never let model input select an arbitrary working directory.
+- Report file-system problems in words the model can act on, naming the path as it was
+  given (never the host path): a missing path or parent is `WorkspacePathNotFound` ("no such
+  file or directory: X; search_files can find the right path"), an unreadable file is "file
+  could not be read: X (Permission denied)", and a binary file is "not a UTF-8 text file".
+  `_safe_workspace_call` turns these into `ToolRejectedError`, including for the `cwd` and
+  `path` arguments of `run_command`, `git_status`, `git_diff`, and `git_commit`. Before,
+  they reached the runtime's catch-all ("Tool execution failed.", or "Tool returned an
+  invalid result." for a bad `cwd`), and `search_files` failed outright on an unreadable file.
 
 ## Command Guardrails
 

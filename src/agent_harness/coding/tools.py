@@ -21,7 +21,7 @@ from .execution import (
     LocalProcessRuntime,
 )
 from .guardrails import CommandGuardrails, CommandRejected
-from .workspace import WorkspaceBoundary, WorkspaceViolation
+from .workspace import WorkspaceBoundary, WorkspacePathNotFound, WorkspaceViolation
 
 
 CODING_AGENT_SYSTEM_PROMPT = """You are a careful coding agent working inside one configured workspace.
@@ -129,7 +129,7 @@ def register_coding_tools(
         return await _run(
             execution_runtime,
             ["git", "status", "--short", "--branch"],
-            cwd=boundary.resolve_directory(str(arguments.get("cwd", "."))),
+            cwd=_safe_workspace_call(boundary.resolve_directory, str(arguments.get("cwd", "."))),
             timeout_seconds=command_timeout_seconds,
         )
 
@@ -139,11 +139,11 @@ def register_coding_tools(
             argv.append("--staged")
         path = arguments.get("path")
         if path:
-            argv.extend(["--", boundary.validate_relative_file(str(path))])
+            argv.extend(["--", _safe_workspace_call(boundary.validate_relative_file, str(path))])
         return await _run(
             execution_runtime,
             argv,
-            cwd=boundary.resolve_directory(str(arguments.get("cwd", "."))),
+            cwd=_safe_workspace_call(boundary.resolve_directory, str(arguments.get("cwd", "."))),
             timeout_seconds=command_timeout_seconds,
         )
 
@@ -157,13 +157,14 @@ def register_coding_tools(
         return await _run(
             execution_runtime,
             argv,
-            cwd=boundary.resolve_directory(str(arguments.get("cwd", "."))),
+            cwd=_safe_workspace_call(boundary.resolve_directory, str(arguments.get("cwd", "."))),
             timeout_seconds=timeout,
         )
 
     async def git_commit(arguments: JsonObject) -> JsonObject:
-        paths = [boundary.validate_relative_file(path) for path in _string_list(arguments["paths"], "paths")]
-        cwd = boundary.resolve_directory(str(arguments.get("cwd", ".")))
+        paths = [_safe_workspace_call(boundary.validate_relative_file, path)
+                 for path in _string_list(arguments["paths"], "paths")]
+        cwd = _safe_workspace_call(boundary.resolve_directory, str(arguments.get("cwd", ".")))
         staged = await _run(
             execution_runtime,
             ["git", "add", "--", *paths],
@@ -385,11 +386,17 @@ def _command_result(result: CommandResult) -> JsonObject:
     }
 
 
-def _safe_workspace_call(function: Any, *args: Any, **kwargs: Any) -> JsonObject:
+def _safe_workspace_call(function: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run a boundary call; policy and file-system problems become messages for the model."""
+
     try:
         return function(*args, **kwargs)
+    except WorkspacePathNotFound as exc:
+        raise ToolRejectedError(f"{exc}; search_files can find the right path") from exc
     except WorkspaceViolation as exc:
         raise ToolRejectedError(str(exc)) from exc
+    except UnicodeDecodeError as exc:
+        raise ToolRejectedError("not a UTF-8 text file") from exc
 
 
 def _string_list(value: Any, field: str) -> list[str]:
