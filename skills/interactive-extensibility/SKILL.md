@@ -180,6 +180,11 @@ is deleted.
   of the workspace), concatenated in precedence order with source headers, bounded in
   size, and hashed into the run's version record. They are loaded once at creation and
   never re-read mid-run, which keeps the prompt prefix stable.
+  A configured file's header names the file only (`## Instructions from CHAT.md`); a
+  discovered subdirectory file keeps its relative path (`pkg/mod/AGENTS.md`), since its rules
+  apply to that directory. The full paths stay in the run's `context_sources`. On 2026-10-10
+  the header `.agent-harness/instructions/CHAT.md` led Qwen 3.6 35B-A3B to read "explain how
+  agent-harness works" as a question about the `.agent-harness` folder.
   Implemented (6f): `[instructions] subdirectories = true` appends the `filenames`
   (default `AGENTS.md`) found in each directory between the project root (the config
   file's directory, excluded) and the working directory at run creation, outermost

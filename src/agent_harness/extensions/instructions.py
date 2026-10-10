@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -51,8 +51,16 @@ def resolve_path(value: str, base: Path) -> Path:
     return path if path.is_absolute() else base / path
 
 
-def load_instructions(files: Iterable[str], *, base: Path, max_bytes: int) -> tuple[str, list[str]]:
-    """Concatenate existing instruction files in order, with source headers."""
+def load_instructions(
+    files: Iterable[str], *, base: Path, max_bytes: int, scoped: Collection[str] = ()
+) -> tuple[str, list[str]]:
+    """Concatenate existing instruction files in order, with source headers.
+
+    A header names the file only (``## Instructions from CHAT.md``): a configured path such
+    as ``.agent-harness/instructions/CHAT.md`` led Qwen 3.6 to read "explain how agent-harness
+    works" as a question about the ``.agent-harness`` folder. Entries in ``scoped``
+    (subdirectory files, whose rules apply to that directory) keep their relative path.
+    """
 
     blocks: list[str] = []
     sources: list[str] = []
@@ -67,7 +75,8 @@ def load_instructions(files: Iterable[str], *, base: Path, max_bytes: int) -> tu
         if len(text.encode("utf-8")) > remaining:
             text = text.encode("utf-8")[:remaining].decode("utf-8", "ignore") + "\n[... truncated]"
         remaining -= len(text.encode("utf-8"))
-        blocks.append(f"## Instructions from {entry}\n\n{text}")
+        label = entry if entry in scoped else path.name
+        blocks.append(f"## Instructions from {label}\n\n{text}")
         sources.append(str(path))
     return "\n\n".join(blocks), sources
 
@@ -180,6 +189,7 @@ class SystemContextBuilder:
 
     def __call__(self) -> SystemContext:
         files = list(self.instruction_files)
+        discovered: list[str] = []
         if self.subdirectory_filenames:
             listed = {_resolved(resolve_path(entry, self.base)) for entry in files}
             for entry in discover_subdirectory_instructions(
@@ -187,7 +197,10 @@ class SystemContextBuilder:
             ):
                 if _resolved(resolve_path(entry, self.base)) not in listed:
                     files.append(entry)
-        text, sources = load_instructions(files, base=self.base, max_bytes=self.max_bytes)
+                    discovered.append(entry)
+        text, sources = load_instructions(
+            files, base=self.base, max_bytes=self.max_bytes, scoped=discovered
+        )
         parts = [text] if text else []
         if self.skills:
             parts.append(skills_index(self.skills))

@@ -99,6 +99,27 @@ class SystemContextTests(unittest.TestCase):
         self.assertNotIn("Module rule.", disabled.text)
 
 
+class HeaderTests(unittest.TestCase):
+    def test_configured_files_are_named_without_their_directory(self) -> None:
+        # A configured path such as .agent-harness/instructions/CHAT.md made Qwen 3.6 read
+        # "explain how agent-harness works" as a question about the .agent-harness folder.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write(root / ".agent-harness" / "instructions" / "CHAT.md", "Answer concisely.")
+            write(root / "pkg" / "AGENTS.md", "Package rule.")
+            context = SystemContextBuilder(
+                instruction_files=[".agent-harness/instructions/CHAT.md"],
+                base=root,
+                subdirectory_filenames=("AGENTS.md",),
+                working_directory=lambda: root / "pkg",
+            )()
+        self.assertIn("## Instructions from CHAT.md\n\nAnswer concisely.", context.text)
+        self.assertNotIn(".agent-harness", context.text)
+        # A discovered subdirectory file keeps its path: its rules apply to that directory.
+        self.assertIn("## Instructions from pkg/AGENTS.md", context.text)
+        self.assertEqual(len(context.sources), 2)  # sources still record the full paths
+
+
 class ConfigTests(unittest.TestCase):
     def test_defaults_parse_and_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

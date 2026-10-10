@@ -174,6 +174,12 @@ approval_mode = "side_effects"   # pause before writes and commands
 command_timeout_seconds = 120
 enable_git_commit = true
 enable_pull_requests = false
+# The default commands plus read-only listing tools (ls, cat, head, wc, find). The guardrails
+# refuse find's -delete/-exec/-execdir/-ok/-okdir/-fprint*/-fls, since the workspace mount is
+# read-write. This list replaces the default one, so the defaults are repeated (git is needed
+# for enable_git_commit).
+allowed_commands = ["cargo", "git", "go", "make", "npm", "npx", "pnpm", "py.test", "pytest",
+                    "python", "python3", "uv", "yarn", "ls", "cat", "head", "wc", "find"]
 
 [coding.docker]
 image = "python:3.12"
@@ -186,8 +192,13 @@ memory = "2g"
 [permissions]
 mode = "default"                 # default | accept_edits | plan | bypass
 allow = ["read_file", "search_files", "git_status", "git_diff", "run_tests",
-         "run_command(argv.0=pytest)"]
-ask = ["read_file(path=*.env)"]
+         "run_command(argv.0=pytest)",
+         # read-only listing commands run without an approval pause
+         "run_command(argv.0=ls)", "run_command(argv.0=cat)", "run_command(argv.0=head)",
+         "run_command(argv.0=wc)", "run_command(argv.0=find)"]
+# Ask beats allow: cat/head on a .env file still pauses, like read_file does.
+ask = ["read_file(path=*.env)", "run_command(argv.1=*.env)", "run_command(argv.2=*.env)",
+       "run_command(argv.3=*.env)", "run_command(argv.4=*.env)"]
 deny = ["run_command(argv.0=rm)", "run_command(argv.0=sudo)", "git_*(force=true)"]
 edit_tools = ["apply_patch"]
 

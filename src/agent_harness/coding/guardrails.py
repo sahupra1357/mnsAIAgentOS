@@ -66,6 +66,20 @@ _DANGEROUS_GIT_SUBCOMMANDS = {
     "restore",
 }
 
+# find actions that run programs or write files: through the read-write workspace mount
+# they would change the host's files, so find is only a lister.
+_FIND_FORBIDDEN_ACTIONS = {
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-fls",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+}
+
 _FORBIDDEN_TOKENS = {
     "--cap-add",
     "--privileged",
@@ -109,6 +123,13 @@ class CommandGuardrails:
                 raise CommandRejected("command arguments must stay inside the workspace")
         if command == "git":
             self._validate_git(argv)
+        if command == "find":
+            refused = sorted(set(argv[1:]) & _FIND_FORBIDDEN_ACTIONS)
+            if refused:
+                raise CommandRejected(
+                    f"find {refused[0]} is forbidden: find may only list files "
+                    "(no -delete, -exec, -execdir, -ok, -okdir, or -fprint/-fls output files)"
+                )
         if command in {"python", "python3"} and not self.allow_inline_python:
             if "-c" in argv[1:]:
                 raise CommandRejected("inline Python is disabled; run a workspace file instead")

@@ -185,6 +185,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   answer to that note ends a planned run with steps left.
   `[subagents] max_parallel` (0 = no limit in code, 2 in the root config) caps one parent's
   children running at once; llama.cpp's shared KV cache overflowed with five.
+- **Read-only commands and `find` (root config).** `[coding] allowed_commands` adds `ls`, `cat`,
+  `head`, `wc`, and `find`; `[permissions] allow` pre-approves them, and `ask` keeps a pause for a
+  `.env` argument. The guardrails refuse find's `-delete`/`-exec`/`-execdir`/`-ok`/`-okdir`/
+  `-fls`/`-fprint*`: the workspace is mounted read-write, and permission rules only see `argv[0]`.
+- **Instruction headers.** Configured files are named without their directory
+  (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.
 - **Unreadable tool arguments.** Arguments that are not a JSON object come back marked
   (`INVALID_ARGUMENTS_KEY` in `domain.py`) and get a validation-error tool result; the run goes
   on. Before, `MalformedResponseError` failed the run.

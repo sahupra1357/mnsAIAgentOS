@@ -33,6 +33,15 @@ Read-only inspection tools can run automatically. File writes, test/code executi
 - Allow only configured command names and bounded argument counts/sizes.
 - Always deny shells, privilege escalation, Docker socket access, destructive filesystem commands, forced Git operations, and network escape flags.
 - Approval never overrides an always-denied command.
+- `find` (opt-in through `allowed_commands`) may only list files: `-delete`, `-exec`,
+  `-execdir`, `-ok`, `-okdir`, `-fls`, and `-fprint*` are refused, because the workspace
+  mount is read-write and those actions would change or run things on the host's files.
+  Permission rules match only `argv[0]`, so `find -exec rm` would otherwise pass a
+  `run_command(argv.0=rm)` deny rule.
+- The root `models.toml` adds `ls`, `cat`, `head`, `wc`, and `find` to the default commands,
+  with `allow` rules so they run without an approval pause, and `ask` rules for a `.env`
+  argument (positions 1–4), matching `read_file(path=*.env)`. `allowed_commands` replaces
+  the default list, so the defaults are repeated there.
 - Keep local host execution explicitly opt-in. Prefer the Docker runtime.
 
 ## Docker Runtime
