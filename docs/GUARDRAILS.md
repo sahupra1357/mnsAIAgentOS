@@ -100,6 +100,11 @@ action = "block"           # "flag": record an unsafe verdict and let the turn g
   src/agent_harness/cli/repl.py" as `violent_crimes`), while the 8B flagged none and caught
   12 of 12 harmful prompts. The 8B does not fit next to a 27B chat model on a 36 GB Mac.
   `on_error` still decides guard failures on its own.
+- **`parallel = true` (root config).** New input is checked while the main model answers;
+  an unsafe verdict with `block` discards the answer before anything is recorded. On Modal the
+  guard's container and the chat model's then cold-start together (on 2026-10-10 the guard's
+  L4 start, 176 s, came before the H200's, 306 s, for 511 s in all). A step that checks new
+  input is not streamed, so `/ui` shows that step's text only when it is complete.
 - **llama.cpp needs `--no-prefill-assistant`** for the guard model (preset:
   `no-prefill-assistant = true`). Otherwise the server prefills the reply being checked,
   the guard echoes it back, and the check is recorded as a `guard_error` naming the flag.

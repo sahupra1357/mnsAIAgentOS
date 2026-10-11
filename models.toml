@@ -420,6 +420,13 @@ taint = true                     # side-effect tools need approval after untrust
 #   AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block
 [guardrails.model]
 action = "flag"
+# Check new input alongside the main model call instead of before it. The guard and the chat
+# model then start together, so on Modal a cold start waits for the slower of the two, not
+# both: on 2026-10-10 the guard's L4 took 176 s before the H200 even started (511 s in all).
+# An unsafe verdict with "block" still discards the answer before anything is recorded.
+# Trade-off: a step that checks new input (a turn's first step, and steps after a [Plan] or
+# [Budget] note) is not streamed, so /ui shows that step's text when it is complete.
+parallel = true
 
 # --- Network, redaction, quotas, API --------------------------------------------
 # Egress allowlist for HTTP tools, web search, web_fetch, and MCP over HTTP (not for
