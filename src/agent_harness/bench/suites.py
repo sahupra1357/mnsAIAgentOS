@@ -933,7 +933,9 @@ class TasksSuite:
         workspace = item.input["workspace"]
         with tempfile.TemporaryDirectory(prefix="agent-harness-task-") as scratch:
             root = Path(scratch)
-            overrides: dict[str, Any] = {"artifacts": {"directory": str(root / "artifacts")}}
+            # The benchmark reports its items itself (--langfuse); live export would duplicate them.
+            overrides: dict[str, Any] = {"artifacts": {"directory": str(root / "artifacts")},
+                                         "langfuse": {"enabled": False}}
             if isinstance(workspace, Mapping):
                 files = root / "workspace"
                 for name, text in workspace.items():

@@ -85,6 +85,13 @@ packages live behind `pyproject` extras (`[api]`, `[otel]`) and are imported laz
 - Record `Usage.cached_input_tokens` (optional, default `None`) in model events, and
   emit a cache-hit-rate metric (`cached_input_tokens / input_tokens`) per run and per
   profile. An unknown count stays unknown; never report it as 0.
+- Langfuse (`observability/langfuse.py`, `[langfuse]`, docs/LANGFUSE.md): stdlib OTLP/HTTP JSON to
+  `/api/public/otel/v1/traces` with `x-langfuse-ingestion-version: 4` (Langfuse v4; the legacy
+  `/api/public/ingestion` trace events sunset 2026-11-16 and lag up to 15 min). One trace per turn,
+  root `agent` span with the turn's input/output, trace-wide `langfuse.*` attributes copied to every
+  span, spans exported once (v4 keeps duplicates). Content from the run store at turn end, through
+  `ContentPolicy` (secrets + PII masked). Scores (`score-create` on `/api/public/ingestion`, still
+  supported) go on the root observation. `/ui` feedback: `POST /runs/{id}/feedback`.
 
 ## 5. HTTP API (`server/api.py`)
 - Endpoints: `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` (and SSE

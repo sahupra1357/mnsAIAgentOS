@@ -230,6 +230,15 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 - **Phone PII and new folders (2026-10-11).** The phone detector needs phone formatting (`+…`, `(…)`, or
   matching separators); bare 10-digit numbers are not phones (a Fibonacci result was redacted).
   `apply_patch` with `create` makes missing parent folders via `WorkspaceBoundary._resolve_new`.
+- **Langfuse (2026-10-11, `observability/langfuse.py`, docs/LANGFUSE.md).** Stdlib OTLP/HTTP JSON to
+  `/api/public/otel/v1/traces` with `x-langfuse-ingestion-version: 4`: the user's Langfuse org is v4, where
+  `/api/public/ingestion` trace events lag up to 15 min and sunset 2026-11-16, and legacy reads answer 410
+  (read via `GET /api/public/v2/observations`). One trace per turn (`trace_id(run, turn)`), root `agent`
+  span holds input/output, trace-wide `langfuse.*` attributes on every span, each span exported once.
+  The exporter is a telemetry sink that reads the turn from the store at turn end (`ended_at` picks the
+  turn, since a new one may have started). Scores still use `score-create`. Bench `--langfuse` =
+  dataset items + experiment attributes (`POST /dataset-run-items` is deprecated). `tasks` suite apps
+  set `langfuse.enabled = false` (the bench reports items itself).
 - **Instruction headers.** Configured files are named without their directory
   (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.
 - **Cut-off answers (`max_answer_continuations`).** A final answer with `finish_reason = length` is
@@ -757,6 +766,13 @@ An installed `agent-harness` script must be reinstalled (`pip install -e .`).
   `min_pass_all_repeats`. `BenchContext.config_path` carries the config under test.
 - **Plan:** `[[benchmark]] name = "tasks"` (9 repo-grounded items in `examples/bench/tasks_sample.jsonl`,
   workspace read-only) and feature `agent-tasks`. Slow on a 27B Mac model (1-2 hours).
+
+**Phase 22 – Langfuse** [harness-operations, harness-verification] — on `langfuse`
+1. `[langfuse]` (off in code, on in the root config; keys in `.env`): live traces per turn over OTLP/HTTP JSON
+   (Langfuse v4 ingestion), content redacted, sampling, exported once per span.
+2. `/ui` 👍/👎 → `POST /runs/{id}/feedback` → `user_feedback` scores on the turn's root observation.
+3. `agent-harness-bench run --langfuse` → dataset items + experiment traces + scores.
+4. LLM-as-a-judge is configured in the Langfuse UI on root observations (docs/LANGFUSE.md).
 
 ## Validation
 

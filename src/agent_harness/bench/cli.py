@@ -83,6 +83,8 @@ class BenchmarkSpec:
     transcripts: str = "failed"  # "failed" | "all" | "none": full runs saved for debugging
     baseline: Path | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
+    langfuse: bool = False  # report items, scores, dataset, and dataset run to Langfuse
+    langfuse_run: str | None = None  # dataset run name (default: "<profile> <UTC time>")
 
 
 async def execute_benchmark(
@@ -134,6 +136,12 @@ async def execute_benchmark(
         embedding_profile=config.companion(profile, "embed"),
         config_path=spec.config,
     )
+    if spec.langfuse:
+        from .langfuse_report import bench_reporter
+
+        context.langfuse = bench_reporter(config, os.environ, suite=spec.suite, profile=profile,
+                                          data_name=Path(spec.data).name, run_name=spec.langfuse_run)
+        await context.langfuse.prepare()
     out = spec.out or Path("bench-results") / f"{spec.name or spec.suite}-{profile}"
     out.mkdir(parents=True, exist_ok=True)
     if spec.transcripts != "none":
@@ -167,6 +175,7 @@ async def execute_benchmark(
     finally:
         if live is not None:
             live.benchmark_finished()
+        langfuse_summary = context.langfuse.close() if context.langfuse is not None else None
     selected_profile = config.models[profile]
     report = build_report(
         suite=spec.suite,
@@ -191,6 +200,8 @@ async def execute_benchmark(
         model={"adapter": selected_profile.adapter, "model": selected_profile.model},
         started_at=started,
     )
+    if langfuse_summary is not None:
+        report["langfuse"] = langfuse_summary
     (out / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     return report, results
 
@@ -211,6 +222,13 @@ def _print_report(report: Mapping[str, Any]) -> None:
     if len(metrics["by_category"]) > 1:
         for name, values in metrics["by_category"].items():
             print(f"  {name}: {values['accuracy']:.3f} (n={values['n']})")
+    langfuse = report.get("langfuse")
+    if langfuse:
+        print(f"  langfuse: dataset {langfuse['dataset']!r}, experiment {langfuse['experiment']!r}: "
+              f"{langfuse['items']} items, {langfuse['spans_sent']} spans and {langfuse['scores_sent']} scores sent, "
+              f"{langfuse['failed']} failed"
+              + (f", {langfuse['dataset_errors']} dataset errors" if langfuse["dataset_errors"] else "")
+              + (f" (last error: {langfuse['last_error']})" if langfuse["last_error"] else ""))
 
 
 # --- pipeline --------------------------------------------------------------------
@@ -556,7 +574,7 @@ def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, outpu
     allowed = {
         "name", "suite", "data", "answers", "profile", "limit", "offset", "concurrency",
         "max_steps", "max_wall_seconds", "options", "baseline", "thresholds", "docker_image",
-        "unsafe_local_execution", "transcripts",
+        "unsafe_local_execution", "transcripts", "langfuse", "langfuse_run",
     }
     unknown = set(entry) - allowed
     if unknown:
@@ -590,6 +608,8 @@ def _spec_from_plan(entry: Mapping[str, Any], *, base: Path, config: Path, outpu
         transcripts=_transcripts_mode(entry.get("transcripts", "failed")),
         baseline=base / baseline if baseline else None,
         thresholds=Thresholds.from_mapping(entry.get("thresholds", {})),
+        langfuse=bool(entry.get("langfuse", False)),
+        langfuse_run=str(entry["langfuse_run"]) if entry.get("langfuse_run") else None,
     )
 
 
@@ -652,6 +672,9 @@ def _parser() -> argparse.ArgumentParser:
                      help="save full runs under OUT/transcripts for debugging (default: failed items)")
     run.add_argument("--no-retry-errors", action="store_true",
                      help="on resume, keep items that ended in error/failed instead of running them again")
+    run.add_argument("--langfuse", action="store_true",
+                     help="send each item's trace and scores, the dataset, and a dataset run to Langfuse")
+    run.add_argument("--langfuse-run", help="Langfuse dataset run name (default: '<profile> <UTC time>')")
     run.add_argument("--docker-image", default="python:3.12-slim", help="humaneval sandbox image")
     run.add_argument("--unsafe-local-execution", action="store_true",
                      help="humaneval: run generated code on this host (trusted use only)")
@@ -712,6 +735,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 unsafe_local_execution=args.unsafe_local_execution,
                 retry_errors=not args.no_retry_errors,
                 transcripts=args.transcripts,
+                langfuse=args.langfuse, langfuse_run=args.langfuse_run,
             )
             sink = (JsonLinesTelemetry(_open_append(args.telemetry_file)) if args.telemetry_file else None)
             try:

@@ -62,6 +62,9 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .card .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
 .card input { flex: 1; min-width: 160px; }
 .notice { color: var(--muted); text-align: center; margin: 60px 0; }
+.feedback { display: flex; gap: 4px; margin: -12px 0 18px; }
+.feedback button { padding: 2px 8px; font-size: 13px; opacity: .55; }
+.feedback button.chosen { opacity: 1; border-color: var(--accent); }
 .error { background: var(--bad-bg); color: var(--bad); padding: 8px 12px; border-radius: 8px; margin: 0 20px 10px; }
 .composer { border-top: 1px solid var(--line); padding: 12px max(20px, calc(50% - 400px)) 16px; display: flex; gap: 10px; align-items: flex-end; }
 .composer textarea { flex: 1; resize: none; min-height: 44px; max-height: 220px; }
@@ -150,7 +153,7 @@ dialog label { display: grid; gap: 4px; margin: 10px 0; font-size: 13px; color: 
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = { runId: null, run: null, events: 0, streaming: null, profiles: null };
+const state = { runId: null, run: null, events: 0, streaming: null, profiles: null, feedback: false, votes: {} };
 const store = {
   get(name) { try { return sessionStorage.getItem(name) ?? localStorage.getItem(name) ?? ""; } catch { return ""; } },
   set(name, value, remember) {
@@ -242,6 +245,7 @@ function message(role, text, extra) {
 async function loadProfiles() {
   try {
     const data = await api("GET", "/profiles");
+    state.feedback = Boolean(data.feedback);  // [langfuse] is on: answers get 👍/👎
     const select = $("profile");
     select.replaceChildren();
     select.append(el("option", { value: "" }, `default (${data.default})`));
@@ -326,15 +330,40 @@ function refreshSoon(urgent = false) {
 function renderTranscript(transcript) {
   const chat = $("chat");
   chat.replaceChildren();
-  for (const turn of transcript.messages) {
+  const turns = transcript.messages;
+  const done = !state.run || !["running", "queued"].includes(state.run.status);
+  turns.forEach((turn, i) => {
     if (turn.kind === "question") chat.append(message("assistant", "❓ " + turn.content + (turn.options && turn.options.length ? "\n(" + turn.options.join(" / ") + ")" : "")));
     else chat.append(message(turn.role, turn.content, turn));
-  }
+    // 👍/👎 under the last answer of each turn (a Langfuse user_feedback score).
+    const next = turns[i + 1];
+    const lastOfTurn = next ? next.role === "user" : done;
+    if (state.feedback && turn.role === "assistant" && !turn.kind && lastOfTurn) chat.append(feedbackRow(turn.index));
+  });
   if (transcript.pending_approval) chat.append(pendingCard(transcript.pending_approval));
   if (state.run && state.run.error) chat.append(el("div", { class: "card" }, el("h4", {}, `Run ${state.run.status}`), state.run.error));
   if (!transcript.messages.length && !transcript.pending_approval) chat.append(el("div", { class: "notice" }, "No messages yet."));
   chat.scrollTop = chat.scrollHeight;
   $("run-title").textContent = (transcript.messages.find((t) => t.role === "user") || {}).content || state.runId;
+}
+
+function feedbackRow(messageIndex) {
+  const key = `${state.runId}:${messageIndex}`;
+  const row = el("div", { class: "feedback" });
+  const vote = async (value) => {
+    try {
+      await api("POST", `/runs/${state.runId}/feedback`, { value, message_index: messageIndex });
+      state.votes[key] = value;
+      for (const button of row.children) button.classList.toggle("chosen", button.dataset.value === value);
+    } catch (error) { showError(error); }
+  };
+  for (const [value, label, title] of [["up", "👍", "Good answer"], ["down", "👎", "Bad answer"]]) {
+    const button = el("button", { title, onclick: () => vote(value) }, label);
+    button.dataset.value = value;
+    if (state.votes[key] === value) button.classList.add("chosen");
+    row.append(button);
+  }
+  return row;
 }
 
 function pendingCard(pending) {

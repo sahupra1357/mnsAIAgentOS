@@ -67,7 +67,9 @@ from .tools.sources import (
 )
 from .server.access import Quota
 from .mcp.connection import McpError
+from .observability.langfuse import LangfuseTelemetry, exporter_from_config
 from .observability.redaction import RedactingRunStore, RedactingTelemetry, Redactor
+from .observability.telemetry import MultiTelemetry
 from urllib.parse import urlsplit
 
 
@@ -89,6 +91,7 @@ class HarnessApplication:
     catalog: ToolCatalog | None = None
     mcp_sources: list[McpToolSource] = field(default_factory=list)
     sandbox_sources: list[Any] = field(default_factory=list)  # SandboxedPythonSource
+    langfuse: Any = None  # LangfuseExporter when [langfuse] is on and has credentials
 
     async def sync_tools(self) -> dict[str, str]:
         """Discover tools from live MCP servers and record them in the catalog.
@@ -140,6 +143,8 @@ class HarnessApplication:
         }
 
     async def close(self) -> None:
+        if self.langfuse is not None:  # before the store closes: pending exports read from it
+            await self.langfuse.aclose()
         for source in self.mcp_sources:
             await source.close()
         close_tools = getattr(self.tools, "close", None)
@@ -257,6 +262,11 @@ def build_application(
             (agent, plugin.root) for plugin in plugins for agent in plugin.agents
         ]
         redactor = (Redactor(config.redaction.patterns) if config.redaction.enabled else None)
+        langfuse = exporter_from_config(config, os.environ, redactor=redactor or Redactor())
+        if langfuse is not None:
+            langfuse.attach(store)  # events are already masked there; messages are masked on export
+            sinks = [LangfuseTelemetry(langfuse)] + ([telemetry] if telemetry is not None else [])
+            telemetry = MultiTelemetry(sinks) if len(sinks) > 1 else sinks[0]
         if redactor is not None and telemetry is not None:
             telemetry = RedactingTelemetry(telemetry, redactor)
         orchestrator = AgentOrchestrator(
@@ -322,6 +332,7 @@ def build_application(
             templates=templates,
             skills=skills,
             plugins=plugins,
+            langfuse=langfuse,
         )
         for mcp_source in mcp_sources:
             # A server that announces list_changed is re-synced in the background.
