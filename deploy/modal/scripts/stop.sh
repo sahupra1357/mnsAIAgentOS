@@ -26,7 +26,7 @@ for app in "${STOP_ORDER[@]}"; do
   fi
   for container in "${containers[@]}"; do
     echo "==> stopping $app ($name) container $container"
-    modal container stop "$container"
+    modal container stop --yes "$container"  # stop.sh is the confirmation
   done
 done
 echo "stopped: ${STOP_ORDER[*]}"

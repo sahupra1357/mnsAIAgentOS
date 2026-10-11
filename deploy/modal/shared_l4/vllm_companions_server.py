@@ -6,16 +6,18 @@ billed on its own. This deployment puts both on one L4 instead: one container, t
 processes, and a small router (router.py, next to this file) in front of them.
 
     container (1 x L4, 24 GB)
-      router.py :8000  -- /v1/embeddings -> embed vLLM :8001 (nomic-embed-text, 10% of the GPU)
+      router.py :8000  -- /v1/embeddings -> embed vLLM :8001 (nomic-embed-text, 5% of the GPU)
                        -- /v1/models     -> both lists merged
                        -- /health        -> 200 only when both are healthy
-                       -- everything else -> guard vLLM :8002 (Llama Guard 3 8B, 80% of the GPU)
+                       -- everything else -> guard vLLM :8002 (Llama Guard 3 8B, 87% of the GPU)
 
 Trade-offs (see docs/DEPLOYMENT.md, "Modal: one L4 for embeddings and the guard"):
 - One L4 instead of two while both are in use; embeddings are warm whenever the guard is.
-- The guard's KV cache shrinks: 80% of 24 GB is about 19 GB, minus 16 GB of weights and about
-  1.5 GB of runtime overhead leaves about 1.5 GB, roughly 12k tokens at 128 KB per token. That
-  covers MAX_MODEL_LEN = 8192 and one or two checks at once; bursts queue.
+- The guard's KV cache shrinks. Measured on Modal (2026-10-11, vLLM 0.30, L4 = 22.5 GiB): the
+  guard's weights take 15.0 GiB, CUDA graphs 0.35 GiB, and activations about 1.7 GiB. At 80% that
+  left 0.98 GiB of KV cache, under the 1.0 GiB one 8192-token request needs, and the guard did
+  not start. At 87% it is about 2.5 GiB, roughly 20k tokens at 128 KiB per token: MAX_MODEL_LEN =
+  8192 and two checks at once; bursts queue. (On its own L4 at 85% the guard has about 3 GiB.)
 - Both models start, idle, scale, and redeploy together. If either process exits, the router
   stops the other and the container is replaced.
 - The cold start is slightly longer: the servers start one after the other.
@@ -50,8 +52,8 @@ EMBED_MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
 GUARD_MODEL_NAME = "meta-llama/Llama-Guard-3-8B"
 GPU = "L4"
 # Shares of the whole GPU each process reserves at start (they must add up to at most about 0.92).
-EMBED_GPU_MEMORY = 0.10  # 2.4 GB: a 137M encoder (0.3 GB) with room for batches
-GUARD_GPU_MEMORY = 0.80  # 19.2 GB: 16 GB of weights, about 1.5 GB of overhead, about 1.5 GB of KV cache
+EMBED_GPU_MEMORY = 0.05  # 1.1 GiB: measured 0.26 GiB of weights + 0.14 GiB of CUDA graphs, plus batches
+GUARD_GPU_MEMORY = 0.87  # 19.6 GiB: 15.0 weights + 0.35 graphs + about 1.7 activations + about 2.5 KV cache
 MAX_MODEL_LEN = 8192  # guard prompts are one user/assistant exchange
 GUARD_EXTRA_ARGS: list[str] = []  # e.g. ["--enforce-eager"] if the KV cache is too small
 VLLM_PACKAGE = "vllm==0.30.0"  # same pin as vllm_server.py

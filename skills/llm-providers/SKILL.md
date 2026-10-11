@@ -77,7 +77,7 @@ branch on a provider name. Read `skills/model-gateway/SKILL.md` as well.
   file per model, plus `deploy.sh`, `start.sh` warming through `doctor`, `stop.sh` = `modal container stop`,
   `undeploy.sh` = `modal app stop`; embed, guard, chat in order, reversed for stop/undeploy; no
   arguments), and `shared_l4/` (its own four scripts for the companions app only; the user wants
-  the two sets kept apart, never parameterised; embeddings + guard on one L4: two vLLM processes at 0.10 / 0.80 of the GPU,
+  the two sets kept apart, never parameterised; embeddings + guard on one L4: two vLLM processes at 0.05 / 0.87 of the GPU (0.80 left the guard 0.98 GiB of KV cache, too little for 8192 tokens),
   started in turn, behind a stdlib `router.py` that merges `/v1/models` and gates `/health`).
   The harness side is only endpoints: `embedding_endpoint` and `guard_endpoint` may be the same URL.
   `.env` drives the warm-up: `doctor` and `start.sh` reach the URLs it sets, not a named app (a

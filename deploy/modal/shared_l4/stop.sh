@@ -23,6 +23,6 @@ if ((${#containers[@]} == 0)); then
 fi
 for container in "${containers[@]}"; do
   echo "==> stopping $APP_NAME container $container"
-  modal container stop "$container"
+  modal container stop --yes "$container"  # stop.sh is the confirmation
 done
 echo "stopped: $APP_NAME"
