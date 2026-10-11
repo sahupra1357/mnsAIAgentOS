@@ -1,26 +1,23 @@
-# Shared by deploy.sh, undeploy.sh, start.sh, and stop.sh (sourced, not run).
+# Shared by deploy.sh, undeploy.sh, start.sh, and stop.sh in this folder (sourced, not run).
 #
-# The Modal deployments, in start order:
-#   embed       deploy/modal/vllm_embed_server.py               agent-harness-vllm-embed       (L4)
-#   guard       deploy/modal/vllm_guard_server.py               agent-harness-vllm-guard       (L4)
-#   chat        deploy/modal/vllm_server.py                     agent-harness-vllm             (H200)
-#   companions  deploy/modal/shared_l4/vllm_companions_server.py agent-harness-vllm-companions (L4; embed + guard)
-#
-# Arguments shared by every script:
-#   (none)        embed guard chat
-#   --shared      companions chat (the shared-L4 layout instead of embed + guard)
-#   NAME ...      only these, in the order given (embed, guard, chat, companions)
-# Stop and undeploy go through the list in reverse.
+# This set manages the three separate deployments, each on its own GPU:
+#   embed  deploy/modal/vllm_embed_server.py  agent-harness-vllm-embed  (L4)
+#   guard  deploy/modal/vllm_guard_server.py  agent-harness-vllm-guard  (L4)
+#   chat   deploy/modal/vllm_server.py        agent-harness-vllm        (H200)
+# Deploy and start go embed, guard, chat; stop and undeploy go chat, guard, embed.
+# The shared-L4 deployment (embed + guard in one container) has its own scripts in
+# deploy/modal/shared_l4/; nothing here touches it.
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 python="${PYTHON:-python3}"
+START_ORDER=(embed guard chat)
+STOP_ORDER=(chat guard embed)
 
 app_script() {
   case "$1" in
     embed) echo "$root/deploy/modal/vllm_embed_server.py" ;;
     guard) echo "$root/deploy/modal/vllm_guard_server.py" ;;
     chat) echo "$root/deploy/modal/vllm_server.py" ;;
-    companions) echo "$root/deploy/modal/shared_l4/vllm_companions_server.py" ;;
   esac
 }
 
@@ -29,43 +26,25 @@ app_name() {
     embed) echo "agent-harness-vllm-embed" ;;
     guard) echo "agent-harness-vllm-guard" ;;
     chat) echo "agent-harness-vllm" ;;
-    companions) echo "agent-harness-vllm-companions" ;;
   esac
 }
 
-# The harness profiles whose doctor check reaches the deployment (start.sh warms it this way).
-app_profiles() {
+# The harness profile whose doctor check reaches the deployment (start.sh warms it this way).
+app_profile() {
   case "$1" in
     embed) echo "modal.embed" ;;
     guard) echo "modal.guard" ;;
     chat) echo "modal" ;;
-    companions) echo "modal.guard modal.embed" ;;
   esac
 }
 
-# select_apps "$@": sets the array `apps`, and `yes=1` for -y/--yes.
-select_apps() {
-  apps=()
-  yes=0
-  local shared=0
-  while (($#)); do
-    case "$1" in
-      --shared) shared=1 ;;
-      -y|--yes) yes=1 ;;
-      -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
-      embed|guard|chat|companions) apps+=("$1") ;;
-      *) echo "unknown argument: $1 (expected embed, guard, chat, companions, --shared)" >&2; exit 2 ;;
-    esac
-    shift
-  done
-  if ((${#apps[@]} == 0)); then
-    if ((shared)); then apps=(companions chat); else apps=(embed guard chat); fi
-  fi
-}
-
-reversed_apps() {
-  local i
-  for ((i = ${#apps[@]} - 1; i >= 0; i--)); do echo "${apps[i]}"; done
+# The scripts take no arguments; -h/--help prints the script's header.
+no_arguments() {
+  case "${1:-}" in
+    "") ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "$(basename "$0") takes no arguments (it always acts on: embed, guard, chat)" >&2; exit 2 ;;
+  esac
 }
 
 # The App ID of a deployed app, or nothing.

@@ -314,16 +314,19 @@ To deploy:
    three in order with `deploy/modal/scripts/deploy.sh`.
 2. `agent-harness doctor --model-profile modal`, then restart `serve`.
 
-**Lifecycle scripts (`deploy/modal/scripts/`).** Each goes through embed, guard, chat one after
-the other (stop and undeploy in reverse). Name apps to act on only those (`stop.sh chat`), or
-pass `--shared` for the shared-L4 layout below.
+**Lifecycle scripts: two separate sets, no arguments.**
 
-| Script | Does | GPU billing |
+| Set | Acts on | Order |
 |---|---|---|
-| `deploy.sh` | `modal deploy` each app | none until a container starts |
-| `start.sh` | warms each app with `agent-harness doctor --model-profile modal.embed / modal.guard / modal` | from the start until 20 idle minutes (or `stop.sh`) |
-| `stop.sh` | `modal container stop` each running container; the apps stay deployed | ends now; the next request cold-starts |
-| `undeploy.sh` | `modal app stop` each app (asks first; `-y` skips the question) | ends; the URL stops answering until redeployed |
+| `deploy/modal/scripts/` | the separate apps: embed (L4), guard (L4), chat (H200) | deploy/start: embed, guard, chat; stop/undeploy: chat, guard, embed |
+| `deploy/modal/shared_l4/` | only `agent-harness-vllm-companions` (embed + guard on one L4) | one app; never touches the H200 |
+
+| Script (in each set) | Does | GPU billing |
+|---|---|---|
+| `deploy.sh` | `modal deploy` | none until a container starts |
+| `start.sh` | warms with `agent-harness doctor` (`modal.embed`, `modal.guard`, `modal`; shared: `modal.guard`, `modal.embed`) | from the start until 20 idle minutes (or `stop.sh`) |
+| `stop.sh` | `modal container stop` on running containers; the apps stay deployed | ends now; the next request cold-starts |
+| `undeploy.sh` | `modal app stop` (asks first) | ends; the URL stops answering until redeployed |
 
 **Embeddings and guard on one L4 (optional).** `deploy/modal/shared_l4/vllm_companions_server.py`
 runs both companion models in one container: two vLLM processes (guard 80% of the GPU, embed
