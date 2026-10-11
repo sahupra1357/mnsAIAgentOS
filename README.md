@@ -252,7 +252,9 @@ Per provider:
     Meta approves manually). Unlike the 1B it does not flag ordinary coding prompts, so with the
     Modal profiles `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block` is usable.
 
-`agent-harness doctor` also checks the embedding and guard models.
+`agent-harness doctor` also checks the embedding and guard models. On a companion profile itself
+(`doctor --model-profile modal.embed` or `modal.guard`) it runs the connection checks plus one
+embedding or one guard classification, not the chat, tool-call, and cache probes.
 `AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider end
 to end: smoke and benchmark entries without a `profile` follow the default.
 

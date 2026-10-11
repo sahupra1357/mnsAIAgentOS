@@ -550,12 +550,15 @@ async def _doctor_command(args: argparse.Namespace) -> int:
     client = ModelGateway(config, transport=transport).resolve(profile)
     selected = config.model_profile(profile)
     print(f"profile={profile} adapter={selected.adapter} model={selected.model}")
+    # A companion (NAME.embed / NAME.guard) gets an embedding or guard probe, not chat checks.
+    role = config.companions[profile][1] if profile in config.companions else "chat"
     checks = await diagnose(
         client,
         transport=transport,
         check_tools=not args.skip_tools,
         check_cache=not args.skip_cache,
         max_tokens=args.max_tokens,
+        role=role,
     )
     checks = [*checks, *await companion_checks(config, profile, ModelGateway(config, transport=transport))]
     for check in checks:

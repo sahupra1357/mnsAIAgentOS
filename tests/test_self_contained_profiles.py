@@ -125,6 +125,28 @@ class GatewayAndDoctorTests(unittest.TestCase):
                          [("embeddings", CheckStatus.OK), ("guard model", CheckStatus.OK)])
         self.assertEqual(transport.calls[-1][1]["model"], "guard")
 
+    def test_doctor_on_a_companion_runs_its_own_probe_not_chat_checks(self) -> None:
+        # `doctor --model-profile modal.embed` used to send a chat completion to the embedding
+        # model (404 "model does not exist"), and modal.guard a tool call (400): start.sh then
+        # reported failures although both models were up.
+        from agent_harness.model_gateway.diagnostics import diagnose
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config(write(directory, LLAMA + 'embedding_model = "embedder"\nguard_model = "guard"\n'),
+                                 environ={})
+        transport = Transport()
+        gateway = ModelGateway(config, transport=transport, environ={"LLAMA_KEY": "secret-key"})
+        embed = asyncio.run(diagnose(gateway.resolve("llama.embed"), role="embed"))
+        self.assertEqual([(c.name, c.status) for c in embed], [("credentials", CheckStatus.OK),
+                                                              ("embeddings", CheckStatus.OK)])
+        self.assertIn("embedder: 3 dimensions", embed[-1].detail)
+        guard = asyncio.run(diagnose(gateway.resolve("llama.guard"), role="guard"))
+        self.assertEqual([(c.name, c.status) for c in guard], [("credentials", CheckStatus.OK),
+                                                              ("guard model", CheckStatus.OK)])
+        self.assertIn("guard answered 'safe'", guard[-1].detail)
+        self.assertEqual([url.rsplit("/", 1)[-1] for url, _, _ in transport.calls], ["embeddings", "completions"])
+        self.assertNotIn("tools", transport.calls[-1][1])  # no tool-call probe
+
     def test_embeddings_wait_for_a_cold_start_once(self) -> None:
         # A scaled-to-zero Modal embedding app loads its model on the first request.
         with tempfile.TemporaryDirectory() as directory:

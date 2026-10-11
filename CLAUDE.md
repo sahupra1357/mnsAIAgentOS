@@ -210,7 +210,11 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   endpoint URLs in `.env`, so `shared_l4/start.sh` warms the separate apps if `.env` names them. macOS runs bash 3.2: no `mapfile`, and expand possibly-empty
   arrays as `${a[@]+"${a[@]}"}`. The shared layout runs two vLLM processes (embed 0.05, guard 0.87 of an
   L4) behind stdlib `router.py`; at 0.10 / 0.80 the guard had 0.98 GiB of KV cache, under the 1.0 GiB 8192
-  tokens need, and crash-looped (each restart billed). `modal container stop` asks unless `--yes`. `tests/test_modal_shared_l4.py` checks the router
+  tokens need, and crash-looped (each restart billed). `modal container stop` asks unless `--yes`.
+  `doctor` on a companion profile (`diagnose(role="embed"|"guard")`, picked from `config.companions`) runs
+  the connection checks plus one embedding or guard probe; chat/tool/cache probes cannot pass there.
+  A doctor waiting on a crash-looping endpoint keeps Modal starting containers (the proxy does not
+  cancel abandoned requests): kill it, then redeploy the fix. `tests/test_modal_shared_l4.py` checks the router
   with in-process fakes and the scripts' app names against each `modal.App(...)`.
 - **Borrowed companions and affinity (Modal Shared Endpoints).** Profile fields `embedding_profile` /
   `guard_profile` name another profile (usually a companion such as `modal.embed`) for memory and the
