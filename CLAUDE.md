@@ -202,6 +202,13 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   presets in comments; `[models.modal]` matches it (price $0.001261/s,
   `cold_start_timeout_seconds = 1200`).
   `tests/test_full_config.py` checks the model, length, GPU, and parsers against `[models.modal]`.
+- **Modal lifecycle and the shared L4 (`deploy/modal/scripts/`, `deploy/modal/shared_l4/`).** The scripts
+  run embed, guard, chat in order (stop/undeploy reversed; `--shared` = companions, chat). `start.sh`
+  warms through `doctor` (no Modal start command for web endpoints); `stop.sh` stops containers, apps
+  stay deployed; `undeploy.sh` asks first. macOS runs bash 3.2: no `mapfile`, and expand possibly-empty
+  arrays as `${a[@]+"${a[@]}"}`. The shared layout runs two vLLM processes (embed 0.10, guard 0.80 of an
+  L4) behind stdlib `router.py`; untested on Modal. `tests/test_modal_shared_l4.py` checks the router
+  with in-process fakes and the scripts' app names against each `modal.App(...)`.
 - **Borrowed companions and affinity (Modal Shared Endpoints).** Profile fields `embedding_profile` /
   `guard_profile` name another profile (usually a companion such as `modal.embed`) for memory and the
   guard when that profile is the default; they exclude `embedding_model` / `guard_model`. A missing

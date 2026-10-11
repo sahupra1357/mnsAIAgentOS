@@ -942,6 +942,11 @@ All steps finished → "[Plan] … write the final answer" → final answer → 
 
 See `docs/DEPLOYMENT.md` for the container, compose file, and upgrade procedure.
 
+Modal model servers are outside the harness process: `deploy/modal/scripts/` deploys, starts
+(warms through `doctor`), stops, and undeploys them in order, and `deploy/modal/shared_l4/` is an
+optional layout with embeddings and the guard on one L4. The harness only sees endpoints: the
+`modal` profile's `embedding_endpoint` and `guard_endpoint` may name two deployments or the same one.
+
 ## Complete flow
 
 ```text

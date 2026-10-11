@@ -310,8 +310,29 @@ deployments stay separate, on an L4 each, and scale to zero when idle.
 | Thinking | returned as reasoning; off for summaries | `REASONING_PARSER`, `[summarization] parameters` |
 
 To deploy:
-1. `modal deploy deploy/modal/vllm_server.py` (and the embed and guard scripts, once).
+1. `modal deploy deploy/modal/vllm_server.py` (and the embed and guard scripts, once), or all
+   three in order with `deploy/modal/scripts/deploy.sh`.
 2. `agent-harness doctor --model-profile modal`, then restart `serve`.
+
+**Lifecycle scripts (`deploy/modal/scripts/`).** Each goes through embed, guard, chat one after
+the other (stop and undeploy in reverse). Name apps to act on only those (`stop.sh chat`), or
+pass `--shared` for the shared-L4 layout below.
+
+| Script | Does | GPU billing |
+|---|---|---|
+| `deploy.sh` | `modal deploy` each app | none until a container starts |
+| `start.sh` | warms each app with `agent-harness doctor --model-profile modal.embed / modal.guard / modal` | from the start until 20 idle minutes (or `stop.sh`) |
+| `stop.sh` | `modal container stop` each running container; the apps stay deployed | ends now; the next request cold-starts |
+| `undeploy.sh` | `modal app stop` each app (asks first; `-y` skips the question) | ends; the URL stops answering until redeployed |
+
+**Embeddings and guard on one L4 (optional).** `deploy/modal/shared_l4/vllm_companions_server.py`
+runs both companion models in one container: two vLLM processes (guard 80% of the GPU, embed
+10%), started one after the other, behind `router.py`, which sends `/v1/embeddings` to the embed
+server and everything else to the guard, merges `/v1/models`, and opens the port only when both
+answer `/health`. Point `AGENT_HARNESS_MODEL__MODAL__EMBEDDING_ENDPOINT` and `..._GUARD_ENDPOINT`
+at its URL (`…--agent-harness-vllm-companions-serve.modal.run/v1`). One L4 instead of two, but
+the guard's KV cache drops to about 12k tokens, and both models start, idle, and redeploy
+together. The separate deployments stay the default; see `docs/DEPLOYMENT.md`.
 
 **Cheaper GPU option.** The script also has an FP8 preset (`Qwen/Qwen3.6-35B-A3B-FP8`, 37.5 GB,
 on one `A100-80GB`, $0.000694/s). It is untested: the A100 has no FP8 hardware, and vLLM
