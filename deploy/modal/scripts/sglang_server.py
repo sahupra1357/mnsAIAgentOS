@@ -6,7 +6,7 @@ Setup (once):
     # Create a proxy auth token in the Modal dashboard (Settings > Proxy Auth Tokens).
 
 Deploy:
-    modal deploy deploy/modal/sglang_server.py
+    modal deploy deploy/modal/scripts/sglang_server.py
 
 Then set the `modal` profile to server = "sglang" and endpoint
     https://<workspace>--agent-harness-sglang-serve.modal.run/v1

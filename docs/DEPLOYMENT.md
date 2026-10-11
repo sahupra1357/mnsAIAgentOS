@@ -109,12 +109,12 @@ Edit `deploy/models.toml` first so its model profile points at your model server
 ## Modal model servers
 
 The harness calls Modal deployments through the `modal` profile (and `modal_shared` borrows its
-embed and guard). The deploy files are in `deploy/modal/`, grouped as:
+embed and guard). Everything is in `deploy/modal/`, one folder per layout, each with its deploy
+files and its own scripts:
 
 | Folder | Contents |
 |---|---|
-| `deploy/modal/` | one deployment per model: `vllm_server.py` (chat, H200), `vllm_embed_server.py` (L4), `vllm_guard_server.py` (L4), `sglang_server.py` |
-| `deploy/modal/scripts/` | lifecycle scripts for the three separate apps: `deploy.sh`, `start.sh`, `stop.sh`, `undeploy.sh` (+ `_apps.sh`) |
+| `deploy/modal/scripts/` | one deployment per model, `vllm_server.py` (chat, H200), `vllm_embed_server.py` (L4), `vllm_guard_server.py` (L4), `sglang_server.py`, and their lifecycle scripts `deploy.sh`, `start.sh`, `stop.sh`, `undeploy.sh` (+ `_apps.sh`) |
 | `deploy/modal/shared_l4/` | `vllm_companions_server.py` + `router.py` (embeddings and the guard on one L4), and their own `deploy.sh`, `start.sh`, `stop.sh`, `undeploy.sh` (+ `_apps.sh`) |
 
 ### Lifecycle scripts

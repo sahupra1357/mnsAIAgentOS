@@ -8,7 +8,7 @@ manually). Request access to the model below with the account whose token you st
     modal secret create agent-harness-hf HF_TOKEN=<your-hf-token>
 
 Deploy:
-    modal deploy deploy/modal/vllm_guard_server.py
+    modal deploy deploy/modal/scripts/vllm_guard_server.py
 
 Then, in models.toml under [models.modal]:
     guard_model = "meta-llama/Llama-Guard-3-8B"

@@ -245,7 +245,7 @@ Per provider:
 - **Ollama.** `ollama pull nomic-embed-text` on the same server.
 - **Modal.** One deployment serves one model, so the `modal` profile names three, all with
   the same Modal auth:
-  - `deploy/modal/vllm_server.py` (chat, `endpoint`)
+  - `deploy/modal/scripts/vllm_server.py` (chat, `endpoint`)
   - `vllm_embed_server.py` (`embedding_endpoint`)
   - `vllm_guard_server.py` (Llama Guard 3 8B on an L4, `guard_endpoint`; needs an
     `agent-harness-hf` secret with `HF_TOKEN` from an account granted access to the 8B, which
@@ -267,7 +267,7 @@ Built-in adapters: `openai_compatible`, `ollama`, `llama_cpp`, and `modal`.
 | `llama_cpp` | `llama-server -m model.gguf --jinja -c N` | `--jinja` is required for tool calls. 503 while loading is retried.                        |
 | `modal`     | vLLM or SGLang on Modal (`server = "vllm"` or `"sglang"`) | Requires both the server bearer key (`api_key_env`) and Modal proxy auth (`headers_env` for `Modal-Key` and `Modal-Secret`). The first request uses `cold_start_timeout_seconds` (default 600). |
 
-Deploy scripts for Modal are in `deploy/modal/` (`examples/modal/` keeps the reference
+Deploy scripts for Modal are in `deploy/modal/scripts/` (`examples/modal/` keeps the reference
 copies). They keep prefix caching on, turn on cached-token reporting, and set container
 options that keep a run on one warm KV cache.
 
@@ -294,7 +294,7 @@ How it fits the harness:
   profile back to `llamacpp` uses its own companions again.
 - **No `/tokenize`:** `token_counting = "estimate"`.
 
-**The Modal chat model.** `deploy/modal/vllm_server.py` serves the model the local profile
+**The Modal chat model.** `deploy/modal/scripts/vllm_server.py` serves the model the local profile
 runs, Qwen 3.6 35B-A3B (`Qwen/Qwen3.6-35B-A3B`, BF16, 71.9 GB of weights, public), on one
 **H200**, with `--tool-call-parser qwen3_coder` and `--reasoning-parser qwen3` from the vLLM
 recipe, which lists the H200 as tested hardware. The earlier Qwen2.5-7B on an L40S often
@@ -310,7 +310,7 @@ deployments stay separate, on an L4 each, and scale to zero when idle.
 | Thinking | returned as reasoning; off for summaries | `REASONING_PARSER`, `[summarization] parameters` |
 
 To deploy:
-1. `modal deploy deploy/modal/vllm_server.py` (and the embed and guard scripts, once), or all
+1. `modal deploy deploy/modal/scripts/vllm_server.py` (and the embed and guard scripts, once), or all
    three in order with `deploy/modal/scripts/deploy.sh`.
 2. `agent-harness doctor --model-profile modal`, then restart `serve`.
 

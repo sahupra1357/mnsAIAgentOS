@@ -191,13 +191,13 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(c.guardrails.model.profile, "modal.guard")
 
     def test_modal_deploy_scripts_match_the_profile(self) -> None:
-        # The live Modal scripts are in deploy/modal/ (examples/modal/ keeps reference copies).
+        # The live Modal deploy files are in deploy/modal/scripts/ (examples/modal/ keeps reference copies).
         # Read their constants without importing modal: the served model and length must match
         # [models.modal], or requests name a model the server does not serve.
         import ast
 
         def constants(name: str) -> dict:
-            tree = ast.parse((ROOT / "deploy" / "modal" / name).read_text(encoding="utf-8"))
+            tree = ast.parse((ROOT / "deploy" / "modal" / "scripts" / name).read_text(encoding="utf-8"))
             return {target.id: node.value.value for node in tree.body
                     if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
                     for target in node.targets if isinstance(target, ast.Name)}
@@ -212,7 +212,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(constants("vllm_embed_server.py")["MODEL_NAME"], modal.embedding_model)
         self.assertEqual(constants("vllm_guard_server.py")["MODEL_NAME"], modal.guard_model)
         self.assertEqual(modal.guard_model, "meta-llama/Llama-Guard-3-8B")  # the 1B misreads code
-        self.assertIn("deploy/modal/vllm_server.py", FULL.read_text())
+        self.assertIn("deploy/modal/scripts/vllm_server.py", FULL.read_text())
         self.assertNotIn("examples/modal", FULL.read_text())
         for name in ("vllm_server.py", "vllm_embed_server.py", "vllm_guard_server.py", "sglang_server.py"):
             self.assertTrue((ROOT / "examples" / "modal" / name).is_file())  # reference copy kept

@@ -195,8 +195,8 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 - **Workspace errors.** A wrong path is reported as "no such file or directory: X; search_files
   can find the right path" (`WorkspacePathNotFound`), not "Tool execution failed."; unreadable and
   binary files get their own messages, and `search_files` skips unreadable files.
-- **Modal deploy scripts live in `deploy/modal/`.** `examples/modal/` keeps the reference
-  copies (examples are reference only). `deploy/modal/vllm_server.py` serves
+- **Modal deploy scripts live in `deploy/modal/scripts/`** (moved there with their lifecycle scripts at the user's request; the shared-L4 layout is in `deploy/modal/shared_l4/`). `examples/modal/` keeps the reference
+  copies (examples are reference only). `deploy/modal/scripts/vllm_server.py` serves
   `Qwen/Qwen3.6-35B-A3B` (BF16, 71.9 GB) on one `H200` (`qwen3_coder` / `qwen3` parsers,
   `EXTRA_ARGS`), with FP8-on-A100 (untested: no FP8 hardware for this MoE) and Qwen2.5-7B-on-L40S
   presets in comments; `[models.modal]` matches it (price $0.001261/s,
@@ -721,7 +721,7 @@ An installed `agent-harness` script must be reinstalled (`pip install -e .`).
   behavior is unchanged. With `flag`, an unsafe verdict becomes a `guardrail_decided` event with
   `action: flag`, and the turn continues.
 - **Guard failures:** `on_error` still decides them on its own.
-- **Modal guard:** Llama Guard 3 8B on an L4 (`deploy/modal/vllm_guard_server.py`, `[models.modal]
+- **Modal guard:** Llama Guard 3 8B on an L4 (`deploy/modal/scripts/vllm_guard_server.py`, `[models.modal]
   guard_model`); `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block` is usable there.
 - **Root config:** `action = "flag"` (llamacpp keeps the 1B), and `parallel = true` so the guard
   runs alongside the main model (on Modal both cold-start together; steps that check new input

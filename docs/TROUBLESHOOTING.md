@@ -174,7 +174,7 @@ none exists. A baseline recorded from a broken run must be deleted by hand.
 | llama.cpp `500 Compute error` right after an Ollama step | Two large models in GPU memory (Metal out of memory) | `[residency] enabled = true` in the plan; restart the router once |
 | Every llama.cpp request fails after one out-of-memory error | The router keeps the broken instance | Restart the Llama app, or wait out `--sleep-idle-seconds` |
 | `unit` fails only inside the pipeline, with many errors | `AGENT_HARNESS_*` variables leaking into tests (fixed: the unit stage now runs isolated) | Update to the current `main` |
-| Modal image build: `CUDA_HOME is not set` | pip fell back to a vLLM release that must be compiled | Keep `VLLM_PACKAGE` pinned in `deploy/modal/vllm_server.py` |
+| Modal image build: `CUDA_HOME is not set` | pip fell back to a vLLM release that must be compiled | Keep `VLLM_PACKAGE` pinned in `deploy/modal/scripts/vllm_server.py` |
 | vLLM: `Could not find nvcc` at startup | FlashInfer sampler needs the CUDA toolkit | `VLLM_USE_FLASHINFER_SAMPLER=0` (already in the script) |
 | `CERTIFICATE_VERIFY_FAILED` only for Modal | Wrong Python on `PATH` (a moved venv) | Recreate `.venv`; `which agent-harness` |
 | One call takes about twice `timeout_seconds` (e.g. 124 s with 120 s); the report shows `retried timeout` | The first attempt timed out and the retry succeeded. With no output cap the model may be running away | Keep `max_tokens` in the profile's `parameters`; check the server log for long generations |

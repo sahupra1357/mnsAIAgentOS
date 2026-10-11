@@ -6,7 +6,7 @@ Setup (once):
     # Create a proxy auth token in the Modal dashboard (Settings > Proxy Auth Tokens).
 
 Deploy:
-    modal deploy deploy/modal/vllm_server.py
+    modal deploy deploy/modal/scripts/vllm_server.py
 
 Then set the `modal` profile endpoint to
     https://<workspace>--agent-harness-vllm-serve.modal.run/v1

@@ -1,7 +1,7 @@
 """Deploy the embedding model and Llama Guard together on one L4 (an alternative layout).
 
 The default layout gives each companion model its own deployment and GPU
-(deploy/modal/vllm_embed_server.py and vllm_guard_server.py), so each starts, idles, and is
+(deploy/modal/scripts/vllm_embed_server.py and vllm_guard_server.py), so each starts, idles, and is
 billed on its own. This deployment puts both on one L4 instead: one container, two vLLM
 processes, and a small router (router.py, next to this file) in front of them.
 
