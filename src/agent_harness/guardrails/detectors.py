@@ -166,7 +166,16 @@ def detect_flooding(text: str, max_chars: int) -> list[Finding]:
 # --- personal data ------------------------------------------------------------------
 
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-_PHONE = re.compile(r"(?<![\w+])(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?![\w])")
+# A phone number is written like one: a +country code, an (area code), or the same separator between
+# its groups. A bare run of ten digits is not one: on 2026-10-11 the Fibonacci number 7778742049 in an
+# answer was redacted as [REDACTED:phone] (computed numbers, ids, and timestamps look the same).
+_PHONE = re.compile(
+    r"(?<![\w+])(?:"
+    r"\+\d{1,3}[\s.-]?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}"  # +1 415 555 0100, +14155550100
+    r"|\(\d{3}\)[\s.-]?\d{3}[\s.-]?\d{4}"                         # (415) 555-0100
+    r"|\d{3}([\s.-])\d{3}\1\d{4}"                                  # 415-555-0100, 415.555.0100
+    r")(?![\w])"
+)
 _CARD = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
 _SSN = re.compile(r"(?<!\d)(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?!\d)")
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}(?:\s?[A-Z0-9]{1,4})?\b")

@@ -213,6 +213,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   take several prompt arguments now, `nargs="+"`; the chat REPL scans each line). `/ui` attaches with
   📎, paste, or drop, shrinking images in the browser; `create_api` raises the body limit to 20 MB
   (`SERVE_MAX_BODY_BYTES`).
+- **Phone PII and new folders (2026-10-11).** The phone detector needs phone formatting (`+…`, `(…)`, or
+  matching separators); bare 10-digit numbers are not phones (a Fibonacci result was redacted).
+  `apply_patch` with `create` makes missing parent folders via `WorkspaceBoundary._resolve_new`.
 - **Instruction headers.** Configured files are named without their directory
   (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.
 - **Cut-off answers (`max_answer_continuations`).** A final answer with `finish_reason = length` is

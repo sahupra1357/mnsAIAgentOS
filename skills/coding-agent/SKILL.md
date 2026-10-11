@@ -25,6 +25,10 @@ Read-only inspection tools can run automatically. File writes, test/code executi
 - Reject absolute paths, parent traversal, protected directories, credential-like files, and writes through symlinks.
 - Read bounded UTF-8 text only; skip binary and oversized files during search.
 - Apply one exact text replacement atomically and reject ambiguous matches.
+- Creating a file (`apply_patch` with `create`) makes missing parent folders, after the checks:
+  `_resolve_new` resolves the deepest existing folder strictly (no symlink escape) and appends the
+  missing names; protected folders and credential-like names stay refused, and a refused path makes
+  no folders. Editing still needs the file to exist.
 - Never let model input select an arbitrary working directory.
 - Report file-system problems in words the model can act on, naming the path as it was
   given (never the host path): a missing path or parent is `WorkspacePathNotFound` ("no such

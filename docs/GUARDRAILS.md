@@ -47,7 +47,7 @@ instead of failing.
 | `hidden_characters` | Zero-width characters, bidirectional controls, and Unicode **tag characters** (invisible "ASCII smuggling") |
 | `encoded_payloads` | Base64 or hex blobs that decode to an injection or extraction attempt |
 | `flooding` | Text over `max_chars` (default 20,000), or long repetitions |
-| `pii` | Email, phone, payment cards (Luhn-checked), US SSN, IBAN (checksum-checked) |
+| `pii` | Email, phone (written like one: `+1 …`, `(412) …`, or `412-555-0199`; a bare run of ten digits is not a phone), payment cards (Luhn-checked), US SSN, IBAN (checksum-checked) |
 | `secrets` | API keys and tokens (the same patterns as event redaction) |
 | `canary` | A system-prompt leak, using a marker added to the system prompt |
 | `denylist` | Your own regexes (`denylist = ["internal-only", "project\\s+falcon"]`) |

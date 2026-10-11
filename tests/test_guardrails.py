@@ -120,6 +120,14 @@ class DetectorTests(unittest.TestCase):
                 "ssn 123-45-6789, iban GB82 WEST 1234 5698 7654 32")
         self.assertEqual([f.category for f in detect_pii(text)], ["email", "phone", "card", "ssn", "iban"])
         self.assertEqual(detect_pii("card 4111 1111 1111 1112 and iban GB00 WEST 1234 5698 7654 32"), [])
+        # A phone number is written like one; a bare run of ten digits (a computed number, an id) is not.
+        for written in ("(412) 555-0199", "412-555-0199", "412.555.0199", "412 555 0199", "+1 412 555 0199",
+                        "+14125550199"):
+            with self.subTest(written=written):
+                self.assertEqual([f.category for f in detect_pii(f"call {written}")], ["phone"])
+        for number in ("7778742049", "4125550199", "412-555.0199", "the 50th is 7778742049."):
+            with self.subTest(number=number):
+                self.assertEqual(detect_pii(number), [])
 
     def test_secrets(self) -> None:
         self.assertEqual(len(detect_secrets("key sk-abcdefghijklmnopqrstuv and AKIAABCDEFGHIJKLMNOP")), 2)
