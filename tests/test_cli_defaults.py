@@ -249,3 +249,85 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PNG_BYTES = b"\x89PNG fake"
+PNG_URL = "data:image/png;base64," + __import__("base64").b64encode(PNG_BYTES).decode()
+
+
+class InlineImageTests(unittest.TestCase):
+    """``agent-harness "text" screenshot.png "text"``: image files in the prompt are attached."""
+
+    def test_split_images(self) -> None:
+        from agent_harness.cli.images import split_images
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "error.png").write_bytes(PNG_BYTES)
+            (base / "shot two.jpg").write_bytes(PNG_BYTES)
+            (base / "notes.txt").write_text("not an image")
+            # Separate arguments: text, image, text; the image's place is kept as [image N].
+            text, images = split_images(["what is wrong here", "error.png", "and how do I fix it"], cwd=base)
+            self.assertEqual(text, "what is wrong here [image 1] and how do I fix it")
+            self.assertEqual(images, [PNG_URL])
+            # A path inside a sentence, with punctuation around it; a quoted path with a space.
+            text, images = split_images(["compare (error.png), then", str(base / "shot two.jpg")], cwd=base)
+            self.assertEqual(text, "compare ([image 1]), then [image 2]")
+            self.assertEqual(len(images), 2)
+            self.assertTrue(images[1].startswith("data:image/png;base64,") is False)
+            self.assertTrue(images[1].startswith("data:image/jpeg;base64,"))
+            # Files that do not exist, or are not images, stay text and are never read.
+            text, images = split_images(["fix missing.png and notes.txt"], cwd=base)
+            self.assertEqual((text, images), ("fix missing.png and notes.txt", []))
+            # A whole https image argument is attached; a URL inside text is not.
+            text, images = split_images(["look", "https://example.com/a/cat.webp?x=1",
+                                         "vs https://example.com/dog.png"], cwd=base)
+            self.assertEqual(text, "look [image 1] vs https://example.com/dog.png")
+            self.assertEqual(images, ["https://example.com/a/cat.webp?x=1"])
+            # Without images the prompt is unchanged.
+            self.assertEqual(split_images(["explain how agent-harness works"], cwd=base),
+                             ("explain how agent-harness works", []))
+            with self.assertRaisesRegex(ValueError, "at most 16"):
+                split_images(["error.png"] * 17, cwd=base)
+
+    def test_run_attaches_images_named_in_the_prompt(self) -> None:
+        sent: list[dict] = []
+        body = {"choices": [{"message": {"content": "a null pointer"}, "finish_reason": "stop"}]}
+
+        class Transport:
+            async def post_json(self, url, payload, headers, timeout_seconds):
+                sent.append(payload)
+                return HttpResponse(200, {}, json.dumps(body).encode())
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "models.toml")
+            config.write_text(PROFILE.format(name="p"))
+            shot = Path(directory, "error.png")
+            shot.write_bytes(PNG_BYTES)
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict("os.environ", {"AGENT_HARNESS_CONFIG": str(config)}), mock.patch(
+                "agent_harness.model_gateway.openai_compatible.StdlibHttpTransport", return_value=Transport()
+            ), redirect_stdout(out), redirect_stderr(err):
+                code = cli.main(["--database", str(Path(directory, "db.sqlite3")),
+                                 "what is wrong here", str(shot), "and how do I fix it"])
+            self.assertEqual(code, 0, err.getvalue())
+            user = next(m for m in sent[0]["messages"] if m["role"] == "user")
+            self.assertEqual(user["content"][0], {"type": "text", "text": "what is wrong here [image 1] and how do I fix it"})
+            self.assertEqual(user["content"][1], {"type": "image_url", "image_url": {"url": PNG_URL}})
+
+
+class ChatSessionImageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_an_image_path_in_a_chat_line_is_attached(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shot = Path(directory, "ui.png")
+            shot.write_bytes(PNG_BYTES)
+            model = Model([text("a login form"), text("the button")])
+            app = app_for(model)
+            io_ = ScriptedIO([f"what is this? {shot}", f"and here {shot}", "/exit"])
+            session = ChatSession(app, ChatOptions(profile="p"), io_)
+            self.assertEqual(await session.loop(), 0)
+            first = model.requests[0].messages[-1]
+            self.assertEqual(first.content, "what is this? [image 1]")
+            self.assertEqual([p.image_url for p in first.parts], [PNG_URL])
+            follow_up = model.requests[1].messages[-1]  # continue_run carries the image too
+            self.assertEqual([p.image_url for p in follow_up.parts], [PNG_URL])

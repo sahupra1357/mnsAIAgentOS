@@ -68,5 +68,20 @@ class WebUiTests(unittest.TestCase):
         self.assertIn('el("div", { class: "reasoning" }, liveReasoning)', source)  # a text node
 
 
+    def test_images_can_be_attached_pasted_or_dropped(self) -> None:
+        source = PAGE.read_text(encoding="utf-8")
+        self.assertIn('id="image-file" accept="image/png,image/jpeg,image/gif,image/webp"', source)
+        self.assertIn('input.addEventListener("paste"', source)
+        self.assertIn('composer.addEventListener("drop"', source)
+        self.assertIn('canvas.toDataURL("image/jpeg", 0.85)', source)  # large images are shrunk first
+        self.assertIn("body.images = urls", source)  # POST /runs
+        self.assertIn("{ content: text, images: urls }", source)  # POST /runs/{id}/messages
+        self.assertIn('el("img", { class: "thumb", src: url', source)  # thumbnails as elements, not HTML
+
+    def test_served_api_accepts_image_sized_bodies(self) -> None:
+        from agent_harness.server.api import SERVE_MAX_BODY_BYTES
+
+        self.assertGreaterEqual(SERVE_MAX_BODY_BYTES, 16 * 1024 * 1024)
+
 if __name__ == "__main__":
     unittest.main()
