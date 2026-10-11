@@ -52,6 +52,8 @@ class ReporterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(attr(root, "langfuse.observation.input")), {"prompt": "What is it?"})
         self.assertEqual(attr(root, "langfuse.observation.output"), "The answer is 42.")
         self.assertEqual(json.loads(attr(root, "langfuse.experiment.item.expected_output")), ["42"])
+        # Mappable by a Langfuse judge as {{ground_truth}} (Metadata -> expected_output).
+        self.assertEqual(json.loads(attr(root, "langfuse.observation.metadata.expected_output")), ["42"])
         self.assertEqual(attr(root, "langfuse.experiment.description"), "desc")
         item_id = dataset_item_id(DATASET, "t1")
         for span in spans:  # experiment context on every span of the item's trace
@@ -83,6 +85,8 @@ class ReporterTests(unittest.IsolatedAsyncioTestCase):
                             ItemResult("b1", "default", False, error="wrong call", status="completed"))
         report.close()
         [generation] = spans_of(sender.spans(), "generation")
+        [root] = [s for s in sender.spans() if "parentSpanId" not in s]
+        self.assertEqual(attr(root, "langfuse.observation.metadata.expected_output"), "a")
         self.assertEqual(attr(generation, "langfuse.observation.model.name"), "real/model")
         self.assertEqual(json.loads(attr(generation, "langfuse.observation.usage_details")),
                          {"input": 7, "output": 2, "total": 9})

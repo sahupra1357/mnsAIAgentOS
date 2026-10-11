@@ -11,6 +11,9 @@
 * **Trace** per item (``bench <suite>``, environment ``experiment``): a root span with the item
   input, the answer, and the expected output, holding the item's whole agent run
   (generations, tools, subagents) or its direct model calls (bfcl, judge calls).
+* The expected output is also in the root's metadata (``expected_output``), so a Langfuse
+  LLM-as-a-judge can map ``{{ground_truth}}`` to it (its Expected Output field is only offered
+  for experiments started in Langfuse's UI).
 * **Scores** on the root observation: ``correct`` (boolean) and every boolean the suite reports
   in its details (``answer_ok``, ``behavior_ok``, ...), with the error or verdict as the comment.
 
@@ -104,8 +107,12 @@ class BenchLangfuse:
             "langfuse.experiment.item.id": item_id,
             "langfuse.experiment.item.root_observation_id": root,
         }
+        expected = policy.encoded(item.expected)
         root_extra = {"langfuse.experiment.description": self.description or None,
-                      "langfuse.experiment.item.expected_output": policy.encoded(item.expected),
+                      "langfuse.experiment.item.expected_output": expected,
+                      # Also as root metadata: Langfuse evaluators on OTel-ingested experiments can map an
+                      # observation's input, output, and metadata, but not the experiment's Expected Output.
+                      "langfuse.observation.metadata.expected_output": expected,
                       **_metadata("langfuse.experiment.item.metadata.", {"category": item.category,
                                                                          "suite_item_id": item.id})}
         metadata = {"suite": self.suite, "item_id": item.id, "category": item.category, "status": result.status,

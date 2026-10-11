@@ -96,7 +96,8 @@ Or `langfuse = true` (and optionally `langfuse_run = "..."`) on a `[[benchmark]]
 - **Dataset** `agent-harness/<suite>/<data file>`: every selected item is upserted (stable IDs).
 - **Experiment** `--langfuse-run` (default `<profile> <UTC time>`): one trace per item, environment
   `experiment`, every span tagged with the experiment ID and name, dataset ID, item ID, and root
-  observation; the root holds the item input, the answer, and the expected output.
+  observation; the root holds the item input, the answer, and the expected output (also as
+  `metadata.expected_output`, for Langfuse judges).
 - **Scores** on the root observation: `correct`, plus each boolean the suite reports
   (`answer_ok`, `behavior_ok` for `tasks`), with the error or judge verdict as the comment.
 - Run the same dataset with another profile (or after a change) and compare the experiments
@@ -116,8 +117,13 @@ output, which the root span does.
 3. **Rule for live traffic**: filter **Is Root Observation** = true (our `agent run` / `agent turn`
    spans), optionally environment = `local` and a tag such as a profile name; set a sampling rate.
    Scores land on the root observation, next to `user_feedback`.
-4. **For experiments**: attach the evaluator to the experiment and also map `{{ground_truth}}` to
-   the expected output, so each benchmark item is judged against its reference.
+4. **For benchmark experiments**: Langfuse offers its Expected Output variable only for experiments
+   started in its UI, not for ones sent over OpenTelemetry like ours. The harness therefore also puts
+   each item's expected output in the root observation's metadata. Make a second evaluator with
+   `{{ground_truth}}` mapped to **Metadata → `expected_output`** (plus `{{input}}` → Input,
+   `{{output}}` → Output), and a rule filtered on `isRootObservation:true environment:experiment`.
+   Benchmark runs from before this change lack the metadata; run the benchmark again with a new
+   `--langfuse-run` name.
 
 Trace-level evaluators are deprecated in v4; use observation-level rules as above.
 
