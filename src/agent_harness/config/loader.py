@@ -645,6 +645,28 @@ class RedactionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LangfuseConfig:
+    """Send traces and scores to Langfuse (cloud or self-hosted) over its public API.
+
+    Off unless ``enabled``. Keys and URL are read from the named environment variables
+    (real values belong in ``.env``); without them the exporter stays off with one warning.
+    ``content``: ``none`` (timings, tokens, cost only), ``redacted`` (text with secrets and
+    PII masked), or ``full``. ``sample_rate`` keeps that share of runs (by run ID).
+    """
+
+    enabled: bool = False
+    base_url_env: str = "LANGFUSE_BASE_URL"
+    public_key_env: str = "LANGFUSE_PUBLIC_KEY"
+    secret_key_env: str = "LANGFUSE_SECRET_KEY"
+    content: str = "redacted"
+    sample_rate: float = 1.0
+    environment: str = "default"
+    max_text_chars: int = 8000
+    flush_seconds: float = 2.0
+    timeout_seconds: float = 10.0
+
+
+@dataclass(frozen=True, slots=True)
 class StorageConfig:
     """Where runs are stored. ``url_env`` names an env var holding a postgresql:// URL."""
 
@@ -822,6 +844,7 @@ class HarnessConfig:
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     redaction: RedactionConfig = field(default_factory=RedactionConfig)
+    langfuse: LangfuseConfig = field(default_factory=LangfuseConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     templates: TemplatesConfig = field(default_factory=TemplatesConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
@@ -1090,6 +1113,7 @@ def load_config(
         orchestrator=_parse_section(raw, "orchestrator", OrchestratorConfig),
         network=_parse_section(raw, "network", NetworkConfig),
         redaction=_parse_redaction(raw.get("redaction")),
+        langfuse=_parse_langfuse(raw),
         skills=_parse_section(raw, "skills", SkillsConfig),
         templates=_parse_section(raw, "templates", TemplatesConfig),
         plugins=_parse_section(raw, "plugins", PluginsConfig),
@@ -1451,6 +1475,17 @@ def _parse_quotas(raw: Any) -> tuple[QuotaConfig, ...]:
             values["max_cost_usd_per_day"] = float(values["max_cost_usd_per_day"])
         quotas.append(QuotaConfig(**values))
     return tuple(quotas)
+
+
+def _parse_langfuse(raw: Mapping[str, Any]) -> LangfuseConfig:
+    section = _parse_section(raw, "langfuse", LangfuseConfig)
+    if section.content not in {"none", "redacted", "full"}:
+        raise ConfigError("langfuse.content must be 'none', 'redacted', or 'full'")
+    if not 0.0 <= section.sample_rate <= 1.0:
+        raise ConfigError("langfuse.sample_rate must be between 0 and 1")
+    if section.max_text_chars < 100:
+        raise ConfigError("langfuse.max_text_chars must be at least 100")
+    return section
 
 
 def _parse_redaction(raw: Any) -> RedactionConfig:

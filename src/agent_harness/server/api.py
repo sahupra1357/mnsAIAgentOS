@@ -38,6 +38,8 @@ a principal with a tenant and a role (viewer < operator < admin; see
                                      "decision": "deny" on /approval declines it)
     POST /runs/{id}/mode            {"mode": "default" | "accept_edits" | "plan" | "bypass"}
     POST /runs/{id}/rewind          {"to_step", "confirm"?}  (dry run unless confirm)
+    POST /runs/{id}/feedback        {"value": "up" | "down", "message_index"?, "comment"?}
+                                    (a user_feedback score on that turn's Langfuse trace)
 
 OpenAI-compatible (Phase 15d; see ``agent_harness.server.openai_chat``), so chat clients can
 use the harness as a model:
@@ -137,6 +139,7 @@ class HarnessAPI:
         stream_hub: StreamHub | None = None,
         cors_origins: Sequence[str] = (),
         rate_limiter: RateLimiter | None = None,
+        langfuse: Any = None,
     ) -> None:
         if auth_token is not None and len(auth_token) < 16:
             raise ValueError("API auth token must be at least 16 characters")
@@ -157,6 +160,7 @@ class HarnessAPI:
         self._grace = shutdown_grace_seconds
         self._artifacts = artifacts
         self._templates = dict(templates or {})
+        self._langfuse = langfuse  # LangfuseExporter: user feedback becomes a score
         self._stop = asyncio.Event()
         self._worker_tasks: list[asyncio.Task[None]] = []
         self._hub = stream_hub
@@ -330,6 +334,7 @@ class HarnessAPI:
             ("GET", "/approval"): lambda: self._send_approval(send, run_id),
             ("POST", "/approval"): lambda: self._decide(send, run_id, receive, principal),
             ("POST", "/answer"): lambda: self._answer(send, run_id, receive, principal),
+            ("POST", "/feedback"): lambda: self._feedback(send, run_id, receive, principal),
         }
         handler = routes.get((method, rest))
         if handler is None:
@@ -406,6 +411,7 @@ class HarnessAPI:
                 if name not in self._config.companions
             },
             "routes": dict(self._config.routes),
+            "feedback": self._langfuse is not None,
         }
 
     async def _create_run(self, body: dict[str, Any], principal: Principal) -> dict[str, Any]:
@@ -828,6 +834,36 @@ class HarnessAPI:
         await _json(send, 202, {"id": run.id, "status": run.status.value})
 
 
+    async def _feedback(self, send: Send, run_id: str, receive: Receive, principal: Principal) -> None:
+        from agent_harness.observability.langfuse import span_id, trace_id, turn_of_message
+
+        body = await self._body(receive)
+        unknown = set(body) - {"value", "message_index", "comment"}
+        if unknown:
+            raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
+        votes = {"up": True, "down": False, True: True, False: False, 1: True, 0: False, -1: False}
+        value = body.get("value")
+        if not isinstance(value, (str, bool, int)) or value not in votes:
+            raise ApiError(400, 'value must be "up" or "down"')
+        index = body.get("message_index")
+        if index is not None and (not isinstance(index, int) or isinstance(index, bool) or index < 0):
+            raise ApiError(400, "message_index must be a non-negative integer")
+        comment = _text(body.get("comment"), "comment", required=False)
+        if self._langfuse is None:
+            raise ApiError(409, "feedback needs [langfuse] enabled, with its keys in .env")
+        run = await self._load(run_id)
+        turn = turn_of_message(run, list(await self._store.list_events(run_id)), index)
+        if turn is None:
+            raise ApiError(409, "this run has no finished turn to rate yet")
+        trace = trace_id(run.id, turn)
+        policy = self._langfuse.context.policy
+        # One score per person and turn: voting again replaces the earlier vote.
+        self._langfuse.score(trace, "user_feedback", votes[value],
+                             comment=policy.text(comment) if comment else None,
+                             score_id=span_id(trace, "feedback", principal.name))
+        await _json(send, 202, {"id": run.id, "turn": turn, "trace_id": trace, "value": bool(votes[value])})
+
+
 def _require(principal: Principal, role: AccessRole) -> None:
     if principal.role < role:
         raise ApiError(403, f"this key's role ({principal.role.name.lower()}) cannot do that; "
@@ -1109,4 +1145,5 @@ def create_api(
             if app.config.api_rate_limit.requests_per_minute > 0
             else None
         ),
+        langfuse=getattr(app, "langfuse", None),
     )

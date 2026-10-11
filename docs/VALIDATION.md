@@ -283,6 +283,12 @@ Each run writes two files to `--out`:
 **Runs are resumable.** Re-running with the same `--out` skips items already in
 `results.jsonl`.
 
+**Langfuse experiments.** `--langfuse` (or `langfuse = true` on a `[[benchmark]]`) upserts the items
+into the Langfuse dataset `agent-harness/<suite>/<data file>` and records the run as an experiment
+(`--langfuse-run NAME`, default `<profile> <UTC time>`): one trace per item with its whole agent run
+and `correct` / `answer_ok` / `behavior_ok` scores. Needs the Langfuse keys in `.env`; see
+[LANGFUSE.md](LANGFUSE.md).
+
 **HumanEval runs model-written code.** It executes in Docker by default: no network,
 all capabilities dropped, read-only root, and CPU, memory, and PID limits.
 `--unsafe-local-execution` runs it on your host; use that only for trusted,

@@ -117,6 +117,8 @@ class BenchContext:
     embedding_profile: str | None = None
     # The config file under test (the ``tasks`` suite builds the full application from it).
     config_path: Path | None = None
+    # Reports each item to Langfuse (``--langfuse``): a BenchLangfuse, or None.
+    langfuse: Any = None
 
     async def run_agent(
         self, messages: Sequence[Message], tools: ToolExecutor, *, budget: RunBudget | None = None,
@@ -159,6 +161,8 @@ class BenchContext:
         """Save the current item's run (messages, events) when transcripts are on."""
 
         item_id = CURRENT_ITEM.get()
+        if self.langfuse is not None and item_id is not None:
+            self.langfuse.capture(item_id, run, events)
         if self.transcripts is not None and item_id is not None:
             self._write_transcript(item_id, run, events)
 
@@ -185,6 +189,9 @@ class BenchContext:
     def _record_call(self, request: ModelRequest, response: ModelResponse | None,
                      error: BaseException | None, duration: float) -> None:
         item_id = CURRENT_ITEM.get()
+        if self.langfuse is not None and item_id is not None:
+            self.langfuse.capture_call(item_id, request, response, duration,
+                                       None if error is None else f"{type(error).__name__}: {error}")
         if self.telemetry is not None:
             attributes: dict[str, Any] = {"model_profile": self.profile, "attempt": 1,
                                           "ok": response is not None, "streamed": False}

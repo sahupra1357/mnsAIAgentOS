@@ -483,6 +483,19 @@ allowed_hosts = ["api.tavily.com", "api.github.com", "github.com", "raw.githubus
 [redaction]
 enabled = true
 
+# Langfuse (cloud or self-hosted): one trace per turn (session = the run) with generations, tool
+# spans, subagents, and guard/approval/plan events; /ui 👍/👎 become user_feedback scores, and
+# `agent-harness-bench run ... --langfuse` sends benchmark scores, datasets, and dataset runs.
+# Keys and URL in .env: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL
+# (e.g. https://us.cloud.langfuse.com). Without them nothing is sent (one warning at start).
+# content: "redacted" masks secrets and PII before text leaves the machine; "none" sends only
+# timings, tokens, and cost; "full" sends text as is.
+[langfuse]
+enabled = true
+content = "redacted"
+sample_rate = 1.0
+environment = "local"
+
 [[quotas]]
 tenant = "default"
 max_runs_per_day = 500

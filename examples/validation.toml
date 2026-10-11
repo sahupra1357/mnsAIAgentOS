@@ -348,9 +348,9 @@ benchmarks = ["humaneval"]
 
 [[feature]]
 name = "api-workers"
-description = "HTTP API, chat API, OpenAI-compatible endpoint, web UI, workers, run listing, telemetry"
+description = "HTTP API, chat API, OpenAI-compatible endpoint, web UI, workers, run listing, telemetry, Langfuse"
 tests = ["test_api_workers", "test_chat_api", "test_openai_chat", "test_web_ui", "test_worker_reliability",
-         "test_run_listing", "test_observability"]
+         "test_run_listing", "test_observability", "test_langfuse", "test_langfuse_bench"]
 
 [[feature]]
 name = "production"

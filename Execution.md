@@ -108,6 +108,9 @@ AgentOrchestrator (context builder, summarizer, hooks, permissions, subagents,
                    file snapshots, system context, tool loading, planning,
                    [orchestrator] limits, quotas, input deadlines;
                    writes through the redacting store)
+    ↓
+Langfuse exporter ([langfuse] with keys in .env): a telemetry sink that, when a turn ends,
+reads the turn from the run store and sends it as OTLP spans on a background thread
 ```
 
 Relevant file: `src/agent_harness/application.py`

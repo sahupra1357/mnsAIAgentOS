@@ -170,3 +170,12 @@ See `docs/VALIDATION.md`. Stages: static → unit → scenarios (offline, in CI 
 - **Isolation:** temporary run database, memory, and artifacts; the `"repo"` workspace is
   read-only (approvals denied). Feature `agent-tasks`; tests in `tests/test_tasks_suite.py`.
 - **Add tasks from real failures,** with the `expect` that should have held.
+
+## Langfuse experiments (`bench/langfuse_report.py`)
+
+- `agent-harness-bench run ... --langfuse` (plan key `langfuse = true`): dataset items upserted
+  (`/api/public/dataset-items`, stable IDs), one experiment trace per item (OTel experiment
+  attributes on every span: `langfuse.experiment.id/name/dataset.id/item.id/item.root_observation_id`;
+  expected output on the root), environment `experiment`, scores on the root observation.
+- `POST /dataset-run-items` is deprecated in Langfuse v4; do not use it.
+- Tests: `tests/test_langfuse_bench.py` (fake sender; no network).

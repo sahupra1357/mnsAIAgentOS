@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import time
 from collections import Counter, defaultdict
@@ -69,6 +70,12 @@ async def run_benchmark(
                                     latency_seconds=time.monotonic() - started)
             finally:
                 CURRENT_ITEM.reset(token)
+        reporter = getattr(context, "langfuse", None)
+        if reporter is not None:
+            try:
+                await reporter.report(item, result)
+            except Exception:  # noqa: BLE001 - Langfuse never changes a benchmark result
+                logging.getLogger(__name__).warning("Langfuse: reporting %s failed", item.id, exc_info=True)
         directory = getattr(context, "transcripts", None)
         if directory is not None and result.correct and not keep_passing_transcripts:
             transcript_path(directory, item.id).unlink(missing_ok=True)  # keep failures only

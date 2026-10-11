@@ -57,7 +57,7 @@ class WebUiTests(unittest.TestCase):
         self.assertNotIn("innerHTML", source)  # model text is rendered as text nodes only
         paths = set(re.findall(r'[`"](/(?:runs|profiles)[^`"?]*)', source))
         allowed = re.compile(r"^/(profiles|runs(/\$\{[^}]+\}(/(messages|usage|events|stream|cancel|steer|"
-                             r"approval|answer))?)?)$")
+                             r"approval|answer|feedback))?)?)$")
         self.assertTrue(paths)
         self.assertEqual([p for p in sorted(paths) if not allowed.match(p)], [])
 

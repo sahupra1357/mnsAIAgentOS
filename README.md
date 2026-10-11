@@ -1623,6 +1623,24 @@ arguments or outputs, or credentials.
 | `MultiTelemetry([...])`                                             | Sends records to several sinks.                           |
 | `OpenTelemetryTelemetry()` (`pip install -e '.[otel]'`; configure the SDK/exporter as usual) | Spans plus duration, token, and cost metrics. |
 
+## Langfuse: Traces, Feedback, and Evaluations
+
+`[langfuse]` (on in the root config; keys in `.env`: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`,
+`LANGFUSE_BASE_URL`) sends every turn to Langfuse, stdlib only, over its OpenTelemetry endpoint
+(OTLP/HTTP JSON, `x-langfuse-ingestion-version: 4`, so data shows up in real time):
+- **Traces:** one per turn (session = the run). A root `agent` span holds the user message and the
+  answer; under it, generations (model, tokens, cost), tool spans (arguments, result), guardrail
+  and approval events, and subagents with their own calls nested.
+- **Content:** `content = "redacted"` masks secrets and PII before anything leaves the machine
+  (`none` sends only timings, tokens, and cost).
+- **Feedback:** 👍/👎 under each answer in `/ui` (`POST /runs/{id}/feedback`) become
+  `user_feedback` scores.
+- **Benchmarks:** `agent-harness-bench run ... --langfuse` upserts a dataset and records the run as
+  a Langfuse experiment, with `correct` / `answer_ok` / `behavior_ok` scores per item.
+- **LLM-as-a-judge:** configured in Langfuse on root observations.
+
+Setup, trace layout, and the judge steps: [docs/LANGFUSE.md](docs/LANGFUSE.md).
+
 A failing sink never affects a run.
 
 **Streaming details.** Streaming uses server-sent events on any OpenAI-compatible

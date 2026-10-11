@@ -86,6 +86,7 @@ class FullConfigTests(unittest.TestCase):
             "http tool": any(t.kind == "http" for t in c.tool_sources),
             "egress allowlist": c.network.restrict_egress and bool(c.network.allowed_hosts),
             "redaction": c.redaction.enabled,
+            "langfuse (keys in .env, redacted content)": c.langfuse.enabled and c.langfuse.content == "redacted",
             "quotas": bool(c.quotas) and c.user_quotas.enabled,
             "rate limit": c.api_rate_limit.requests_per_minute > 0,
             "cors": bool(c.api_cors_origins),
