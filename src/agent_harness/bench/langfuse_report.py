@@ -126,8 +126,9 @@ class BenchLangfuse:
             run, events = captured
             spans = build_turn(run, events, 0, self.context, trace=trace, name=f"bench {self.suite}",
                                session_id=self.run_name, tags=tags, metadata=metadata, extra=experiment,
-                               root_extra=root_extra, root_input=dict(item.input),
-                               root_output=result.predicted or None, whole_run=True)
+                               root_extra=root_extra, root_input=dict(item.input), whole_run=True)
+            # The root output is the run's full final answer: suites shorten ``predicted`` for
+            # their reports (tasks keeps the last 300 characters), which misled judges.
             if calls:  # e.g. the rubric judge's calls, next to the agent's own
                 spans.extend(self._call_spans(trace, root, item, result, calls, tags, metadata, experiment,
                                               root_extra)[1:])
