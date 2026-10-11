@@ -106,6 +106,90 @@ Edit `deploy/models.toml` first so its model profile points at your model server
     at about 55 ms per command, against about 150 ms for a fresh container per command.
   - Coding images need the tools the agent runs: `python:3.12-slim` has no `git`.
 
+## Modal model servers
+
+The harness calls Modal deployments through the `modal` profile (and `modal_shared` borrows its
+embed and guard). The deploy files are in `deploy/modal/`, grouped as:
+
+| Folder | Contents |
+|---|---|
+| `deploy/modal/` | one deployment per model: `vllm_server.py` (chat, H200), `vllm_embed_server.py` (L4), `vllm_guard_server.py` (L4), `sglang_server.py` |
+| `deploy/modal/scripts/` | `deploy.sh`, `start.sh`, `stop.sh`, `undeploy.sh` (and `_apps.sh`, which they share) |
+| `deploy/modal/shared_l4/` | `vllm_companions_server.py` + `router.py`: embeddings and the guard on one L4 |
+
+### Lifecycle scripts
+
+Every script acts on embed, guard, chat in that order; `stop.sh` and `undeploy.sh` go in
+reverse. `--shared` uses `companions chat` instead, and naming apps (`embed`, `guard`, `chat`,
+`companions`) acts on only those, in the order given. They work from any directory.
+
+```bash
+deploy/modal/scripts/deploy.sh               # modal deploy, one after the other
+deploy/modal/scripts/start.sh                # warm up: doctor --model-profile modal.embed, modal.guard, modal
+deploy/modal/scripts/stop.sh                 # modal container stop: billing ends, apps stay deployed
+deploy/modal/scripts/undeploy.sh             # modal app stop (asks first; -y skips it)
+deploy/modal/scripts/stop.sh chat            # only the H200
+deploy/modal/scripts/start.sh guard          # only the guard, before using /ui
+```
+
+- **Start** has no Modal command for a web endpoint: a container starts on its first request.
+  `start.sh` sends that request through `agent-harness doctor`, which waits through the cold
+  start and checks the model, using the repository's `models.toml` and `.env`. A failed start is
+  reported and the next app is still started (exit code 1 at the end).
+- **Stop** keeps the app and URL. The next request (or `start.sh`) starts it again, with a cold
+  start. Requests running on a stopped container are cancelled.
+- **Undeploy** removes the app: its URL answers 404 until you deploy again.
+
+### Modal: one L4 for embeddings and the guard
+
+`deploy/modal/shared_l4/vllm_companions_server.py` (app `agent-harness-vllm-companions`) runs
+both companion models in one container on one L4:
+
+```
+router.py :8000 -- /v1/embeddings  -> embed vLLM :8001  (nomic-embed-text, 10% of the GPU)
+                -- /v1/models      -> both lists merged (doctor checks the list)
+                -- /health         -> 200 only when both servers are healthy
+                -- everything else -> guard vLLM :8002  (Llama Guard 3 8B, 80% of the GPU)
+```
+
+How it starts: the router starts the embed server, waits for its `/health`, then starts the
+guard server and waits again. Each vLLM process reserves its share of the GPU when it starts, so
+starting both at once can make the second fail. Only then does the router open port 8000, and
+Modal sends no request before that port answers. If either process exits later, the router stops
+the other and exits, and the container ends, so Modal replaces it instead of keeping a half-broken
+container warm.
+
+To use it:
+1. `deploy/modal/scripts/deploy.sh companions` (same secrets as the guard: `agent-harness-llm`,
+   `agent-harness-hf`).
+2. In `.env`, point both companion endpoints at it:
+   `AGENT_HARNESS_MODEL__MODAL__EMBEDDING_ENDPOINT=https://<workspace>--agent-harness-vllm-companions-serve.modal.run/v1`
+   and the same URL for `AGENT_HARNESS_MODEL__MODAL__GUARD_ENDPOINT`.
+3. `agent-harness doctor --model-profile modal.guard` and `--model-profile modal.embed`.
+4. Optionally `deploy/modal/scripts/undeploy.sh embed guard` to remove the separate pair.
+
+Trade-offs against the separate deployments:
+
+| | Separate (default) | Shared L4 |
+|---|---|---|
+| GPUs while both are used | 2 x L4 | 1 x L4 |
+| Embed cold start | its own, when memory is first used | none once the guard is up |
+| Guard KV cache | about 4 GB (85% of the GPU) | about 1.5 GB, roughly 12k tokens: `MAX_MODEL_LEN = 8192` and one or two checks at once; bursts queue |
+| Start, idle, scale, redeploy | each on its own | together; a bad guard update also takes down embeddings |
+| Moving parts | vLLM only | vLLM x 2 + router |
+
+Embeddings are only used when a run calls `memory_search` or `memory_write`, so the saving is
+small unless memory is used often. Either way, warm the companions before you use `/ui`
+(`start.sh guard`, or `start.sh companions`), or the first turn waits for the guard's cold start.
+
+Scaling: Modal scales a deployment by adding containers, each with the same contents. With the
+separate layout one container is one vLLM on one GPU, so the guard and embed scale on their own
+(`MAX_CONTAINERS`). With the shared layout every added container carries both models on its own
+L4, so more guard capacity also brings another embed server.
+
+This layout has not been run on Modal yet. If the guard fails with too little KV cache memory,
+lower `EMBED_GPU_MEMORY` or `MAX_MODEL_LEN`, or set `GUARD_EXTRA_ARGS = ["--enforce-eager"]`.
+
 ## Health
 
 - **Liveness:** `GET /healthz` answers while the process is alive.

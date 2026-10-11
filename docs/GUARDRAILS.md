@@ -104,6 +104,8 @@ action = "block"           # "flag": record an unsafe verdict and let the turn g
   `modal_shared` profiles use it). There, set `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block`
   in `.env` to refuse unsafe input instead of only flagging it. The action is one setting for all
   profiles, so switch it back (or remove the line) when you return to `llamacpp` and its 1B.
+  It can also share one L4 with the embedding model (`deploy/modal/shared_l4/`, see
+  docs/DEPLOYMENT.md); the guard then has less KV cache memory, so bursts of checks queue.
 - **`parallel = true` (root config).** New input is checked while the main model answers;
   an unsafe verdict with `block` discards the answer before anything is recorded. On Modal the
   guard's container and the chat model's then cold-start together (on 2026-10-10 the guard's
