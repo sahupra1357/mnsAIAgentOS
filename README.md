@@ -247,8 +247,10 @@ Per provider:
   the same Modal auth:
   - `deploy/modal/vllm_server.py` (chat, `endpoint`)
   - `vllm_embed_server.py` (`embedding_endpoint`)
-  - `vllm_guard_server.py` (Llama Guard, `guard_endpoint`; needs an `agent-harness-hf`
-    secret with `HF_TOKEN`, because the model is gated)
+  - `vllm_guard_server.py` (Llama Guard 3 8B on an L4, `guard_endpoint`; needs an
+    `agent-harness-hf` secret with `HF_TOKEN` from an account granted access to the 8B, which
+    Meta approves manually). Unlike the 1B it does not flag ordinary coding prompts, so with the
+    Modal profiles `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block` is usable.
 
 `agent-harness doctor` also checks the embedding and guard models.
 `AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider end

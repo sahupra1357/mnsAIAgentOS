@@ -3,14 +3,15 @@
 The guard model is a small chat model that answers "safe" or "unsafe\\nS<n>". It gets
 its own deployment, with the same bearer secret and proxy auth as the chat model.
 
-Setup (once): Llama Guard is gated on Hugging Face. Accept its license, then
+Setup (once): Llama Guard is gated on Hugging Face (each size has its own gate, approved
+manually). Request access to the model below with the account whose token you store, then
     modal secret create agent-harness-hf HF_TOKEN=<your-hf-token>
 
 Deploy:
     modal deploy deploy/modal/vllm_guard_server.py
 
 Then, in models.toml under [models.modal]:
-    guard_model = "meta-llama/Llama-Guard-3-1B"
+    guard_model = "meta-llama/Llama-Guard-3-8B"
     guard_endpoint = "https://<workspace>--agent-harness-vllm-guard-serve.modal.run/v1"
 and check it with `agent-harness doctor --model-profile modal` (the "guard model" line).
 """
@@ -19,7 +20,14 @@ import subprocess
 
 import modal
 
-MODEL_NAME = "meta-llama/Llama-Guard-3-1B"
+# Llama Guard 3 8B (16 GB of BF16 weights; an L4 has 24 GB, vLLM uses 85% below, leaving about 4 GB
+# of KV cache for one-exchange guard prompts). The 1B wrongly flagged 8-10 of 30 coding prompts
+# (e.g. "Explain src/agent_harness/cli/repl.py" as violent_crimes); the 8B flagged none and caught
+# 12 of 12 harmful prompts (measured 2026-10-04), so [guardrails.model] action = "block" becomes usable.
+# Gated with manual approval, separately from the 1B: the HF_TOKEN account needs access to the 8B.
+# Keep [models.modal] guard_model equal to this (tests/test_full_config.py checks it).
+MODEL_NAME = "meta-llama/Llama-Guard-3-8B"
+# MODEL_NAME = "meta-llama/Llama-Guard-3-1B"  # the earlier, smaller guard (fits any GPU)
 GPU = "L4"
 MAX_MODEL_LEN = 8192  # guard prompts are one user/assistant exchange
 VLLM_PACKAGE = "vllm==0.30.0"  # same pin as vllm_server.py

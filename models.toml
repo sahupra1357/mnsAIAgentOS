@@ -114,7 +114,10 @@ context_window = 32768
 token_counting = "server"
 embedding_model = "nomic-ai/nomic-embed-text-v1.5"
 embedding_endpoint = "https://WORKSPACE--agent-harness-vllm-embed-serve.modal.run/v1"
-guard_model = "meta-llama/Llama-Guard-3-1B"
+# Llama Guard 3 8B on an L4 (deploy/modal/vllm_guard_server.py): no false flags on coding prompts,
+# unlike the 1B, so with the modal profiles you can block instead of flag:
+#   AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block   (in .env; llamacpp keeps the 1B and "flag")
+guard_model = "meta-llama/Llama-Guard-3-8B"
 guard_endpoint = "https://WORKSPACE--agent-harness-vllm-guard-serve.modal.run/v1"
 
 [models.modal.headers_env]
