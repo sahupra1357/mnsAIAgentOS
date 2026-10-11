@@ -37,6 +37,7 @@ class FullConfigTests(unittest.TestCase):
         # the ollama profile uses the 8B guard, and .env can switch the action back to block.
         self.assertEqual(config.guardrails.model.action, "flag")
         self.assertEqual(config.models["ollama.guard"].model, "llama-guard3:8b")
+        self.assertTrue(config.guardrails.model.parallel)  # guard cold start overlaps the chat model's
         strict = load_config(FULL, environ={"AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION": "block"})
         self.assertEqual(strict.guardrails.model.action, "block")
         self.assertEqual(config.disabled_models, ("modal",))
