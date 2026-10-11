@@ -383,6 +383,11 @@ at its URL (`…--agent-harness-vllm-companions-serve.modal.run/v1`). One L4 ins
 the guard's KV cache drops to about 12k tokens, and both models start, idle, and redeploy
 together. The separate deployments stay the default; see `docs/DEPLOYMENT.md`.
 
+**Which layout?** `docs/diagrams/10-modal-layouts.svg` compares the dedicated H200 + 2 L4, the shared
+endpoint + 2 L4, and the shared endpoint + 1 shared L4: cold start (5.1 / 3.6 / 5.5 minutes), warm chat
+call (3.1 s / 1.3 s / 1.3 s median), and a 10-minute session including the idle tail (about $3.13 /
+$0.55 / $0.57).
+
 **Cheaper GPU option.** The script also has an FP8 preset (`Qwen/Qwen3.6-35B-A3B-FP8`, 37.5 GB,
 on one `A100-80GB`, $0.000694/s). It is untested: the A100 has no FP8 hardware, and vLLM
 documents weight-only FP8 (Marlin) for dense models, not for this MoE. The model also has a

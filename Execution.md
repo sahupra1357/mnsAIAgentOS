@@ -952,6 +952,7 @@ The `.env` lines drive everything that reaches Modal: `AGENT_HARNESS_MODEL__MODA
 chat), `..._EMBEDDING_ENDPOINT`, and `..._GUARD_ENDPOINT` decide which container `doctor`, `start.sh`,
 `serve`, and `/ui` wake up; a commented-out line falls back to the `WORKSPACE` placeholder and reaches
 nothing. The deploy, undeploy, and stop scripts use Modal app names and ignore `.env`.
+`docs/diagrams/10-modal-layouts.svg` compares the three Modal layouts (cold start, warm response, price).
 
 ```bash
 # separate group: embed L4, guard L4, chat H200

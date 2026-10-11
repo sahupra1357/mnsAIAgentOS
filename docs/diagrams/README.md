@@ -19,10 +19,15 @@ Each diagram comes in three formats:
 | API access and tenancy | [svg](07-api-access.svg) | [animated](07-api-access.animated.svg) (12 steps) | Keys, principals, roles, rate limit, tenant isolation, tenant and user quotas, queue and workers, redacted store, health |
 | Context overflow | [svg](08-context-overflow.svg) | [animated](08-context-overflow.animated.svg) (12 steps) | When a server rejects a prompt as too long: detection, a smaller persisted cap, retry, or failure |
 | Limits and deadlines | [svg](09-limits.svg) | [animated](09-limits.animated.svg) (14 steps) | Where each limit applies: rate limit, quotas, step checks, output cap, tool calls per reply, approval and question deadlines |
+| Modal layouts (chart) | [svg](10-modal-layouts.svg) | — | Three Modal layouts compared: dedicated H200 + 2 L4, shared endpoint + 2 L4, shared endpoint + 1 shared L4. Cold start, warm response, and price per session, measured or estimated |
 
 ## Regenerating
 
-All nine diagrams are defined in `tools/generate.py`: boxes, arrows, tour steps, and
+The Modal layouts chart is a static chart, not a tour. Its numbers and their sources are in
+`tools/modal_layouts.py`; edit `DATA` there and run
+`python docs/diagrams/tools/modal_layouts.py docs/diagrams/10-modal-layouts.svg`.
+
+The nine architecture diagrams are defined in `tools/generate.py`: boxes, arrows, tour steps, and
 captions. Edit a diagram function there, then run this from the repository root:
 
 ```bash

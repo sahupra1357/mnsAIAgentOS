@@ -212,6 +212,16 @@ To use it:
 
 Trade-offs against the separate deployments:
 
+[![Modal layouts compared](diagrams/10-modal-layouts.svg)](diagrams/10-modal-layouts.svg)
+
+The chart compares all three layouts (dedicated H200 + 2 L4, shared endpoint + 2 L4, shared endpoint
++ 1 shared L4). Measured: warm chat calls (H200 median 3.1 s, p90 13.9 s; shared endpoint 1.3 s,
+3.2 s), cold starts (H200 5.1 min, separate embed 2.1 min, shared L4 5.5 min). Estimated: the
+separate 8B guard's cold start (3.6 min) and the price of a session (wake, 10 minutes of use, 20-minute
+idle tail: about $3.13, $0.55, and $0.57). Sources and arithmetic are in
+`docs/diagrams/tools/modal_layouts.py`.
+
+
 | | Separate (default) | Shared L4 |
 |---|---|---|
 | GPUs while both are used | 2 x L4 | 1 x L4 |
