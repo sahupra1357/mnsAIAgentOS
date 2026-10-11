@@ -39,6 +39,7 @@ from ..bench.evals import load_scenarios, run_scenario, scenario_application, su
 from ..observability.telemetry import JsonLinesTelemetry
 from ..server.notifications import notifier_from_config
 from ..server.streaming import StreamHub
+from .images import image_url, split_images
 from ..server.worker import Worker
 from ..knowledge.artifacts import LocalArtifactStore, referenced_artifacts
 
@@ -57,7 +58,9 @@ def _parser() -> argparse.ArgumentParser:
 
     run = subcommands.add_parser("run", help="create and execute a new agent run")
     _common_runtime_arguments(run)
-    run.add_argument("prompt", help="user request to send to the agent")
+    run.add_argument("prompt", nargs="+",
+                     help="user request; arguments (or words) naming existing image files are attached, "
+                          "e.g. \"what is wrong here\" error.png \"and how do I fix it\"")
     run.add_argument("--image", action="append", default=[], metavar="FILE_OR_URL",
                      help="attach an image (png/jpeg/gif/webp file, or https:// URL) for vision models")
     run.add_argument("--system", help="optional system instruction")
@@ -154,7 +157,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     _common_runtime_arguments(continue_)
     continue_.add_argument("run_id")
-    continue_.add_argument("message")
+    continue_.add_argument("message", nargs="+", help="follow-up text; image files in it are attached")
     continue_.add_argument("--image", action="append", default=[], metavar="FILE_OR_URL",
                            help="attach an image to the follow-up")
     continue_.add_argument("--stream", action="store_true")
@@ -369,8 +372,9 @@ async def _run_command(args: argparse.Namespace) -> int:
             system = CODING_AGENT_SYSTEM_PROMPT
         if system:
             messages.append(Message(role=Role.SYSTEM, content=system))
-        prompt, template = expand_prompt(args.prompt, app.templates, _named_args(args.arg))
-        images = tuple(ContentPart(image_url=_image_url(item)) for item in args.image)
+        text, inline = split_images(args.prompt)  # "text" screenshot.png "text": images become [image N]
+        prompt, template = expand_prompt(text, app.templates, _named_args(args.arg))
+        images = tuple(ContentPart(image_url=url) for url in inline + [_image_url(item) for item in args.image])
         messages.append(Message(role=Role.USER, content=prompt, parts=images))
         run = await app.orchestrator.create_run(
             model_profile=profile,
@@ -579,9 +583,10 @@ async def _continue_command(args: argparse.Namespace) -> int:
             budget = replace(
                 current.budget, **{k: v for k, v in raised.items() if v is not None}
             )
-        message, _ = expand_prompt(args.message, app.templates)
+        text, inline = split_images(args.message)
+        message, _ = expand_prompt(text, app.templates)
         await app.orchestrator.continue_run(
-            args.run_id, message, budget=budget, images=[_image_url(item) for item in args.image]
+            args.run_id, message, budget=budget, images=inline + [_image_url(item) for item in args.image]
         )
         finished = await app.orchestrator.run(args.run_id)
         return await _print_result(
@@ -721,16 +726,7 @@ _IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"
 def _image_url(item: str) -> str:
     """An https:// URL as is, or a local image file as a base64 data: URL."""
 
-    if item.startswith("https://"):
-        return item
-    path = Path(item)
-    media_type = _IMAGE_TYPES.get(path.suffix.lower())
-    if media_type is None:
-        raise ValueError(f"{item}: images must be .png, .jpg, .jpeg, .gif, or .webp files (or https:// URLs)")
-    data = path.read_bytes()
-    if len(data) > 15 * 1024 * 1024:
-        raise ValueError(f"{item}: images must be under 15 MB")
-    return f"data:{media_type};base64," + base64.b64encode(data).decode("ascii")
+    return image_url(item)
 
 
 def _load_schema(path: Path | None) -> dict[str, Any] | None:

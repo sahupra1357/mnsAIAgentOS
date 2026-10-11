@@ -10,12 +10,13 @@ terminal.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from ..domain import Message, Role, RunBudget, RunRecord, RunStatus
+from ..domain import ContentPart, Message, Role, RunBudget, RunRecord, RunStatus
 from ..extensions.templates import expand_prompt
+from .images import split_images
 
 HELP = """commands:
   /new      start a new conversation
@@ -96,25 +97,27 @@ class ChatSession:
     async def send(self, text: str) -> RunRecord:
         """Send one user message, run it to a stop, and show the result."""
 
+        text, images = split_images([text])  # an image file named in the line is attached
         prompt, template = expand_prompt(text, self._app.templates)
         orchestrator = self._app.orchestrator
         if self._stream is not None:
             self._stream.printed = False
-        run = await self._continue(prompt) if self.run_id is not None else None
+        run = await self._continue(prompt, images) if self.run_id is not None else None
         if run is None:
-            run = await self._create(prompt, template)
+            run = await self._create(prompt, template, images)
         self.run_id = run.id
         run = await orchestrator.run(run.id)
         run = await self._settle(run)
         self._show(run)
         return run
 
-    async def _create(self, prompt: str, template: Any) -> RunRecord:
+    async def _create(self, prompt: str, template: Any, images: Sequence[str] = ()) -> RunRecord:
         options = self._options
         messages: list[Message] = []
         if options.system:
             messages.append(Message(role=Role.SYSTEM, content=options.system))
-        messages.append(Message(role=Role.USER, content=prompt))
+        messages.append(Message(role=Role.USER, content=prompt,
+                                parts=tuple(ContentPart(image_url=url) for url in images)))
         return await self._app.orchestrator.create_run(
             model_profile=options.profile,
             route=options.route,
@@ -126,7 +129,7 @@ class ChatSession:
             budget=options.budget,
         )
 
-    async def _continue(self, prompt: str) -> RunRecord | None:
+    async def _continue(self, prompt: str, images: Sequence[str] = ()) -> RunRecord | None:
         """Continue the current run; ``None`` when it cannot be continued."""
 
         assert self.run_id is not None
@@ -146,7 +149,7 @@ class ChatSession:
             max_steps=usage.steps + turn.max_steps,
             max_wall_seconds=usage.active_seconds + turn.max_wall_seconds,
         )
-        return await orchestrator.continue_run(self.run_id, prompt, budget=budget)
+        return await orchestrator.continue_run(self.run_id, prompt, budget=budget, images=list(images))
 
     async def _settle(self, run: RunRecord) -> RunRecord:
         """Answer approvals and questions inline until the run stops waiting."""

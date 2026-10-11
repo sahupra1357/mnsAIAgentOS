@@ -227,6 +227,9 @@ the feature is not configured.
   - It uses only the existing endpoints: `/runs`, `/runs/{id}/stream`, `/messages`,
     `/approval`, `/answer`, `/usage`, `/events`.
   - The API key is entered in the page and kept in `sessionStorage`.
+  - Images: 📎, paste, or drop; shrunk in the browser (longest side 1600 px, JPEG) and sent as
+    `images` on `POST /runs` / `POST /runs/{id}/messages`; thumbnails are `<img>` elements built
+    with `el()` (never `innerHTML`). `create_api` allows 20 MB request bodies for them.
   - Optional Open WebUI service in `deploy/` compose, pointed at `/v1`.
 - **Tests:** an ASGI test client against a scripted model covers streaming frames, mapping,
   approval via chat text, and auth. No network.

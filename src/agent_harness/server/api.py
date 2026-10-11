@@ -99,6 +99,7 @@ Send = Callable[[Mapping[str, Any]], Awaitable[None]]
 
 MAX_TEXT_CHARS = 100_000
 _ID = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"
+SERVE_MAX_BODY_BYTES = 20 * 1024 * 1024  # request bodies for `agent-harness serve` (images)
 _RUN_ROUTE = re.compile(rf"^/runs/(?P<run_id>{_ID})(?P<rest>/.*)?$")
 _ARTIFACT_ROUTE = re.compile(r"^/artifacts/(?P<artifact_id>[0-9a-f]{64})$")
 _RUN_ARTIFACT_ROUTE = _ARTIFACT_ROUTE  # matched against the part after /runs/{id}
@@ -1090,6 +1091,9 @@ def create_api(
         orchestrator=app.orchestrator,
         store=app.store,
         queue=app.store,
+        # Room for attached images (data: URLs, up to 15 MB each): the 1 MB default refused an
+        # ordinary screenshot. /ui also shrinks images before sending them.
+        max_body_bytes=SERVE_MAX_BODY_BYTES,
         config=app.config,
         auth_token=auth_token,
         run_versions=app.run_versions,

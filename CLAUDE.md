@@ -208,6 +208,11 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   target is a `ConfigError` naming it. `affinity_header` sends `metadata["affinity_key"]`
   (`<run id>:<summary covers>`, set by the orchestrator on main turns only) in that header; companions
   never send it. `pricing.cached_input_usd_per_million_tokens` prices cached prompt tokens.
+- **Inline images.** `cli/images.py` (`split_images`) turns prompt arguments, or words in them, that
+  name existing image files into attachments, marked `[image N]` in the text (`run` and `continue`
+  take several prompt arguments now, `nargs="+"`; the chat REPL scans each line). `/ui` attaches with
+  📎, paste, or drop, shrinking images in the browser; `create_api` raises the body limit to 20 MB
+  (`SERVE_MAX_BODY_BYTES`).
 - **Instruction headers.** Configured files are named without their directory
   (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.
 - **Cut-off answers (`max_answer_continuations`).** A final answer with `finish_reason = length` is

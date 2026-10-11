@@ -392,8 +392,21 @@ structured_output = "strict"   # "strict" | "non_strict" | "prompt" (for servers
 ### Images (vision models)
 
 ```bash
-agent-harness run --config models.toml --model-profile llamacpp --image photo.png "What is in this picture?"
+agent-harness "what is wrong here" error.png "and how do I fix it"     # images inside the prompt
+agent-harness run --model-profile modal_shared "compare" before.png after.png
+agent-harness run --image photo.png "What is in this picture?"        # the --image flag still works
 ```
+
+- **Inline images (CLI, `continue`, chat REPL):** an argument, or a word inside one, that names
+  an **existing** image file (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) is attached, and its
+  place in the text becomes `[image N]`, so the model knows which part of the request each image
+  belongs to (`what is wrong here [image 1] and how do I fix it`). A whole argument that is an
+  `https://` image URL is attached too. A missing file, or one that is not an image, stays text
+  and is never read. In the chat REPL, put a path in the line: `what is this? ~/Desktop/shot.png`.
+- **`/ui`:** the 📎 button, pasting a screenshot (⌘V), or dropping image files on the message box.
+  Thumbnails (✕ removes one) show before sending and in the conversation. Images over 1600 px or
+  600 KB are shrunk in the browser (JPEG) first, which keeps requests small and uses fewer image
+  tokens. `agent-harness serve` accepts request bodies up to 20 MB.
 
 - **API:** `POST /runs` and `POST /runs/{id}/messages` take
   `"images": ["https://...", "data:image/png;base64,..."]`, up to 16.
@@ -1319,7 +1332,7 @@ authenticated API as any other client.
 | Area | What it shows |
 |---|---|
 | Left | Your runs (newest first), a **New chat** button, and the profile or route for new chats |
-| Center | The conversation, with streamed replies and reasoning. Approval and plan cards (Approve/Deny with a reason) and `ask_user` cards (option buttons or free text) appear inline. **Stop** cancels the run. |
+| Center | The conversation, with streamed replies and reasoning. Approval and plan cards (Approve/Deny with a reason) and `ask_user` cards (option buttons or free text) appear inline. **Stop** cancels the run. **Images:** 📎, paste, or drop to attach (shown as thumbnails; sent with a new message, not while the agent is still working). |
 | Right | Run facts; steps, tokens, cost, and time against the budget; plan steps; tasks; subagents (click to open); and the event log |
 
 Sending a message picks the right call for the run's state:

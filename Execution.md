@@ -154,7 +154,9 @@ Modal, or another provider.
 ## 3. Run creation
 
 The CLI converts the user prompt into a message (after expanding a template, if one was
-used):
+used). Prompt arguments, or words in them, that name existing image files become
+`ContentPart` attachments (`cli/images.py`, `split_images`), and their place in the text
+becomes `[image N]`:
 
 ```python
 Message(
@@ -743,7 +745,9 @@ parent waits (`SUBAGENT_WAITING`) and receives only the child's final answer
     save_conversation(digest of messages + reply, run_id)
     ```
 - **Web chat:** `GET /ui` serves `src/agent_harness/server/ui/index.html` (no key needed for the page;
-  every call it makes is authenticated). It drives the same endpoints: `POST /runs`,
+  every call it makes is authenticated). Images attached with 📎, paste, or drop (shrunk in the
+  browser to at most 1600 px) go in the `images` field of `POST /runs` or `/messages`. It drives
+  the same endpoints: `POST /runs`,
   `GET /runs/{id}/stream` (read with `fetch`, so the bearer header is sent), `/messages`,
   `/approval`, `/answer`, `/usage`, `/events`, `/cancel`, `/steer`.
 - **Queue workers:** `agent-harness worker` claims queued runs with leases, so several
