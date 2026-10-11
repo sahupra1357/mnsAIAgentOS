@@ -138,6 +138,44 @@ max_tokens = 2048
 [models.modal.pricing]
 gpu_usd_per_second = 0.001261
 
+# Modal Shared Endpoint: a Modal-managed pool, billed per token, always warm (no cold start,
+# no idle tail), with a per-model concurrency limit (HTTP 429, retried). Create it in the Modal
+# dashboard (Endpoints -> Shared), then in .env: the endpoint URL, the proxy token as
+# MODAL_SHARED_TOKEN=wk-<id>.ws-<secret> (ID and secret joined with "."), and
+# AGENT_HARNESS_MODEL__MODAL_SHARED__ENABLED=true. Switch with AGENT_HARNESS_MODEL_PROFILE=modal_shared.
+# Checked live 2026-10-10: tool calls are structured, reasoning arrives as reasoning_content,
+# chat_template_kwargs are accepted, and the same affinity key gave cache hits (512 of 732).
+[models.modal_shared]
+enabled = false
+adapter = "openai_compatible"          # one bearer token; the modal adapter wants Modal-Key/Secret
+model = "deepseek-ai/DeepSeek-V4.1-Flash"
+endpoint = "https://WORKSPACE--ep-deepseek-v4-1-flash-server.us-west.modal.direct/v1"
+api_key_env = "MODAL_SHARED_TOKEN"
+# One routing key per conversation (run id + summary point), so its requests reach the container
+# that has its prefix cached; cached prompt tokens cost a tenth (pricing below).
+affinity_header = "Modal-Routing-Affinity-Key"
+timeout_seconds = 180
+max_retries = 3                        # 429s above the concurrency limit (Retry-After honoured)
+retry_jitter = 0.2
+# The model takes 1M tokens (64K natively); 65536 means far fewer summaries and re-reads than 32K,
+# and resent history is mostly cached input ($0.03/M).
+context_window = 65536
+token_counting = "estimate"            # no /tokenize on shared endpoints
+# No embedding or guard model of its own here: borrow the modal profile's deployments (both
+# scale to zero on L4s). Needs [models.modal] enabled with its embed and guard endpoints.
+embedding_profile = "modal.embed"
+guard_profile = "modal.guard"
+
+[models.modal_shared.parameters]
+temperature = 0.2
+max_tokens = 4096                      # output is $1.20/M; long answers are not cut off
+
+# Modal dashboard rates for DeepSeek V4.1 Flash (2026-10-10), per million tokens.
+[models.modal_shared.pricing]
+input_usd_per_million_tokens = 0.30
+cached_input_usd_per_million_tokens = 0.03
+output_usd_per_million_tokens = 1.20
+
 # --- Orchestrator and context ---------------------------------------------------
 [orchestrator]
 max_model_attempts = 3

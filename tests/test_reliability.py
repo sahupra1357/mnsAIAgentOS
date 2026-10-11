@@ -244,6 +244,12 @@ class CostTests(unittest.IsolatedAsyncioTestCase):
         gpu = ModelPricing(gpu_usd_per_second=0.001)
         self.assertAlmostEqual(estimate_cost_usd(gpu, Usage(), 12.5) or 0, 0.0125)
         self.assertIsNone(estimate_cost_usd(tokens, Usage(), 1.0))
+        # Cached prompt tokens at their own rate (Modal Shared Endpoints bill them at a tenth).
+        cached = ModelPricing(input_usd_per_million_tokens=0.30, cached_input_usd_per_million_tokens=0.03,
+                              output_usd_per_million_tokens=1.20)
+        usage = Usage(input_tokens=1_000_000, output_tokens=100_000, cached_input_tokens=600_000)
+        self.assertAlmostEqual(estimate_cost_usd(cached, usage, 1.0) or 0, 0.4 * 0.30 + 0.6 * 0.03 + 0.1 * 1.20)
+        self.assertAlmostEqual(estimate_cost_usd(tokens, usage, 1.0) or 0, 0.5 + 0.2)  # no cached rate: input rate
 
     async def test_client_attaches_estimated_cost_including_retries(self) -> None:
         transport = FakeTransport([HttpTransportTimeout("cold"), http_text()])

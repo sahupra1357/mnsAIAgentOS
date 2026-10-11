@@ -606,6 +606,62 @@ class ExtraBodyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("chat_template_kwargs", transport.calls[0][1])  # unchanged without extra_body
 
 
+class SharedEndpointTests(unittest.IsolatedAsyncioTestCase):
+    """Modal Shared Endpoints: one combined bearer token, and a per-conversation affinity header."""
+
+    async def test_affinity_header_carries_the_requests_key(self) -> None:
+        profile = make_profile(api_key_env="SHARED_TOKEN", affinity_header="Modal-Routing-Affinity-Key")
+        env = {"SHARED_TOKEN": "wk-id.ws-secret"}
+        keyed = ModelRequest(messages=(Message(Role.USER, "hi"),), metadata={"affinity_key": "run-1:0"})
+        plain = ModelRequest(messages=(Message(Role.USER, "hi"),), metadata={"purpose": "summary"})
+        transport = FakeTransport([text_completion("ok"), text_completion("ok")])
+        client = OpenAICompatibleClient(profile, transport=transport, environ=env)
+        await client.complete(keyed)
+        await client.complete(plain)
+        first, second = transport.calls[0][2], transport.calls[1][2]
+        self.assertEqual(first["Authorization"], "Bearer wk-id.ws-secret")
+        self.assertEqual(first["Modal-Routing-Affinity-Key"], "run-1:0")
+        self.assertNotIn("Modal-Routing-Affinity-Key", second)  # a request without a key sends none
+        # Profiles without affinity_header never send it.
+        transport = FakeTransport([text_completion("ok")])
+        await OpenAICompatibleClient(make_profile(), transport=transport, environ={}).complete(keyed)
+        self.assertNotIn("Modal-Routing-Affinity-Key", transport.calls[0][2])
+
+    def test_profile_validation(self) -> None:
+        for bad in ("Authorization", "bad header", "Content-Type"):
+            with self.subTest(header=bad), self.assertRaises(ConfigError):
+                make_profile(affinity_header=bad)
+        with self.assertRaises(ConfigError):
+            make_profile(embedding_model="e", embedding_profile="other.embed")
+        with self.assertRaises(ConfigError):
+            make_profile(guard_model="g", guard_profile="other.guard")
+
+    def test_default_profile_borrows_another_profiles_embed_and_guard(self) -> None:
+        toml = (
+            'default_model_profile = "shared"\n'
+            '[models.dedicated]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://d/v1"\n'
+            'embedding_model = "e"\nguard_model = "g"\naffinity_header = "Modal-Routing-Affinity-Key"\n'
+            '[models.shared]\nadapter = "openai_compatible"\nmodel = "s"\nendpoint = "http://s/v1"\n'
+            'embedding_profile = "dedicated.embed"\nguard_profile = "dedicated.guard"\n'
+            '[memory]\nenabled = true\nsearch = "hybrid"\n'
+            '[guardrails]\nenabled = true\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "models.toml"
+            path.write_text(toml, encoding="utf-8")
+            config = load_config(path, environ={})
+            self.assertEqual(config.memory.embedding_profile, "dedicated.embed")
+            self.assertEqual(config.guardrails.model.profile, "dedicated.guard")
+            self.assertEqual(config.models["dedicated.embed"].affinity_header, "")  # companions send none
+            # Switching the default back follows that profile's own companions.
+            other = load_config(path, environ={"AGENT_HARNESS_MODEL_PROFILE": "dedicated"})
+            self.assertEqual(other.memory.embedding_profile, "dedicated.embed")
+            # A borrowed profile that is not there is a clear error.
+            path.write_text(toml.replace('"dedicated.embed"', '"missing.embed"'), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "embedding_profile names 'missing.embed'"):
+                load_config(path, environ={})
+
+
 class GatewayRegistrationTests(unittest.TestCase):
     def test_builtin_adapters_resolve_to_provider_clients(self) -> None:
         config = HarnessConfig(

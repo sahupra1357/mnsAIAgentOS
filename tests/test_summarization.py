@@ -384,6 +384,20 @@ class OrchestratorSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(LATEST + question, last[1].content)  # ...and the model still sees it
         self.assertTrue(last[1].content.startswith(TASK.content))
 
+    async def test_affinity_key_is_the_run_and_its_summary_point(self) -> None:
+        model = RoutingModel(scripted_run(15))
+        orchestrator = self.orchestrator(model)
+        run = await self.start(orchestrator)
+        finished = await orchestrator.run(run.id)
+
+        keys = [r.metadata["affinity_key"] for r in model.requests]
+        self.assertEqual(keys[0], f"{run.id}:0")
+        assert finished.context_summary is not None
+        self.assertEqual(keys[-1], f"{run.id}:{finished.context_summary.covers}")
+        # A new key only after each summary (the cached prefix is gone then), not every step.
+        self.assertEqual(len(set(keys)), 1 + len(model.summary_requests))
+        self.assertTrue(all("affinity_key" not in r.metadata for r in model.summary_requests))
+
     async def test_views_between_summaries_extend_each_other(self) -> None:
         model = RoutingModel(scripted_run(15))
         orchestrator = self.orchestrator(model)
