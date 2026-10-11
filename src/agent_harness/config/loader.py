@@ -66,6 +66,9 @@ _PROFILE_FIELDS = {
     "EMBEDDING_ENDPOINT": "embedding_endpoint",
     "GUARD_MODEL": "guard_model",
     "GUARD_ENDPOINT": "guard_endpoint",
+    "AFFINITY_HEADER": "affinity_header",
+    "EMBEDDING_PROFILE": "embedding_profile",
+    "GUARD_PROFILE": "guard_profile",
 }
 # Marks dataclass fields that versioning.profile_sha256 skips while they hold their default.
 HASH_OMIT_DEFAULT = MappingProxyType({"hash": "omit_default"})
@@ -78,6 +81,7 @@ _PRICING_FIELDS = (
     "input_usd_per_million_tokens",
     "output_usd_per_million_tokens",
     "gpu_usd_per_second",
+    "cached_input_usd_per_million_tokens",
 )
 
 
@@ -92,6 +96,9 @@ class ModelPricing:
     input_usd_per_million_tokens: float | None = None
     output_usd_per_million_tokens: float | None = None
     gpu_usd_per_second: float | None = None
+    # Prompt tokens served from the provider's prefix cache, when it bills them lower (Modal
+    # Shared Endpoints: DeepSeek V4.1 Flash $0.03 vs $0.30). Unset: they cost the input rate.
+    cached_input_usd_per_million_tokens: float | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
 
     def __post_init__(self) -> None:
         for name in _PRICING_FIELDS:
@@ -151,6 +158,16 @@ class ModelProfile:
     embedding_endpoint: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
     guard_model: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
     guard_endpoint: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
+    # A request header carrying a per-conversation routing key (the run id, plus the summary
+    # point), so a load balancer keeps one conversation on the server that has its prompt
+    # prefix cached: Modal Shared Endpoints use "Modal-Routing-Affinity-Key". Empty: not sent.
+    affinity_header: str = field(default="", metadata=HASH_OMIT_DEFAULT)
+    # Borrow another profile for embeddings / the guard model when this provider has none of its
+    # own, or needs other credentials (a Modal Shared Endpoint next to the `modal` profile's
+    # embed and guard deployments: "modal.embed" / "modal.guard"). Used, like embedding_model and
+    # guard_model, when this profile is the default; [memory] / [guardrails.model] still win.
+    embedding_profile: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
+    guard_profile: str | None = field(default=None, metadata=HASH_OMIT_DEFAULT)
 
     def __post_init__(self) -> None:
         if not self.adapter.strip():
@@ -223,6 +240,19 @@ class ModelProfile:
             raise ConfigError("model profile embedding_endpoint needs embedding_model")
         if self.guard_endpoint is not None and self.guard_model is None:
             raise ConfigError("model profile guard_endpoint needs guard_model")
+        for name in ("embedding_profile", "guard_profile"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ConfigError(f"model profile {name} must be a non-empty string")
+        if self.embedding_profile and self.embedding_model:
+            raise ConfigError("model profile sets both embedding_model and embedding_profile; use one")
+        if self.guard_profile and self.guard_model:
+            raise ConfigError("model profile sets both guard_model and guard_profile; use one")
+        if self.affinity_header and (
+            not _HEADER_NAME.fullmatch(self.affinity_header)
+            or self.affinity_header.casefold() in _RESERVED_HEADERS
+        ):
+            raise ConfigError(f"model profile affinity_header is not a usable header name: {self.affinity_header!r}")
 
 
 def _validated_headers_env(raw: Mapping[str, str]) -> dict[str, str]:
@@ -1001,16 +1031,30 @@ def load_config(
     memory = _parse_section(raw, "memory", MemoryConfig)
     guardrails = _parse_guardrails(raw.get("guardrails"))
     default_owner = raw_routes.get(default, default)
+    owner = profiles.get(default_owner)
+    borrowed_embed = owner.embedding_profile if owner is not None else None
+    borrowed_guard = owner.guard_profile if owner is not None else None
+    for kind, target in (("embedding_profile", borrowed_embed), ("guard_profile", borrowed_guard)):
+        if target and target not in profiles:
+            raise ConfigError(
+                f"models.{default_owner}.{kind} names {target!r}, which is not an enabled profile"
+                + (" (or companion)" if "." in target else "")
+            )
     if memory.search != "keyword" and not memory.embedding_profile:
         embed = f"{default_owner}.embed"
-        if companions.get(embed) != (default_owner, "embed"):
+        if borrowed_embed:
+            memory = replace(memory, embedding_profile=borrowed_embed)
+        elif companions.get(embed) != (default_owner, "embed"):
             raise ConfigError(
                 f"memory.search = {memory.search!r} needs memory.embedding_profile, or "
-                f"embedding_model on the default profile {default_owner!r}"
+                f"embedding_model on the default profile {default_owner!r} (or an embedding_profile there)"
             )
-        memory = replace(memory, embedding_profile=embed)
+        else:
+            memory = replace(memory, embedding_profile=embed)
     guard_companion = f"{default_owner}.guard"
-    if not guardrails.model.profile and companions.get(guard_companion) == (default_owner, "guard"):
+    if not guardrails.model.profile and borrowed_guard:
+        guardrails = replace(guardrails, model=replace(guardrails.model, profile=borrowed_guard))
+    elif not guardrails.model.profile and companions.get(guard_companion) == (default_owner, "guard"):
         # The default profile's own guard model (guard_model) is the model guard.
         guardrails = replace(guardrails, model=replace(guardrails.model, profile=guard_companion))
     return HarnessConfig(
@@ -1070,7 +1114,7 @@ def _add_companions(profiles: dict[str, ModelProfile]) -> dict[str, tuple[str, s
                 endpoint=profile.embedding_endpoint or profile.endpoint,
                 parameters={}, fallback=(), context_window=None, token_counting="estimate",
                 pricing=None, embedding_model=None, embedding_endpoint=None, guard_model=None,
-                guard_endpoint=None,
+                guard_endpoint=None, affinity_header="", embedding_profile=None, guard_profile=None,
             )
         if profile.guard_model:
             derived["guard"] = replace(
@@ -1078,6 +1122,7 @@ def _add_companions(profiles: dict[str, ModelProfile]) -> dict[str, tuple[str, s
                 parameters={"max_tokens": 32}, fallback=(),
                 context_window=None, token_counting="estimate", pricing=None,
                 embedding_model=None, embedding_endpoint=None, guard_model=None, guard_endpoint=None,
+                affinity_header="", embedding_profile=None, guard_profile=None,
             )
         for kind, companion in derived.items():
             companion_name = f"{name}.{kind}"
@@ -1542,6 +1587,9 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
         "embedding_endpoint",
         "guard_model",
         "guard_endpoint",
+        "affinity_header",
+        "embedding_profile",
+        "guard_profile",
     }
     unknown = set(raw) - allowed
     if unknown:
@@ -1605,6 +1653,9 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
             embedding_endpoint=raw.get("embedding_endpoint"),
             guard_model=raw.get("guard_model"),
             guard_endpoint=raw.get("guard_endpoint"),
+            affinity_header=_optional_string(raw.get("affinity_header"), f"models.{name}.affinity_header") or "",
+            embedding_profile=_optional_string(raw.get("embedding_profile"), f"models.{name}.embedding_profile"),
+            guard_profile=_optional_string(raw.get("guard_profile"), f"models.{name}.guard_profile"),
         )
     except (TypeError, ValueError) as exc:
         if isinstance(exc, ConfigError):

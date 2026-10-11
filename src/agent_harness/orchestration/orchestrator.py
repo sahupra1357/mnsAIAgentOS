@@ -1565,7 +1565,10 @@ class AgentOrchestrator:
                 return ModelRequest(
                     messages=request_messages,
                     tools=specs,
-                    metadata={"run_id": run.id, "step": str(run.step_count)},
+                    metadata={"run_id": run.id, "step": str(run.step_count),
+                              # One routing key per conversation and summary point (profiles with
+                              # affinity_header): after a summary the cached prefix is gone anyway.
+                              "affinity_key": f"{run.id}:{run.context_summary.covers if run.context_summary else 0}"},
                     # Without tools the server constrains the reply itself.
                     response_schema=run.output_schema if not specs else None,
                     tool_choice=(SUBMIT_RESULT_TOOL if specs and _submit_forced(events)

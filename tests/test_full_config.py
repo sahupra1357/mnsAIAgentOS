@@ -40,7 +40,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertTrue(config.guardrails.model.parallel)  # guard cold start overlaps the chat model's
         strict = load_config(FULL, environ={"AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION": "block"})
         self.assertEqual(strict.guardrails.model.action, "block")
-        self.assertEqual(config.disabled_models, ("modal",))
+        self.assertEqual(config.disabled_models, ("modal", "modal_shared"))  # both need .env credentials
         self.assertEqual(dict(config.routes), {"fast": "llamacpp", "local": "ollama"})
         self.assertEqual(config.models["llamacpp"].fallback, ())  # no cross-provider fallback
         self.assertEqual(config.memory.embedding_profile, "llamacpp.embed")
@@ -170,6 +170,25 @@ class FullConfigTests(unittest.TestCase):
         self.assertIsNone(action(["python3", "x.py"]))  # other commands still pause
         with self.assertRaises(CommandRejected):
             guardrails.validate(["find", ".", "-delete"])
+
+    def test_modal_shared_endpoint_profile(self) -> None:
+        # DeepSeek V4.1 Flash on a Modal Shared Endpoint: per-token, borrows modal's embed and guard.
+        self.assertNotIn("modal_shared", self.config.models)  # off until .env enables it
+        env = {"AGENT_HARNESS_MODEL__MODAL__ENABLED": "true",
+               "AGENT_HARNESS_MODEL__MODAL_SHARED__ENABLED": "true",
+               "AGENT_HARNESS_MODEL_PROFILE": "modal_shared"}
+        c = load_config(FULL, environ=env)
+        shared = c.models["modal_shared"]
+        self.assertEqual((shared.adapter, shared.model), ("openai_compatible", "deepseek-ai/DeepSeek-V4.1-Flash"))
+        self.assertEqual(shared.api_key_env, "MODAL_SHARED_TOKEN")
+        self.assertEqual(shared.affinity_header, "Modal-Routing-Affinity-Key")
+        self.assertIn("WORKSPACE", shared.endpoint)  # the real URL is in .env, not here
+        self.assertEqual(shared.token_counting, "estimate")
+        self.assertEqual((shared.pricing.input_usd_per_million_tokens,
+                          shared.pricing.cached_input_usd_per_million_tokens,
+                          shared.pricing.output_usd_per_million_tokens), (0.30, 0.03, 1.20))
+        self.assertEqual(c.memory.embedding_profile, "modal.embed")
+        self.assertEqual(c.guardrails.model.profile, "modal.guard")
 
     def test_modal_deploy_scripts_match_the_profile(self) -> None:
         # The live Modal scripts are in deploy/modal/ (examples/modal/ keeps reference copies).

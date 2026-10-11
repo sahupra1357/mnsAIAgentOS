@@ -66,6 +66,13 @@ branch on a provider name. Read `skills/model-gateway/SKILL.md` as well.
   A missing variable for either layer is a `ModelConfigurationError` before any
   request. A 401/403 is an `AuthenticationError`. Error text must say which layer is
   missing without echoing values.
+- **Modal Shared Endpoints** (profile `modal_shared`, per token): `openai_compatible` adapter, one
+  bearer token `wk-<id>.ws-<secret>` (`MODAL_SHARED_TOKEN`), `affinity_header =
+  "Modal-Routing-Affinity-Key"` (the adapter sends the request's `metadata["affinity_key"]`, which
+  the orchestrator sets to `<run id>:<summary covers>`), `cached_input_usd_per_million_tokens`,
+  `token_counting = "estimate"`, and `embedding_profile` / `guard_profile` borrowing `modal.embed` /
+  `modal.guard`. Checked live 2026-10-10 with DeepSeek V4.1 Flash: structured tool calls,
+  `reasoning_content`, `chat_template_kwargs` accepted, cached tokens in `prompt_tokens_details`.
 - Server launch reference (deploy script lives in `deploy/modal/`):
   - vLLM: `vllm serve <model> --api-key $KEY --enable-auto-tool-choice
     --tool-call-parser <hermes|llama3_json|mistral|qwen3_coder|...> --max-model-len <N>`

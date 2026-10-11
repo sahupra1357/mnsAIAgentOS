@@ -269,6 +269,29 @@ Deploy scripts for Modal are in `deploy/modal/` (`examples/modal/` keeps the ref
 copies). They keep prefix caching on, turn on cached-token reporting, and set container
 options that keep a run on one warm KV cache.
 
+**Modal Shared Endpoints (`modal_shared`, per token).** A Modal-managed pool: billed per token,
+always warm (no cold start, no idle tail), with a per-model concurrency limit (HTTP 429, retried).
+The root config has a disabled `modal_shared` profile for DeepSeek V4.1 Flash (552B MoE, about
+15B active per token; $0.30 / $0.03 cached / $1.20 per million tokens):
+1. In the Modal dashboard: Endpoints → create a **Shared** endpoint for a model with tool calling.
+2. In `.env`: `MODAL_SHARED_TOKEN=wk-<id>.ws-<secret>` (your proxy token's ID and secret joined with
+   `.`), `AGENT_HARNESS_MODEL__MODAL_SHARED__ENABLED=true`,
+   `AGENT_HARNESS_MODEL__MODAL_SHARED__ENDPOINT=https://<workspace>--ep-…modal.direct/v1`, and
+   `AGENT_HARNESS_MODEL_PROFILE=modal_shared`.
+3. `agent-harness doctor --model-profile modal_shared --max-tokens 512`, then restart `serve`.
+
+How it fits the harness:
+- **Adapter:** `openai_compatible`, sending one bearer token. The `modal` adapter wants the
+  `Modal-Key`/`Modal-Secret` pair instead.
+- **`affinity_header = "Modal-Routing-Affinity-Key"`:** each request carries `<run id>:<summary
+  point>`, so a conversation stays on the container that has its prefix cached, and the key
+  changes after a summary, as Modal advises.
+- **Cached tokens:** priced with `cached_input_usd_per_million_tokens`.
+- **Embeddings and guard:** `embedding_profile = "modal.embed"` and `guard_profile = "modal.guard"`
+  borrow the `modal` profile's deployments, so keep that profile enabled. Switching the default
+  profile back to `llamacpp` uses its own companions again.
+- **No `/tokenize`:** `token_counting = "estimate"`.
+
 **The Modal chat model.** `deploy/modal/vllm_server.py` serves the model the local profile
 runs, Qwen 3.6 35B-A3B (`Qwen/Qwen3.6-35B-A3B`, BF16, 71.9 GB of weights, public), on one
 **H200**, with `--tool-call-parser qwen3_coder` and `--reasoning-parser qwen3` from the vLLM

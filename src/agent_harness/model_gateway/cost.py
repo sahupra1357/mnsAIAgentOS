@@ -21,7 +21,11 @@ def estimate_cost_usd(
     total = 0.0
     priced = False
     if pricing.input_usd_per_million_tokens is not None and usage.input_tokens is not None:
-        total += usage.input_tokens * pricing.input_usd_per_million_tokens / 1_000_000
+        cached = 0
+        if pricing.cached_input_usd_per_million_tokens is not None and usage.cached_input_tokens:
+            cached = min(usage.cached_input_tokens, usage.input_tokens)
+            total += cached * pricing.cached_input_usd_per_million_tokens / 1_000_000
+        total += (usage.input_tokens - cached) * pricing.input_usd_per_million_tokens / 1_000_000
         priced = True
     if pricing.output_usd_per_million_tokens is not None and usage.output_tokens is not None:
         total += usage.output_tokens * pricing.output_usd_per_million_tokens / 1_000_000

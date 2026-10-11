@@ -112,7 +112,7 @@ class OpenAICompatibleClient:
         if request.max_output_tokens is not None and request.max_output_tokens <= 0:
             raise ModelConfigurationError("model request max_output_tokens must be greater than zero")
         payload = self._build_payload(request)
-        headers = self.request_headers()
+        headers = self.request_headers(request=request)
         url = self._completion_url()
 
         timeout = self._effective_timeout(request)
@@ -204,7 +204,7 @@ class OpenAICompatibleClient:
         payload = self._build_payload(request)
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
-        headers = self.request_headers()
+        headers = self.request_headers(request=request)
         headers["Accept"] = "text/event-stream"
         timeout = self._effective_timeout(request)
         accumulator = _StreamAccumulator()
@@ -250,10 +250,14 @@ class OpenAICompatibleClient:
         self._warm = True
         yield ModelStreamEvent(response=self._with_cost(response, self._monotonic() - started))
 
-    def request_headers(self, *, json_body: bool = True) -> dict[str, str]:
+    def request_headers(
+        self, *, json_body: bool = True, request: ModelRequest | None = None
+    ) -> dict[str, str]:
         """Resolve request headers, reading credentials from the environment now.
 
-        Error messages name the missing variable, never a credential value.
+        Error messages name the missing variable, never a credential value. With the
+        profile's ``affinity_header``, a request's ``metadata["affinity_key"]`` (set by the
+        orchestrator per run and summary point) is sent in that header.
         """
 
         headers = {"Accept": "application/json"}
@@ -273,6 +277,9 @@ class OpenAICompatibleClient:
                     f"credential {_describe_ref(env_name)} for header {header!r} is not set"
                 )
             headers[header] = value
+        affinity = request.metadata.get("affinity_key") if request is not None else None
+        if self._profile.affinity_header and affinity:
+            headers[self._profile.affinity_header] = str(affinity)
         return headers
 
     def api_base_url(self) -> str:

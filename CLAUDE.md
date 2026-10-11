@@ -202,6 +202,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   presets in comments; `[models.modal]` matches it (price $0.001261/s,
   `cold_start_timeout_seconds = 1200`).
   `tests/test_full_config.py` checks the model, length, GPU, and parsers against `[models.modal]`.
+- **Borrowed companions and affinity (Modal Shared Endpoints).** Profile fields `embedding_profile` /
+  `guard_profile` name another profile (usually a companion such as `modal.embed`) for memory and the
+  guard when that profile is the default; they exclude `embedding_model` / `guard_model`. A missing
+  target is a `ConfigError` naming it. `affinity_header` sends `metadata["affinity_key"]`
+  (`<run id>:<summary covers>`, set by the orchestrator on main turns only) in that header; companions
+  never send it. `pricing.cached_input_usd_per_million_tokens` prices cached prompt tokens.
 - **Instruction headers.** Configured files are named without their directory
   (`## Instructions from CHAT.md`); discovered subdirectory files keep their path.
 - **Cut-off answers (`max_answer_continuations`).** A final answer with `finish_reason = length` is
