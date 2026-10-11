@@ -40,7 +40,7 @@ class ReporterTests(unittest.IsolatedAsyncioTestCase):
         run, events = await two_turns(InMemoryRunStore())
         report.capture("t1", run, events)
         item = BenchItem("t1", {"prompt": "What is it?"}, ["42"], "repo")
-        result = ItemResult("t1", "repo", True, expected="42", predicted="The answer is 42.", status="completed",
+        result = ItemResult("t1", "repo", True, expected="42", predicted="...is 42.", status="completed",
                             details={"answer_ok": True, "behavior_ok": False, "facts_found": 1})
         await report.report(item, result)
         summary = report.close()
@@ -50,7 +50,8 @@ class ReporterTests(unittest.IsolatedAsyncioTestCase):
         [root] = [s for s in spans if "parentSpanId" not in s]
         self.assertEqual((root["traceId"], root["spanId"]), (trace, root_id))
         self.assertEqual(json.loads(attr(root, "langfuse.observation.input")), {"prompt": "What is it?"})
-        self.assertEqual(attr(root, "langfuse.observation.output"), "The answer is 42.")
+        # The run's full final answer, not the suite's shortened `predicted`.
+        self.assertEqual(attr(root, "langfuse.observation.output"), "Second answer.")
         self.assertEqual(json.loads(attr(root, "langfuse.experiment.item.expected_output")), ["42"])
         # Mappable by a Langfuse judge as {{ground_truth}} (Metadata -> expected_output).
         self.assertEqual(json.loads(attr(root, "langfuse.observation.metadata.expected_output")), ["42"])
