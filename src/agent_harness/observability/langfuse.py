@@ -723,6 +723,7 @@ def score_body(trace: str, name: str, value: float | str | bool, *, observation:
                timestamp: datetime | None = None) -> dict[str, Any]:
     """A score attached to ``observation`` (the root span, as Langfuse v4 evaluations expect)."""
 
+    number_or_text: float | str
     if isinstance(value, bool):
         data_type, number_or_text = "BOOLEAN", 1.0 if value else 0.0
     elif isinstance(value, (int, float)):
