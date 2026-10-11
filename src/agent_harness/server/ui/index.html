@@ -180,7 +180,10 @@ async function api(method, path, body) {
   if (!response.ok) {
     const message = (data && data.error) || response.statusText;
     if (response.status === 401) openSettings();
-    throw new Error(`${response.status}: ${message}`);
+    const error = new Error(`${response.status}: ${message}`);
+    error.status = response.status;
+    error.retryAfter = Number(response.headers.get("retry-after")) || 0;
+    throw error;
   }
   return data;
 }
@@ -277,21 +280,47 @@ async function openRun(runId) {
   if (state.run && (state.run.status === "running" || state.run.status === "queued")) stream();
 }
 
-async function refresh() {
+// withEvents: also fetch the event list (opening a run, or when a stream ends). While a run streams,
+// its events arrive on the stream itself, so refreshes skip that request.
+async function refresh({ withEvents = true } = {}) {
   if (!state.runId) return;
   try {
     const [run, transcript, usage, events] = await Promise.all([
       api("GET", `/runs/${state.runId}`),
       api("GET", `/runs/${state.runId}/messages?reasoning=true`),
       api("GET", `/runs/${state.runId}/usage`),
-      api("GET", `/runs/${state.runId}/events?after=${state.events}`),
+      withEvents ? api("GET", `/runs/${state.runId}/events?after=${state.events}`) : Promise.resolve({ events: [] }),
     ]);
     state.run = run;
     renderTranscript(transcript);
     renderDetails(run, usage);
     for (const event of events.events || []) addEvent(event);
     showError(null);
-  } catch (error) { showError(error); }
+  } catch (error) {
+    // Over the API's rate limit ([api] rate_limit_per_minute): a background refresh waits and
+    // tries again instead of showing an error; the run itself is not affected.
+    if (error.status === 429) setTimeout(() => refreshSoon(), Math.max(1, error.retryAfter || 2) * 1000);
+    else showError(error);
+  }
+}
+
+// While a run streams, every model reply and tool result used to trigger a full refresh (four
+// requests each): a fast model doing 14 steps in 13 s ran past rate_limit_per_minute = 120 (429).
+// Now refreshes are coalesced: one at a time, at least REFRESH_GAP_MS apart, plus one trailing
+// refresh so the page ends on the latest state. urgent (an approval card) skips the wait.
+const REFRESH_GAP_MS = 1500;
+let refreshing = null, refreshAgain = false, lastRefresh = 0;
+function refreshSoon(urgent = false) {
+  if (refreshing) { refreshAgain = true; return refreshing; }
+  const wait = urgent ? 0 : Math.max(0, REFRESH_GAP_MS - (Date.now() - lastRefresh));
+  refreshing = new Promise((resolve) => setTimeout(resolve, wait))
+    .then(() => refresh({ withEvents: false }))
+    .finally(() => {
+      lastRefresh = Date.now();
+      refreshing = null;
+      if (refreshAgain) { refreshAgain = false; refreshSoon(); }
+    });
+  return refreshing;
 }
 
 function renderTranscript(transcript) {
@@ -431,7 +460,10 @@ async function stream() {
           return;
         } else if (parsed && typeof parsed.index === "number") {
           addEvent(parsed);
-          if (name === "model_responded" || name === "tool_responded" || name === "approval_requested") { live = null; liveText = ""; liveReasoning = ""; await refresh(); }
+          if (name === "model_responded" || name === "tool_responded" || name === "approval_requested") {
+            live = null; liveText = ""; liveReasoning = "";
+            refreshSoon(name === "approval_requested");  // coalesced; does not block reading the stream
+          }
         }
       }
     }
