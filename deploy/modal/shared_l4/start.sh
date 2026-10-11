@@ -5,9 +5,10 @@
 #
 # Modal starts the container on its first request, so this runs
 # `agent-harness doctor --model-profile modal.guard`, then `modal.embed`: the first waits through
-# the cold start (both models load, one after the other), the second finds it warm. It uses the
-# repository's models.toml and .env, whose EMBEDDING_ENDPOINT and GUARD_ENDPOINT must name this
-# app. The container stays up until it has been idle for 20 minutes, or until stop.sh.
+# the cold start (both models load, one after the other), the second finds it warm. .env drives
+# which container wakes up: AGENT_HARNESS_MODEL__MODAL__EMBEDDING_ENDPOINT and ..._GUARD_ENDPOINT
+# must both name this app (…--agent-harness-vllm-companions-serve.modal.run/v1), or this warms
+# the separate apps instead. The container stays up until it has been idle for 20 minutes, or until stop.sh.
 # Does not start the H200 chat model or the separate embed and guard apps.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_apps.sh"

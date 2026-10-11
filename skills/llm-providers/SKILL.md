@@ -73,14 +73,16 @@ branch on a provider name. Read `skills/model-gateway/SKILL.md` as well.
   `token_counting = "estimate"`, and `embedding_profile` / `guard_profile` borrowing `modal.embed` /
   `modal.guard`. Checked live 2026-10-10 with DeepSeek V4.1 Flash: structured tool calls,
   `reasoning_content`, `chat_template_kwargs` accepted, cached tokens in `prompt_tokens_details`.
-- Modal deployments are grouped in `deploy/modal/`: one file per model at the top,
-  `scripts/` (`deploy.sh`, `start.sh` warming through `doctor`, `stop.sh` = `modal container stop`,
+- Modal deployments are grouped in `deploy/modal/`, one folder per layout: `scripts/` (one deploy
+  file per model, plus `deploy.sh`, `start.sh` warming through `doctor`, `stop.sh` = `modal container stop`,
   `undeploy.sh` = `modal app stop`; embed, guard, chat in order, reversed for stop/undeploy; no
   arguments), and `shared_l4/` (its own four scripts for the companions app only; the user wants
   the two sets kept apart, never parameterised; embeddings + guard on one L4: two vLLM processes at 0.10 / 0.80 of the GPU,
   started in turn, behind a stdlib `router.py` that merges `/v1/models` and gates `/health`).
   The harness side is only endpoints: `embedding_endpoint` and `guard_endpoint` may be the same URL.
-- Server launch reference (deploy script lives in `deploy/modal/`):
+  `.env` drives the warm-up: `doctor` and `start.sh` reach the URLs it sets, not a named app (a
+  commented-out line falls back to the `WORKSPACE` placeholder and reaches nothing).
+- Server launch reference (deploy scripts live in `deploy/modal/scripts/`):
   - vLLM: `vllm serve <model> --api-key $KEY --enable-auto-tool-choice
     --tool-call-parser <hermes|llama3_json|mistral|qwen3_coder|...> --max-model-len <N>`
     plus `--reasoning-parser <qwen3|...>` for a thinking model, so its thinking arrives as
@@ -199,7 +201,7 @@ must appear in the orchestrator.
   `_cached_input_tokens`, `_cold_start_timeout`).
 - `model_gateway/ollama.py`, `llama_cpp.py`, `modal.py`: provider subclasses.
 - `model_gateway/diagnostics.py`: `diagnose()`, used by `agent-harness doctor`.
-- `deploy/modal/vllm_server.py`, `deploy/modal/sglang_server.py`: deploy scripts.
+- `deploy/modal/scripts/vllm_server.py`, `deploy/modal/scripts/sglang_server.py`: deploy scripts.
 - `tests/test_providers.py`: fake-transport tests for all of the above.
 
 Cached-token counts are currently exposed as `ModelResponse.metadata["cached_input_tokens"]`.
@@ -238,9 +240,9 @@ guard_endpoint = "https://WORKSPACE--agent-harness-vllm-guard-serve.modal.run/v1
 ```
 
 Modal deploy scripts:
-- `deploy/modal/vllm_embed_server.py`: uses `--runner pooling --trust-remote-code`
+- `deploy/modal/scripts/vllm_embed_server.py`: uses `--runner pooling --trust-remote-code`
   (NomicBertModel). Checked against the vLLM 0.30.0 source.
-- `deploy/modal/vllm_guard_server.py`: Llama Guard 3 **8B** on an L4 (16 GB of weights; the 1B
+- `deploy/modal/scripts/vllm_guard_server.py`: Llama Guard 3 **8B** on an L4 (16 GB of weights; the 1B
   misreads code). Each Llama Guard size is gated with manual approval, so the `agent-harness-hf`
   secret's `HF_TOKEN` account needs access to the 8B itself.
 

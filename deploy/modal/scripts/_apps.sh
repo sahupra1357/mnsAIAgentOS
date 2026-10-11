@@ -1,9 +1,9 @@
 # Shared by deploy.sh, undeploy.sh, start.sh, and stop.sh in this folder (sourced, not run).
 #
 # This set manages the three separate deployments, each on its own GPU:
-#   embed  deploy/modal/vllm_embed_server.py  agent-harness-vllm-embed  (L4)
-#   guard  deploy/modal/vllm_guard_server.py  agent-harness-vllm-guard  (L4)
-#   chat   deploy/modal/vllm_server.py        agent-harness-vllm        (H200)
+#   embed  deploy/modal/scripts/vllm_embed_server.py  agent-harness-vllm-embed  (L4)
+#   guard  deploy/modal/scripts/vllm_guard_server.py  agent-harness-vllm-guard  (L4)
+#   chat   deploy/modal/scripts/vllm_server.py        agent-harness-vllm        (H200)
 # Deploy and start go embed, guard, chat; stop and undeploy go chat, guard, embed.
 # The shared-L4 deployment (embed + guard in one container) has its own scripts in
 # deploy/modal/shared_l4/; nothing here touches it.
@@ -15,9 +15,9 @@ STOP_ORDER=(chat guard embed)
 
 app_script() {
   case "$1" in
-    embed) echo "$root/deploy/modal/vllm_embed_server.py" ;;
-    guard) echo "$root/deploy/modal/vllm_guard_server.py" ;;
-    chat) echo "$root/deploy/modal/vllm_server.py" ;;
+    embed) echo "$root/deploy/modal/scripts/vllm_embed_server.py" ;;
+    guard) echo "$root/deploy/modal/scripts/vllm_guard_server.py" ;;
+    chat) echo "$root/deploy/modal/scripts/vllm_server.py" ;;
   esac
 }
 

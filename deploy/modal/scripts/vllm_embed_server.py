@@ -1,11 +1,11 @@
 """Deploy the embedding model for the `modal` profile (its `embedding_endpoint`).
 
 A Modal deployment serves one model, so embeddings get their own small deployment next
-to deploy/modal/vllm_server.py. It uses the same bearer secret and proxy auth, so the
+to deploy/modal/scripts/vllm_server.py. It uses the same bearer secret and proxy auth, so the
 one `modal` profile's credentials cover both.
 
 Deploy:
-    modal deploy deploy/modal/vllm_embed_server.py
+    modal deploy deploy/modal/scripts/vllm_embed_server.py
 
 Then, in models.toml under [models.modal]:
     embedding_model = "nomic-ai/nomic-embed-text-v1.5"

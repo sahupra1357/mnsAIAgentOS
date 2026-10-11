@@ -245,7 +245,7 @@ Per provider:
 - **Ollama.** `ollama pull nomic-embed-text` on the same server.
 - **Modal.** One deployment serves one model, so the `modal` profile names three, all with
   the same Modal auth:
-  - `deploy/modal/vllm_server.py` (chat, `endpoint`)
+  - `deploy/modal/scripts/vllm_server.py` (chat, `endpoint`)
   - `vllm_embed_server.py` (`embedding_endpoint`)
   - `vllm_guard_server.py` (Llama Guard 3 8B on an L4, `guard_endpoint`; needs an
     `agent-harness-hf` secret with `HF_TOKEN` from an account granted access to the 8B, which
@@ -267,7 +267,7 @@ Built-in adapters: `openai_compatible`, `ollama`, `llama_cpp`, and `modal`.
 | `llama_cpp` | `llama-server -m model.gguf --jinja -c N` | `--jinja` is required for tool calls. 503 while loading is retried.                        |
 | `modal`     | vLLM or SGLang on Modal (`server = "vllm"` or `"sglang"`) | Requires both the server bearer key (`api_key_env`) and Modal proxy auth (`headers_env` for `Modal-Key` and `Modal-Secret`). The first request uses `cold_start_timeout_seconds` (default 600). |
 
-Deploy scripts for Modal are in `deploy/modal/` (`examples/modal/` keeps the reference
+Deploy scripts for Modal are in `deploy/modal/scripts/` (`examples/modal/` keeps the reference
 copies). They keep prefix caching on, turn on cached-token reporting, and set container
 options that keep a run on one warm KV cache.
 
@@ -294,7 +294,7 @@ How it fits the harness:
   profile back to `llamacpp` uses its own companions again.
 - **No `/tokenize`:** `token_counting = "estimate"`.
 
-**The Modal chat model.** `deploy/modal/vllm_server.py` serves the model the local profile
+**The Modal chat model.** `deploy/modal/scripts/vllm_server.py` serves the model the local profile
 runs, Qwen 3.6 35B-A3B (`Qwen/Qwen3.6-35B-A3B`, BF16, 71.9 GB of weights, public), on one
 **H200**, with `--tool-call-parser qwen3_coder` and `--reasoning-parser qwen3` from the vLLM
 recipe, which lists the H200 as tested hardware. The earlier Qwen2.5-7B on an L40S often
@@ -310,7 +310,7 @@ deployments stay separate, on an L4 each, and scale to zero when idle.
 | Thinking | returned as reasoning; off for summaries | `REASONING_PARSER`, `[summarization] parameters` |
 
 To deploy:
-1. `modal deploy deploy/modal/vllm_server.py` (and the embed and guard scripts, once), or all
+1. `modal deploy deploy/modal/scripts/vllm_server.py` (and the embed and guard scripts, once), or all
    three in order with `deploy/modal/scripts/deploy.sh`.
 2. `agent-harness doctor --model-profile modal`, then restart `serve`.
 
@@ -327,6 +327,52 @@ To deploy:
 | `start.sh` | warms with `agent-harness doctor` (`modal.embed`, `modal.guard`, `modal`; shared: `modal.guard`, `modal.embed`) | from the start until 20 idle minutes (or `stop.sh`) |
 | `stop.sh` | `modal container stop` on running containers; the apps stay deployed | ends now; the next request cold-starts |
 | `undeploy.sh` | `modal app stop` (asks first) | ends; the URL stops answering until redeployed |
+
+Separate group (`deploy/modal/scripts/`: embed L4, guard L4, chat H200; deploy and start go embed,
+guard, chat, stop and undeploy go chat, guard, embed):
+
+```bash
+deploy/modal/scripts/deploy.sh       # modal deploy, one after the other (no GPU starts)
+deploy/modal/scripts/undeploy.sh     # modal app stop, one after the other (asks first)
+deploy/modal/scripts/start.sh        # warm up: doctor modal.embed, modal.guard, modal (H200)
+deploy/modal/scripts/stop.sh         # modal container stop: billing ends, apps stay deployed
+
+agent-harness doctor --model-profile modal.embed
+agent-harness doctor --model-profile modal.guard
+agent-harness doctor --model-profile modal --max-tokens 512
+```
+
+Shared group (`deploy/modal/shared_l4/`: only `agent-harness-vllm-companions`, embed + guard on one
+L4; the H200 is never touched):
+
+```bash
+deploy/modal/shared_l4/deploy.sh     # modal deploy (no GPU starts)
+deploy/modal/shared_l4/undeploy.sh   # modal app stop (asks first)
+deploy/modal/shared_l4/start.sh      # warm up: doctor modal.guard, then modal.embed
+deploy/modal/shared_l4/stop.sh       # modal container stop
+
+agent-harness doctor --model-profile modal.guard
+agent-harness doctor --model-profile modal.embed
+```
+
+**`.env` decides what `doctor` and `start.sh` warm up.** They reach the URL in `.env` for each
+profile, not a particular app:
+
+| `.env` line | Profile and `doctor` command | Separate group needs | Shared group needs |
+|---|---|---|---|
+| `AGENT_HARNESS_MODEL__MODAL__ENABLED=true` | the whole `modal` profile (also borrowed by `modal_shared`) | set | set |
+| `AGENT_HARNESS_MODEL__MODAL__ENDPOINT` | `modal`: `doctor --model-profile modal` → H200 chat | `…--agent-harness-vllm-serve.modal.run/v1` | not used |
+| `AGENT_HARNESS_MODEL__MODAL__EMBEDDING_ENDPOINT` | `modal.embed`: `doctor --model-profile modal.embed` | `…--agent-harness-vllm-embed-serve.modal.run/v1` | `…--agent-harness-vllm-companions-serve.modal.run/v1` |
+| `AGENT_HARNESS_MODEL__MODAL__GUARD_ENDPOINT` | `modal.guard`: `doctor --model-profile modal.guard` | `…--agent-harness-vllm-guard-serve.modal.run/v1` | `…--agent-harness-vllm-companions-serve.modal.run/v1` |
+
+- **`.env` drives the warm-up.** `doctor` and both `start.sh` scripts warm whatever URL the line
+  for that profile names. So the same `doctor --model-profile modal.guard` warms the separate guard
+  or the shared container, depending on `.env`. A commented-out line falls back to the `WORKSPACE`
+  placeholder in `models.toml`: nothing is reached, so nothing warms (and nothing bills). For
+  example, with `ENDPOINT` commented out the H200 cannot be warmed.
+- **`.env` does not affect deploy, undeploy, or stop.** Those scripts use the Modal app names.
+- **Switching layouts:** change the two companion lines in `.env`, then restart `serve` (`.env` is
+  read when the program starts). `serve` and `/ui` send real requests to the same URLs.
 
 **Embeddings and guard on one L4 (optional).** `deploy/modal/shared_l4/vllm_companions_server.py`
 runs both companion models in one container: two vLLM processes (guard 80% of the GPU, embed

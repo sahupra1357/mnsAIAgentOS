@@ -91,15 +91,15 @@ num_predict = 1024
 # MODAL_PROXY_TOKEN_SECRET, and your workspace in the endpoints. Then enable it.
 # One deployment serves one model, so the profile names three deployments, all with the
 # same Modal auth (one profile, one set of credentials):
-#   modal deploy deploy/modal/vllm_server.py         # chat        -> endpoint
-#   modal deploy deploy/modal/vllm_embed_server.py   # embeddings  -> embedding_endpoint
-#   modal deploy deploy/modal/vllm_guard_server.py   # Llama Guard -> guard_endpoint
+#   modal deploy deploy/modal/scripts/vllm_server.py         # chat        -> endpoint
+#   modal deploy deploy/modal/scripts/vllm_embed_server.py   # embeddings  -> embedding_endpoint
+#   modal deploy deploy/modal/scripts/vllm_guard_server.py   # Llama Guard -> guard_endpoint
 [models.modal]
 enabled = false
 adapter = "modal"
 server = "vllm"
 # Qwen 3.6 35B-A3B (the model llamacpp runs), BF16 on one H200; must equal
-# MODEL_NAME in deploy/modal/vllm_server.py (a test checks it). It thinks: vLLM's qwen3
+# MODEL_NAME in deploy/modal/scripts/vllm_server.py (a test checks it). It thinks: vLLM's qwen3
 # reasoning parser returns the thinking as reasoning_content, and summaries turn it off
 # ([summarization] parameters). Thinking counts against max_tokens below.
 model = "Qwen/Qwen3.6-35B-A3B"
@@ -114,7 +114,7 @@ context_window = 32768
 token_counting = "server"
 embedding_model = "nomic-ai/nomic-embed-text-v1.5"
 embedding_endpoint = "https://WORKSPACE--agent-harness-vllm-embed-serve.modal.run/v1"
-# Llama Guard 3 8B on an L4 (deploy/modal/vllm_guard_server.py): no false flags on coding prompts,
+# Llama Guard 3 8B on an L4 (deploy/modal/scripts/vllm_guard_server.py): no false flags on coding prompts,
 # unlike the 1B, so with the modal profiles you can block instead of flag:
 #   AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block   (in .env; llamacpp keeps the 1B and "flag")
 guard_model = "meta-llama/Llama-Guard-3-8B"
@@ -133,7 +133,7 @@ temperature = 0.2
 max_tokens = 2048
 
 # Estimated cost: request latency x the GPU's rate, so `cost_usd` is reported and
-# max_cost_usd / cost quotas can stop a run. H200 (GPU in deploy/modal/vllm_server.py) is
+# max_cost_usd / cost quotas can stop a run. H200 (GPU in deploy/modal/scripts/vllm_server.py) is
 # $0.001261/s on modal.com/pricing (checked 2026-10-10; A100 80 GB $0.000694, L40S $0.000542);
 # change it with the GPU. Latency includes cold starts and retries, and
 # concurrent requests share one GPU, so this is an upper bound. Container CPU and memory, and

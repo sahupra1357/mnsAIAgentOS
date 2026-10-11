@@ -21,7 +21,7 @@ from pathlib import Path
 from agent_harness.config.loader import load_config
 
 ROOT = Path(__file__).resolve().parents[1]
-MODAL_DIR = ROOT / "deploy" / "modal"
+MODAL_DIR = ROOT / "deploy" / "modal"  # one folder per layout: scripts/ and shared_l4/
 SHARED = MODAL_DIR / "shared_l4"
 SCRIPTS = MODAL_DIR / "scripts"
 
@@ -215,14 +215,14 @@ class SharedDeploymentTests(unittest.TestCase):
         # Each vLLM reserves its share at start; together they must leave room for CUDA contexts.
         self.assertLessEqual(values["EMBED_GPU_MEMORY"] + values["GUARD_GPU_MEMORY"], 0.92)
         self.assertGreaterEqual(values["GUARD_GPU_MEMORY"], 0.80)  # 16 GB of weights + KV cache
-        separate = constants(MODAL_DIR / "vllm_guard_server.py")
+        separate = constants(SCRIPTS / "vllm_guard_server.py")
         self.assertEqual(values["MAX_MODEL_LEN"], separate["MAX_MODEL_LEN"])
         self.assertEqual(values["VLLM_PACKAGE"], separate["VLLM_PACKAGE"])
         self.assertTrue((SHARED / "router.py").is_file())  # shipped into the image next to it
 
     def test_the_separate_deployments_are_kept(self) -> None:
         for name in ("vllm_server.py", "vllm_embed_server.py", "vllm_guard_server.py"):
-            self.assertTrue((MODAL_DIR / name).is_file())
+            self.assertTrue((SCRIPTS / name).is_file())
 
 
 class LifecycleScriptTests(unittest.TestCase):
@@ -243,9 +243,9 @@ class LifecycleScriptTests(unittest.TestCase):
 
     def test_separate_set_names_the_three_separate_apps_in_order(self) -> None:
         helper = SCRIPTS / "_apps.sh"
-        for key, path in (("embed", "deploy/modal/vllm_embed_server.py"),
-                          ("guard", "deploy/modal/vllm_guard_server.py"),
-                          ("chat", "deploy/modal/vllm_server.py")):
+        for key, path in (("embed", "deploy/modal/scripts/vllm_embed_server.py"),
+                          ("guard", "deploy/modal/scripts/vllm_guard_server.py"),
+                          ("chat", "deploy/modal/scripts/vllm_server.py")):
             out = self.bash(helper, f"app_name {key}; app_script {key}").split()
             self.assertEqual(out, [self.app_name_in(path), str(ROOT / path)], key)
         self.assertEqual(self.bash(helper, 'echo "${START_ORDER[*]}"; echo "${STOP_ORDER[*]}"').splitlines(),
