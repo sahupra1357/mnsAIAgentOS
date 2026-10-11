@@ -80,6 +80,8 @@ branch on a provider name. Read `skills/model-gateway/SKILL.md` as well.
   the two sets kept apart, never parameterised; embeddings + guard on one L4: two vLLM processes at 0.10 / 0.80 of the GPU,
   started in turn, behind a stdlib `router.py` that merges `/v1/models` and gates `/health`).
   The harness side is only endpoints: `embedding_endpoint` and `guard_endpoint` may be the same URL.
+  `.env` drives the warm-up: `doctor` and `start.sh` reach the URLs it sets, not a named app (a
+  commented-out line falls back to the `WORKSPACE` placeholder and reaches nothing).
 - Server launch reference (deploy scripts live in `deploy/modal/scripts/`):
   - vLLM: `vllm serve <model> --api-key $KEY --enable-auto-tool-choice
     --tool-call-parser <hermes|llama3_json|mistral|qwen3_coder|...> --max-model-len <N>`

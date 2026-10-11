@@ -948,6 +948,19 @@ order, and `deploy/modal/shared_l4/` is an optional layout with embeddings and t
 with its own four scripts for that app only. The harness only sees endpoints: the
 `modal` profile's `embedding_endpoint` and `guard_endpoint` may name two deployments or the same one.
 
+The `.env` lines drive everything that reaches Modal: `AGENT_HARNESS_MODEL__MODAL__ENDPOINT` (H200
+chat), `..._EMBEDDING_ENDPOINT`, and `..._GUARD_ENDPOINT` decide which container `doctor`, `start.sh`,
+`serve`, and `/ui` wake up; a commented-out line falls back to the `WORKSPACE` placeholder and reaches
+nothing. The deploy, undeploy, and stop scripts use Modal app names and ignore `.env`.
+
+```bash
+# separate group: embed L4, guard L4, chat H200
+deploy/modal/scripts/deploy.sh | undeploy.sh | start.sh | stop.sh
+# shared group: embed + guard on one L4 (needs both companion endpoints on the companions URL)
+deploy/modal/shared_l4/deploy.sh | undeploy.sh | start.sh | stop.sh
+agent-harness doctor --model-profile modal.embed | modal.guard | modal
+```
+
 ## Complete flow
 
 ```text

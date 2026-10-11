@@ -328,6 +328,52 @@ To deploy:
 | `stop.sh` | `modal container stop` on running containers; the apps stay deployed | ends now; the next request cold-starts |
 | `undeploy.sh` | `modal app stop` (asks first) | ends; the URL stops answering until redeployed |
 
+Separate group (`deploy/modal/scripts/`: embed L4, guard L4, chat H200; deploy and start go embed,
+guard, chat, stop and undeploy go chat, guard, embed):
+
+```bash
+deploy/modal/scripts/deploy.sh       # modal deploy, one after the other (no GPU starts)
+deploy/modal/scripts/undeploy.sh     # modal app stop, one after the other (asks first)
+deploy/modal/scripts/start.sh        # warm up: doctor modal.embed, modal.guard, modal (H200)
+deploy/modal/scripts/stop.sh         # modal container stop: billing ends, apps stay deployed
+
+agent-harness doctor --model-profile modal.embed
+agent-harness doctor --model-profile modal.guard
+agent-harness doctor --model-profile modal --max-tokens 512
+```
+
+Shared group (`deploy/modal/shared_l4/`: only `agent-harness-vllm-companions`, embed + guard on one
+L4; the H200 is never touched):
+
+```bash
+deploy/modal/shared_l4/deploy.sh     # modal deploy (no GPU starts)
+deploy/modal/shared_l4/undeploy.sh   # modal app stop (asks first)
+deploy/modal/shared_l4/start.sh      # warm up: doctor modal.guard, then modal.embed
+deploy/modal/shared_l4/stop.sh       # modal container stop
+
+agent-harness doctor --model-profile modal.guard
+agent-harness doctor --model-profile modal.embed
+```
+
+**`.env` decides what `doctor` and `start.sh` warm up.** They reach the URL in `.env` for each
+profile, not a particular app:
+
+| `.env` line | Profile and `doctor` command | Separate group needs | Shared group needs |
+|---|---|---|---|
+| `AGENT_HARNESS_MODEL__MODAL__ENABLED=true` | the whole `modal` profile (also borrowed by `modal_shared`) | set | set |
+| `AGENT_HARNESS_MODEL__MODAL__ENDPOINT` | `modal`: `doctor --model-profile modal` → H200 chat | `…--agent-harness-vllm-serve.modal.run/v1` | not used |
+| `AGENT_HARNESS_MODEL__MODAL__EMBEDDING_ENDPOINT` | `modal.embed`: `doctor --model-profile modal.embed` | `…--agent-harness-vllm-embed-serve.modal.run/v1` | `…--agent-harness-vllm-companions-serve.modal.run/v1` |
+| `AGENT_HARNESS_MODEL__MODAL__GUARD_ENDPOINT` | `modal.guard`: `doctor --model-profile modal.guard` | `…--agent-harness-vllm-guard-serve.modal.run/v1` | `…--agent-harness-vllm-companions-serve.modal.run/v1` |
+
+- **`.env` drives the warm-up.** `doctor` and both `start.sh` scripts warm whatever URL the line
+  for that profile names. So the same `doctor --model-profile modal.guard` warms the separate guard
+  or the shared container, depending on `.env`. A commented-out line falls back to the `WORKSPACE`
+  placeholder in `models.toml`: nothing is reached, so nothing warms (and nothing bills). For
+  example, with `ENDPOINT` commented out the H200 cannot be warmed.
+- **`.env` does not affect deploy, undeploy, or stop.** Those scripts use the Modal app names.
+- **Switching layouts:** change the two companion lines in `.env`, then restart `serve` (`.env` is
+  read when the program starts). `serve` and `/ui` send real requests to the same URLs.
+
 **Embeddings and guard on one L4 (optional).** `deploy/modal/shared_l4/vllm_companions_server.py`
 runs both companion models in one container: two vLLM processes (guard 80% of the GPU, embed
 10%), started one after the other, behind `router.py`, which sends `/v1/embeddings` to the embed
