@@ -705,7 +705,9 @@ An installed `agent-harness` script must be reinstalled (`pip install -e .`).
   behavior is unchanged. With `flag`, an unsafe verdict becomes a `guardrail_decided` event with
   `action: flag`, and the turn continues.
 - **Guard failures:** `on_error` still decides them on its own.
-- **Root config:** `action = "flag"` (llamacpp keeps the 1B). The ollama profile uses
+- **Root config:** `action = "flag"` (llamacpp keeps the 1B), and `parallel = true` so the guard
+  runs alongside the main model (on Modal both cold-start together; steps that check new input
+  are not streamed). The ollama profile uses
   `llama-guard3:8b`; set `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block` with it.
 
 **Phase 20 – llama.cpp end-to-end fixes** [llm-providers, model-gateway, guardrails] — on `phase-20-single-system-message` (stacked on Phase 19)
