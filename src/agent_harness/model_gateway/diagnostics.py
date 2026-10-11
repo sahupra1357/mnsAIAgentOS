@@ -62,12 +62,18 @@ async def diagnose(
     check_tools: bool = True,
     check_cache: bool = True,
     max_tokens: int | None = None,
+    role: str = "chat",
 ) -> list[DiagnosticCheck]:
     """Run checks in order, stopping early when later checks cannot succeed.
 
     ``max_tokens`` raises the probes' output limits (default 16 for the completion,
     128 for the tool call). Thinking models may need several hundred, because their
     reasoning can count against the limit before they answer.
+
+    ``role`` is ``"embed"`` or ``"guard"`` for a companion profile (``NAME.embed`` /
+    ``NAME.guard``): after the connection checks, an embedding model gets one embedding
+    request and a guard model one classification, instead of the chat, tool-call, and cache
+    probes, which they cannot pass.
     """
 
     checks: list[DiagnosticCheck] = []
@@ -93,6 +99,12 @@ async def diagnose(
                 return checks
             checks.append(await _check_model_listed(http_client, transport))
 
+    if role == "embed":
+        checks.append(await _check_embeddings(client, client_model(client)))
+        return checks
+    if role == "guard":
+        checks.append(await _check_guard(client, client_model(client)))
+        return checks
     completion = await _check_completion(client, max_tokens or 16)
     checks.append(completion)
     if completion.status is CheckStatus.FAIL:
@@ -299,23 +311,36 @@ async def companion_checks(config: Any, profile: str, models: Any) -> list[Diagn
     checks: list[DiagnosticCheck] = []
     embed_name = config.companion(profile, "embed")
     if embed_name is not None:
-        served = config.models[embed_name]
-        try:
-            vectors = await models.resolve(embed_name).embed(["agent harness embedding check"])
-            dims = len(vectors[0]) if vectors else 0
-            checks.append(DiagnosticCheck("embeddings", CheckStatus.OK if dims else CheckStatus.FAIL,
-                                          f"{served.model}: {dims} dimensions"))
-        except Exception as exc:  # noqa: BLE001 - every failure is reported, none raised
-            checks.append(DiagnosticCheck("embeddings", CheckStatus.FAIL, f"{served.model}: {_brief(exc)}"))
+        checks.append(await _check_embeddings(models.resolve(embed_name), config.models[embed_name].model))
     guard_name = config.companion(profile, "guard")
     if guard_name is not None:
-        served = config.models[guard_name]
-        try:
-            response = await models.resolve(guard_name).complete(ModelRequest(
-                messages=(Message(Role.USER, "Hello"),), max_output_tokens=32))
-            verdict = (response.content or "").strip().splitlines()[:1]
-            checks.append(DiagnosticCheck("guard model", CheckStatus.OK,
-                                          f"{served.model} answered {verdict[0][:40]!r}" if verdict else served.model))
-        except Exception as exc:  # noqa: BLE001
-            checks.append(DiagnosticCheck("guard model", CheckStatus.FAIL, f"{served.model}: {_brief(exc)}"))
+        checks.append(await _check_guard(models.resolve(guard_name), config.models[guard_name].model))
     return checks
+
+
+def client_model(client: Any) -> str:
+    """The model a client sends, for messages (clients without a profile report their class)."""
+
+    profile = getattr(client, "_profile", None) or getattr(client, "profile", None)
+    return str(getattr(profile, "model", None) or type(client).__name__)
+
+
+async def _check_embeddings(client: Any, model: str) -> DiagnosticCheck:
+    try:
+        vectors = await client.embed(["agent harness embedding check"])
+        dims = len(vectors[0]) if vectors else 0
+        return DiagnosticCheck("embeddings", CheckStatus.OK if dims else CheckStatus.FAIL,
+                               f"{model}: {dims} dimensions")
+    except Exception as exc:  # noqa: BLE001 - every failure is reported, none raised
+        return DiagnosticCheck("embeddings", CheckStatus.FAIL, f"{model}: {_brief(exc)}")
+
+
+async def _check_guard(client: Any, model: str) -> DiagnosticCheck:
+    try:
+        response = await client.complete(ModelRequest(
+            messages=(Message(Role.USER, "Hello"),), max_output_tokens=32))
+        verdict = (response.content or "").strip().splitlines()[:1]
+        return DiagnosticCheck("guard model", CheckStatus.OK,
+                               f"{model} answered {verdict[0][:40]!r}" if verdict else model)
+    except Exception as exc:  # noqa: BLE001
+        return DiagnosticCheck("guard model", CheckStatus.FAIL, f"{model}: {_brief(exc)}")

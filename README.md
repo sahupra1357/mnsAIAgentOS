@@ -252,7 +252,9 @@ Per provider:
     Meta approves manually). Unlike the 1B it does not flag ordinary coding prompts, so with the
     Modal profiles `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block` is usable.
 
-`agent-harness doctor` also checks the embedding and guard models.
+`agent-harness doctor` also checks the embedding and guard models. On a companion profile itself
+(`doctor --model-profile modal.embed` or `modal.guard`) it runs the connection checks plus one
+embedding or one guard classification, not the chat, tool-call, and cache probes.
 `AGENT_HARNESS_MODEL_PROFILE=ollama scripts/validate.sh` validates another provider end
 to end: smoke and benchmark entries without a `profile` follow the default.
 
@@ -375,12 +377,12 @@ profile, not a particular app:
   read when the program starts). `serve` and `/ui` send real requests to the same URLs.
 
 **Embeddings and guard on one L4 (optional).** `deploy/modal/shared_l4/vllm_companions_server.py`
-runs both companion models in one container: two vLLM processes (guard 80% of the GPU, embed
-10%), started one after the other, behind `router.py`, which sends `/v1/embeddings` to the embed
+runs both companion models in one container: two vLLM processes (guard 87% of the GPU, embed
+5%), started one after the other, behind `router.py`, which sends `/v1/embeddings` to the embed
 server and everything else to the guard, merges `/v1/models`, and opens the port only when both
 answer `/health`. Point `AGENT_HARNESS_MODEL__MODAL__EMBEDDING_ENDPOINT` and `..._GUARD_ENDPOINT`
 at its URL (`…--agent-harness-vllm-companions-serve.modal.run/v1`). One L4 instead of two, but
-the guard's KV cache drops to about 12k tokens, and both models start, idle, and redeploy
+the guard's KV cache drops to about 20k tokens (2.5 GiB), and both models start, idle, and redeploy
 together. The separate deployments stay the default; see `docs/DEPLOYMENT.md`.
 
 **Cheaper GPU option.** The script also has an FP8 preset (`Qwen/Qwen3.6-35B-A3B-FP8`, 37.5 GB,

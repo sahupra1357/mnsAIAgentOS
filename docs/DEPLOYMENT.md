@@ -187,10 +187,10 @@ For a single app, use Modal directly: `modal container list` then `modal contain
 both companion models in one container on one L4:
 
 ```
-router.py :8000 -- /v1/embeddings  -> embed vLLM :8001  (nomic-embed-text, 10% of the GPU)
+router.py :8000 -- /v1/embeddings  -> embed vLLM :8001  (nomic-embed-text, 5% of the GPU)
                 -- /v1/models      -> both lists merged (doctor checks the list)
                 -- /health         -> 200 only when both servers are healthy
-                -- everything else -> guard vLLM :8002  (Llama Guard 3 8B, 80% of the GPU)
+                -- everything else -> guard vLLM :8002  (Llama Guard 3 8B, 87% of the GPU)
 ```
 
 How it starts: the router starts the embed server, waits for its `/health`, then starts the
@@ -216,7 +216,7 @@ Trade-offs against the separate deployments:
 |---|---|---|
 | GPUs while both are used | 2 x L4 | 1 x L4 |
 | Embed cold start | its own, when memory is first used | none once the guard is up |
-| Guard KV cache | about 4 GB (85% of the GPU) | about 1.5 GB, roughly 12k tokens: `MAX_MODEL_LEN = 8192` and one or two checks at once; bursts queue |
+| Guard KV cache | about 3 GiB (85% of the GPU) | about 2.5 GiB, roughly 20k tokens: `MAX_MODEL_LEN = 8192` and two checks at once; bursts queue (at 80% it was 0.98 GiB and the guard did not start) |
 | Start, idle, scale, redeploy | each on its own | together; a bad guard update also takes down embeddings |
 | Moving parts | vLLM only | vLLM x 2 + router |
 
@@ -229,8 +229,11 @@ separate layout one container is one vLLM on one GPU, so the guard and embed sca
 (`MAX_CONTAINERS`). With the shared layout every added container carries both models on its own
 L4, so more guard capacity also brings another embed server.
 
-This layout has not been run on Modal yet. If the guard fails with too little KV cache memory,
-lower `EMBED_GPU_MEMORY` or `MAX_MODEL_LEN`, or set `GUARD_EXTRA_ARGS = ["--enforce-eager"]`.
+The first deploy (2026-10-11) used guard 0.80 / embed 0.10 and the guard failed: 15.0 GiB of
+weights, 0.35 GiB of CUDA graphs, and about 1.7 GiB of activations left 0.98 GiB of KV cache, under
+the 1.0 GiB one 8192-token request needs. The split is now 0.87 / 0.05 (the embed server measured
+0.4 GiB). If the guard still fails with too little KV cache memory, lower `MAX_MODEL_LEN`, or set
+`GUARD_EXTRA_ARGS = ["--enforce-eager"]` (no CUDA graphs: +0.35 GiB, slightly slower).
 
 ## Health
 

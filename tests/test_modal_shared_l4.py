@@ -214,7 +214,8 @@ class SharedDeploymentTests(unittest.TestCase):
         self.assertEqual(values["GPU"], "L4")
         # Each vLLM reserves its share at start; together they must leave room for CUDA contexts.
         self.assertLessEqual(values["EMBED_GPU_MEMORY"] + values["GUARD_GPU_MEMORY"], 0.92)
-        self.assertGreaterEqual(values["GUARD_GPU_MEMORY"], 0.80)  # 16 GB of weights + KV cache
+        # Measured: 0.80 left the guard 0.98 GiB of KV cache, under the 1.0 GiB 8192 tokens need.
+        self.assertGreaterEqual(values["GUARD_GPU_MEMORY"], 0.85)
         separate = constants(SCRIPTS / "vllm_guard_server.py")
         self.assertEqual(values["MAX_MODEL_LEN"], separate["MAX_MODEL_LEN"])
         self.assertEqual(values["VLLM_PACKAGE"], separate["VLLM_PACKAGE"])
@@ -275,6 +276,11 @@ class LifecycleScriptTests(unittest.TestCase):
                 result = subprocess.run(["bash", str(folder / name), "chat"], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 2, folder / name)
                 self.assertIn("takes no arguments", result.stderr)
+
+    def test_stop_does_not_wait_for_modal_confirmation(self) -> None:
+        # modal container stop asks "Are you sure?" and aborts without a terminal unless --yes.
+        for folder in (SCRIPTS, SHARED):
+            self.assertIn("modal container stop --yes", (folder / "stop.sh").read_text(encoding="utf-8"))
 
     def test_undeploy_asks_first(self) -> None:
         declined = subprocess.run(["bash", str(SCRIPTS / "undeploy.sh")], input="n\n",
