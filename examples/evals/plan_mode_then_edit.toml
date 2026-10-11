@@ -23,5 +23,6 @@ content = "hello.txt now says Hello, Falcon."
 
 [expect]
 tool_calls = ["read_file", "exit_plan", "apply_patch"]
+tool_calls_exact = ["read_file", "exit_plan", "apply_patch"]  # registry refactor gate (Phase 23): no extra calls
 output_contains = ["Hello, Falcon"]
 events_include = ["mode_changed", "file_snapshot"]

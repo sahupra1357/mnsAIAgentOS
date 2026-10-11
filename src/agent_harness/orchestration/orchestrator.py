@@ -85,6 +85,13 @@ from agent_harness.orchestration.structured_output import (
 )
 from agent_harness.tools.validation import ArgumentValidationError, validate_arguments
 from agent_harness.orchestration.interaction import ASK_USER_SPEC, ASK_USER_TOOL
+from agent_harness.orchestration.compaction import (
+    CompactionPolicy,
+    DefaultCompactionPolicy,
+    compaction_start,
+    valid_compaction_range,
+)
+from agent_harness.orchestration.handlers import ToolCallContext, ToolHandler, ToolHandlerRegistry
 from agent_harness.guardrails import GuardDecision, Guardrails
 from agent_harness.domain import (
     INVALID_ARGUMENTS_ERROR_KEY,
@@ -199,6 +206,11 @@ class OrchestratorSettings:
     # tool_choice="none" whose text is joined to the cut answer. 0 = off (the cut answer is
     # accepted as it is, and run_completed records answer_truncated).
     max_answer_continuations: int = 0
+    # Run the read-only calls of one reply concurrently even when pre_tool hooks exist: the
+    # hooks run up front (concurrently) and their decisions are recorded later, in call order,
+    # by the serial loop, so events are unchanged. Hooks then see calls out of order, which
+    # is why it is opt-in. Off: any pre_tool hook turns prefetching off (Phase 8 behavior).
+    prefetch_with_hooks: bool = False
 
     def __post_init__(self) -> None:
         if self.turn_max_steps is not None and self.turn_max_steps < 1:
@@ -356,6 +368,7 @@ class AgentOrchestrator:
         on_input_timeout: str = "deny",
         user_quotas: Callable[[str], Quota | None] | None = None,
         context_policy: ContextPolicy | None = None,
+        compaction: CompactionPolicy | None = None,
     ) -> None:
         self._models = models
         self._tools = tools
@@ -400,11 +413,71 @@ class AgentOrchestrator:
         self._system_context = system_context
         self._snapshots = snapshots
         self._summarizer = summarizer
+        # When and what to summarize (only used with a summarizer); see orchestration/compaction.py.
+        self._compaction: CompactionPolicy = compaction or DefaultCompactionPolicy()
         self._tool_loading = tool_loading or ToolLoadingPolicy()
         self._planning = planning or PlanningPolicy()
         self._quotas = dict(quotas or {})
         self._quota_check_seconds = quota_check_seconds
         self._usage_cache: dict[str, tuple[float, Any]] = {}
+        self._tool_handlers = ToolHandlerRegistry(self._builtin_tool_handlers())
+
+    def _builtin_tool_handlers(self) -> list[ToolHandler]:
+        """The orchestrator-owned tools, in the precedence the old ``if`` chain had."""
+
+        async def exit_plan(c: ToolCallContext) -> None:
+            await self._handle_exit_plan(c.run, c.events, c.call, c.spec, c.approved, c.attempt)
+
+        async def todos(c: ToolCallContext) -> None:
+            await self._write_todos(c.run, c.events, c.call, c.attempt)
+
+        async def submit(c: ToolCallContext) -> None:
+            await self._submit_result(c.run, c.events, c.call, c.attempt)
+
+        async def meta(c: ToolCallContext) -> None:
+            await self._meta_tool(c.run, c.events, c.call, c.attempt)
+
+        async def plan(c: ToolCallContext) -> None:
+            await self._plan_tool(c.run, c.events, c.call, c.attempt)
+
+        async def subagent(c: ToolCallContext) -> None:
+            await self._run_subagent(c.run, c.events, c.call, c.attempt)
+
+        return [
+            ToolHandler(frozenset({EXIT_PLAN_TOOL}), exit_plan, before_approval=True),
+            ToolHandler(frozenset({ASK_USER_TOOL}), self._ask_user_question, before_approval=True),
+            ToolHandler(frozenset({TODO_TOOL}), todos),
+            ToolHandler(frozenset({SUBMIT_RESULT_TOOL}), submit,
+                        applies=lambda run, call: run.output_schema is not None),
+            ToolHandler(frozenset(META_TOOLS), meta,
+                        applies=lambda run, call: self._tool_loading.dynamic),
+            ToolHandler(frozenset(PLAN_TOOLS), plan,
+                        applies=lambda run, call: run.planning or (
+                            call.name == CREATE_PLAN and self._offers_auto_plan(run))),
+            ToolHandler(frozenset({AGENT_TOOL}), subagent),
+        ]
+
+    def register_tool_handler(self, handler: ToolHandler, *, replace: bool = False) -> None:
+        """Add an orchestrator-owned tool (a control primitive) without changing ``_execute_tool``."""
+
+        self._tool_handlers.register(handler, replace=replace)
+
+    @property
+    def tool_handlers(self) -> ToolHandlerRegistry:
+        return self._tool_handlers
+
+    async def _ask_user_question(self, c: ToolCallContext) -> None:
+        """Pause with a question; answer() / resolve_approval() supply the tool result."""
+
+        try:
+            validate_arguments(c.call.arguments, c.spec.input_schema)
+        except ArgumentValidationError as exc:
+            result = ToolResult(c.call.id, c.call.name, ToolResultStatus.VALIDATION_ERROR,
+                                {"error": str(exc)}, f"Invalid question: {exc}")
+            self._append_tool_message(c.run, result)
+            await self._record_tool_result(c.run, c.events, result, attempt=c.attempt)
+            return
+        await self._request_approval(c.run, c.events, c.call, c.spec, kind="question")
 
     @property
     def context_builder(self) -> ContextBuilder:
@@ -518,7 +591,9 @@ class AgentOrchestrator:
             if not isinstance(key, str) or not isinstance(value, str):
                 raise ValueError("versions must map strings to strings")
             recorded_versions[key] = value
-        payload: dict[str, Any] = {"model_profile": model_profile, "versions": recorded_versions}
+        payload: dict[str, Any] = {"model_profile": model_profile, "versions": recorded_versions,
+                                   # The shape of the history (orchestration/replay.py), never text.
+                                   "message_roles": [m.role.value for m in initial_messages]}
         if selected_mode is not PermissionMode.DEFAULT:
             payload["mode"] = selected_mode.value
         if parent_run_id is not None:
@@ -831,12 +906,12 @@ class AgentOrchestrator:
         if pending:
             if await self._refuse_oversized_turn(run, events, pending):
                 return run.status.is_terminal
-            await self._prefetch_parallel(run, events, pending)
+            prefetched = await self._prefetch_parallel(run, events, pending)
             for call in pending:
                 if self._wall_limit_reached(run):
                     await self._exhaust_budget(run, events, "wall-clock limit")
                     return True
-                await self._execute_tool(run, events, call)
+                await self._execute_tool(run, events, call, prefetched=prefetched.get(call.id))
                 if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
                     return True
             return False
@@ -1551,8 +1626,9 @@ class AgentOrchestrator:
             client = self._models.resolve(run.model_profile)
             specs = self._specs_for(run)
             view = self._build_view(run, specs, events)
-            if self._summarizer is not None and view.omitted_through is not None:
-                if await self._summarize(run, events, view):
+            if self._summarizer is not None and self._compaction.should_compact(run, view):
+                span = self._compaction_range(run, view)
+                if span is not None and await self._summarize(run, events, view, span=span):
                     view = self._build_view(run, specs, events)
             def make_request(view: ContextView) -> ModelRequest:
                 request_messages = view.messages
@@ -1778,8 +1854,27 @@ class AgentOrchestrator:
             await self._fallback_or_fail(run, events)
         return True
 
+    def _compaction_range(self, run: RunRecord, view: ContextView) -> tuple[int, int] | None:
+        """The policy's range; a custom policy's range must continue the stored summary."""
+
+        span = self._compaction.range_to_compact(run, view)
+        if span is None or isinstance(self._compaction, DefaultCompactionPolicy):
+            return span  # the default range is the builder's own, as before Phase 23
+        start, end = span
+        expected = compaction_start(run)
+        if end == expected:
+            return None  # already summarized up to here: reuse the stored summary
+        if not valid_compaction_range(run.messages, start, end, expected):
+            return None
+        return span
+
     async def _summarize(
-        self, run: RunRecord, events: list[RunEvent], view: ContextView
+        self,
+        run: RunRecord,
+        events: list[RunEvent],
+        view: ContextView,
+        *,
+        span: tuple[int, int] | None = None,
     ) -> bool:
         """Replace the omitted range with a persisted summary; True if one was written.
 
@@ -1791,7 +1886,7 @@ class AgentOrchestrator:
         """
 
         assert self._summarizer is not None
-        start, target = view.omitted_from, view.omitted_through
+        start, target = span if span is not None else (view.omitted_from, view.omitted_through)
         if start is None or target is None or target <= start:
             return False
         for event in reversed(events):
@@ -1953,6 +2048,7 @@ class AgentOrchestrator:
             "attempt": attempt,
             "finish_reason": response.finish_reason.value,
             "tool_call_count": len(response.tool_calls),
+            "tool_call_ids": [call.id for call in response.tool_calls],
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
             "cost_usd": response.usage.cost_usd,
@@ -2255,7 +2351,12 @@ class AgentOrchestrator:
         await self._record_tool_result(run, events, result, attempt=0)
 
     async def _execute_tool(
-        self, run: RunRecord, events: list[RunEvent], call: ToolCall
+        self,
+        run: RunRecord,
+        events: list[RunEvent],
+        call: ToolCall,
+        *,
+        prefetched: _Prefetched | None = None,
     ) -> None:
         specs = self._spec_map(run)
         spec = specs.get(call.name)
@@ -2310,6 +2411,8 @@ class AgentOrchestrator:
                     arguments=dict(call.arguments),
                 ),
                 call_id=call.id,
+                outcome=prefetched.hook if prefetched is not None and prefetched.hooked else None,
+                precomputed=prefetched is not None and prefetched.hooked,
             )
             if hook is not None and hook.decision == "deny":
                 await self._deny_tool(run, events, call, hook.reason, source="hook")
@@ -2339,41 +2442,20 @@ class AgentOrchestrator:
             await self._record_tool_request(run, events, call, spec, attempt, extra=extra)
 
         approved = _tool_call_approved(events, run.step_count, call.id)
-        if call.name == EXIT_PLAN_TOOL:
-            await self._handle_exit_plan(run, events, call, spec, approved, attempt)
-            return
-        if call.name == ASK_USER_TOOL:
-            # Pauses; answer() / resolve_approval() supply the tool result.
-            try:
-                validate_arguments(call.arguments, spec.input_schema)
-            except ArgumentValidationError as exc:
-                result = ToolResult(call.id, call.name, ToolResultStatus.VALIDATION_ERROR,
-                                    {"error": str(exc)}, f"Invalid question: {exc}")
-                self._append_tool_message(run, result)
-                await self._record_tool_result(run, events, result, attempt=attempt)
-                return
-            await self._request_approval(run, events, call, spec, kind="question")
+        # Orchestrator-owned tools (orchestration/handlers.py): those that pause or decide
+        # approval themselves come before the permission pause, the others after it.
+        handler = self._tool_handlers.lookup(run, call, before_approval=True)
+        if handler is not None:
+            await handler.handle(ToolCallContext(run, events, call, spec, attempt, approved))
             return
         if permission.action == "ask" and not approved:
             await self._request_approval(run, events, call, spec, reason=permission.reason)
             return
         if permission.action == "allow":
             approved = True
-        if call.name == TODO_TOOL:
-            await self._write_todos(run, events, call, attempt)
-            return
-        if call.name == SUBMIT_RESULT_TOOL and run.output_schema is not None:
-            await self._submit_result(run, events, call, attempt)
-            return
-        if call.name in META_TOOLS and self._tool_loading.dynamic:
-            await self._meta_tool(run, events, call, attempt)
-            return
-        if call.name in PLAN_TOOLS and (run.planning or (
-                call.name == CREATE_PLAN and self._offers_auto_plan(run))):
-            await self._plan_tool(run, events, call, attempt)
-            return
-        if call.name == AGENT_TOOL:
-            await self._run_subagent(run, events, call, attempt)
+        handler = self._tool_handlers.lookup(run, call, before_approval=False)
+        if handler is not None:
+            await handler.handle(ToolCallContext(run, events, call, spec, attempt, approved))
             return
 
         if spec.writes_paths and self._snapshots is not None:
@@ -2382,11 +2464,17 @@ class AgentOrchestrator:
         idempotency_key = f"{run.id}:{run.step_count}:{call.id}"
         tool_started = self._monotonic()
         try:
-            result = await self._tools.execute(
-                call,
-                idempotency_key=idempotency_key,
-                approved=approved,
-            )
+            if (prefetched is not None and prefetched.result is not None
+                    and prefetched.call.arguments == call.arguments):
+                # Run concurrently by the prefetch pass with this key and these arguments.
+                result = prefetched.result
+                tool_started -= prefetched.duration_seconds
+            else:
+                result = await self._tools.execute(
+                    call,
+                    idempotency_key=idempotency_key,
+                    approved=approved,
+                )
             _validate_tool_result(result, call)
         except TimeoutError as exc:
             result = ToolResult(
@@ -2453,7 +2541,8 @@ class AgentOrchestrator:
             )
             contexts = [c for c in (hook_context, post.context if post else "") if c]
             artifact = await self._append_tool_result(run, result, suffix="\n\n".join(contexts))
-        await self._record_tool_result(run, events, result, attempt=attempt, artifact=artifact)
+        await self._record_tool_result(run, events, result, attempt=attempt, artifact=artifact,
+                                       extra={"retrying": True} if should_retry else None)
 
         if should_retry:
             await self._execute_tool(run, events, call)
@@ -2497,6 +2586,7 @@ class AgentOrchestrator:
             specs += (ASK_USER_SPEC,)
         if self._offers_auto_plan(run):
             specs += (AUTO_CREATE_PLAN_SPEC,)
+        specs += self._tool_handlers.offered(run)
         if run.planning:
             if run.plan is None:
                 # Explore read-only, then plan: nothing can change before the plan exists.
@@ -2637,13 +2727,19 @@ class AgentOrchestrator:
         hook_input: HookInput,
         *,
         call_id: str | None = None,
+        outcome: HookResult | None = None,
+        precomputed: bool = False,
     ) -> HookResult | None:
-        """Run hooks for an event and record the decision; None if none apply."""
+        """Run hooks for an event and record the decision; None if none apply.
+
+        ``precomputed``: the hooks already ran (the prefetch pass); ``outcome`` is what
+        they returned (None: none applied), and only the recording happens here.
+        """
 
         if self._hooks is None or not self._hooks.has(hook_input.event):
             return None
-        result = await self._hooks.run(hook_input)
-        if not result.ran:
+        result = outcome if precomputed else await self._hooks.run(hook_input)
+        if result is None or not result.ran:
             return None
         payload = {"hook_event": hook_input.event.value, **result.as_payload()}
         if call_id is not None:
@@ -2892,23 +2988,32 @@ class AgentOrchestrator:
 
     async def _prefetch_parallel(
         self, run: RunRecord, events: list[RunEvent], pending: Sequence[ToolCall]
-    ) -> None:
+    ) -> dict[str, _Prefetched]:
         """Run independent work from one model response concurrently.
 
         * Read-only tool calls are executed together up front with the same
-          idempotency keys the sequential loop uses, so the loop then gets the
-          recorded results instantly; events, hooks, and ordering are unchanged.
+          idempotency keys the sequential loop uses. Their results are returned by
+          call id, and the loop records them in call order, so events, post-tool
+          hooks, and ordering are unchanged.
+        * With ``pre_tool`` hooks, read-only calls are prefetched only when
+          ``prefetch_with_hooks`` is on: the hooks run first (concurrently), a call
+          is executed with the arguments its hook left, and the loop records each
+          hook decision in order instead of running the hook again. Without the
+          setting, a ``pre_tool`` hook turns prefetching off.
         * Several ``agent`` calls create their children one by one, then run
-          them concurrently; the loop then collects each finished child.
+          them concurrently; the loop then collects each finished child (never
+          with ``pre_tool`` hooks: a hook decides before a child exists).
 
-        Skipped when a ``pre_tool`` hook exists (it could change arguments or
-        deny a call) and for calls a permission rule denies or asks about.
+        Calls a permission rule denies or asks about, orchestrator-owned tools,
+        duplicates, and calls the repeated-call check would refuse stay serial.
         """
 
-        if len(pending) < 2 or (self._hooks is not None and self._hooks.has(HookEvent.PRE_TOOL)):
-            return
+        hooked = self._hooks is not None and self._hooks.has(HookEvent.PRE_TOOL)
+        if len(pending) < 2 or (hooked and not self._settings.prefetch_with_hooks):
+            return {}
         specs = self._spec_map(run)
-        reads: list[tuple[ToolCall, bool]] = []
+        limit = self._settings.max_identical_tool_calls
+        candidates: list[tuple[ToolCall, ToolSpec]] = []
         agents: list[ToolCall] = []
         signatures: set[str] = set()
         for call in pending:
@@ -2920,27 +3025,70 @@ class AgentOrchestrator:
             if spec.risk is ToolRisk.READ_ONLY and _call_signature(call) in signatures:
                 continue  # a duplicate in this reply reuses its twin's result instead
             signatures.add(_call_signature(call))
-            permission = self._permission(spec, call, run.mode, run)
-            if permission.action in {"deny", "ask"}:
-                continue
+            if limit is not None and _identical_prior_calls(run.messages, call, specs) >= limit:
+                continue  # the sequential loop refuses it
             if call.name == AGENT_TOOL:
-                agents.append(call)
+                if not hooked and self._permission(spec, call, run.mode, run).action not in {"deny", "ask"}:
+                    agents.append(call)
             elif (
                 spec.risk is ToolRisk.READ_ONLY
                 and not spec.writes_paths
-                and call.name not in _ORCHESTRATOR_TOOLS
+                and not self._tool_handlers.claims(call.name)
             ):
-                reads.append((call, permission.action == "allow"))
-        if len(reads) >= 2:
-            await asyncio.gather(
+                candidates.append((call, spec))
+
+        hook_results: dict[str, HookResult | None] = {}
+        if hooked and len(candidates) >= 2:
+            assert self._hooks is not None
+            outcomes = await asyncio.gather(
                 *(
-                    self._tools.execute(
-                        call, idempotency_key=f"{run.id}:{run.step_count}:{call.id}", approved=approved
-                    )
-                    for call, approved in reads
+                    self._hooks.run(HookInput(
+                        event=HookEvent.PRE_TOOL, run_id=run.id, step=run.step_count,
+                        model_profile=run.model_profile, tool=call.name, call_id=call.id,
+                        arguments=dict(call.arguments),
+                    ))
+                    for call, _ in candidates
                 ),
                 return_exceptions=True,
             )
+            for (call, _), outcome in zip(candidates, outcomes):
+                if isinstance(outcome, BaseException):
+                    continue  # the sequential loop runs this hook again
+                hook_results[call.id] = outcome if outcome.ran else None
+
+        reads: list[tuple[ToolCall, bool]] = []
+        prefetched: dict[str, _Prefetched] = {}
+        for call, spec in candidates:
+            final = call
+            if hooked:
+                if call.id not in hook_results:
+                    continue
+                hook = hook_results[call.id]
+                prefetched[call.id] = _Prefetched(call=call, hook=hook, hooked=True)
+                if hook is not None and hook.decision == "deny":
+                    continue
+                if hook is not None and hook.arguments is not None:
+                    final = replace(call, arguments=dict(hook.arguments))
+            permission = self._permission(spec, final, run.mode, run)
+            if permission.action in {"deny", "ask"}:
+                continue
+            reads.append((final, permission.action == "allow"))
+        if len(reads) >= 2:
+            async def timed(call: ToolCall, approved: bool) -> tuple[ToolResult, float]:
+                started = self._monotonic()
+                result = await self._tools.execute(
+                    call, idempotency_key=f"{run.id}:{run.step_count}:{call.id}", approved=approved
+                )
+                return result, self._monotonic() - started
+
+            done = await asyncio.gather(*(timed(call, approved) for call, approved in reads),
+                                        return_exceptions=True)
+            for (call, _), ran in zip(reads, done):
+                if isinstance(ran, BaseException):
+                    continue  # the sequential loop runs it again and reports the error
+                entry = prefetched.get(call.id) or _Prefetched(call=call)
+                prefetched[call.id] = replace(entry, call=call, result=ran[0],
+                                              duration_seconds=ran[1])
         if len(agents) >= 2:
             children: list[str] = []
             for call in agents:
@@ -2955,6 +3103,7 @@ class AgentOrchestrator:
                     children.append(child_id)
             if len(children) >= 2:
                 await self._run_children(children)
+        return prefetched
 
     async def _run_children(self, child_ids: Sequence[str]) -> list[RunRecord]:
         """Run children concurrently, at most ``max_parallel`` at a time (0: all at once)."""
@@ -4240,6 +4389,23 @@ def _has_pending_model_attempt(events: Sequence[RunEvent], step: int) -> bool:
 
 _QUOTA_WINDOW = timedelta(days=1)
 _END_USER = re.compile(r"[A-Za-z0-9._@+-]{1,128}")
+@dataclass(frozen=True, slots=True)
+class _Prefetched:
+    """What the prefetch pass did for one call of a reply (Phase 23a).
+
+    ``hooked``: its pre_tool hooks ran (``hook`` is their result, None if none applied);
+    ``call`` has the arguments the hook left; ``result`` is the tool's result when it ran.
+    """
+
+    call: ToolCall
+    hook: HookResult | None = None
+    hooked: bool = False
+    result: ToolResult | None = None
+    duration_seconds: float = 0.0
+
+
+# The built-in orchestrator-owned tools; the handler registry is authoritative (a test
+# checks it covers these).
 _ORCHESTRATOR_TOOLS = frozenset(
     {AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, SUBMIT_RESULT_TOOL, ASK_USER_TOOL, *META_TOOLS, *PLAN_TOOLS}
 )

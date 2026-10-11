@@ -407,8 +407,17 @@ concurrently first:
 - **`agent` calls:** their subagents are created one by one and then run together, with
   the parent's remaining tokens and cost split between them.
 
-Calls that a rule denies or asks about are not prefetched, and nothing is prefetched when
-a `pre_tool` hook is configured. Events and ordering are the same as without prefetch.
+Calls that a rule denies or asks about are not prefetched. With a `pre_tool` hook, nothing
+is prefetched unless `[orchestrator] prefetch_with_hooks = true` (Phase 23a, on in the root
+config): then the hooks of the read-only calls run first, concurrently, a call runs with the
+arguments its hook left (none if it denied), and the ordered loop records each hook decision
+instead of running the hook again. `_prefetch_parallel` returns the results by call id, and
+the loop uses them only when the final arguments match. Events and ordering are the same as
+without prefetch.
+
+Orchestrator-owned tools (`exit_plan`, `ask_user`, `todo_write`, `submit_result`, meta-tools,
+plan tools, `agent`) are `ToolHandler`s in a registry (`orchestration/handlers.py`, Phase 23b);
+`register_tool_handler()` adds one without changing `_execute_tool`.
 
 Each tool call then goes through these checks, in order:
 

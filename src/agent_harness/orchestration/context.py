@@ -359,6 +359,12 @@ def _latest_request_block(message: Message) -> str:
     return f"\n\n[Latest user message - answer this one]\n{message.content.strip()}"
 
 
+def pinned_head_end(messages: Sequence[Message]) -> int:
+    """Index after the leading system messages and the first user message (always kept)."""
+
+    return _pinned_head_end(messages)
+
+
 def _pinned_head_end(messages: Sequence[Message]) -> int:
     """Index after the leading system messages and the first user message."""
 

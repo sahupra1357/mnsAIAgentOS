@@ -297,6 +297,18 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   skills, templates, and tool modules from `.agent-harness/` (copies of the `examples/` files;
   `.gitignore` tracks those subdirectories and still ignores the runtime state there). Never point
   the root config back at `examples/`; `tests/test_full_config.py` fails if it does.
+- **Orchestrator seams (Phase 23).**
+  - **Parallel reads with hooks:** `[orchestrator] prefetch_with_hooks` (off in code, on in the root
+    config). Before it, the root config's audit `pre_tool` hook turned prefetching off entirely.
+    Hooks run concurrently first; decisions are recorded in call order by the serial loop.
+  - **Tool handlers:** orchestrator-owned tools are registered `ToolHandler`s
+    (`orchestration/handlers.py`); add new ones with `register_tool_handler()`.
+  - **Compaction:** `CompactionPolicy` (`orchestration/compaction.py`); the default is the old
+    trigger. Custom ranges must continue the stored summary.
+  - **Message skeleton:** events never hold message text, so `run.messages` cannot be rebuilt
+    from them; its shape can (`orchestration/replay.py`). A new code path that changes
+    `run.messages` needs an event `derive_message_skeleton` understands, or the scenario evals fail.
+  - **Evals:** `[expect] tool_calls_exact` (no extra calls); every scenario checks the skeleton.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A
@@ -773,6 +785,16 @@ An installed `agent-harness` script must be reinstalled (`pip install -e .`).
 2. `/ui` 👍/👎 → `POST /runs/{id}/feedback` → `user_feedback` scores on the turn's root observation.
 3. `agent-harness-bench run --langfuse` → dataset items + experiment traces + scores.
 4. LLM-as-a-judge is configured in the Langfuse UI on root observations (docs/LANGFUSE.md).
+
+**Phase 23 – Orchestrator seams** [durable-agent-orchestration, planning-delegation, context-management, harness-verification] — on `phase-23-orchestrator-seams`
+From an architecture review comparing harnesses; no rewrite, seams that stop `_execute_tool` growing.
+1. 23a: read-only calls prefetched with `pre_tool` hooks (`prefetch_with_hooks`); prefetch returns its results.
+2. 23b: handler registry for orchestrator-owned tools (`ToolHandler`, `register_tool_handler`).
+3. 23c: `CompactionPolicy` with `DefaultCompactionPolicy` (old behavior).
+4. 23d: message skeleton derived from events (`message_roles`, `tool_call_ids`, `retrying` payload
+   fields); full event sourcing deferred.
+5. Evals: `tool_calls_exact`, skeleton check per scenario, `full_config_parallel_reads_with_hooks`.
+Tests: `tests/test_orchestrator_seams.py`. Also fixed ruff/mypy errors that were already on `main`.
 
 ## Validation
 

@@ -15,5 +15,6 @@ content = "There are 3 words."
 
 [expect]
 tool_calls = ["search_tools", "load_tools", "word_count"]
+tool_calls_exact = ["search_tools", "load_tools", "word_count"]  # registry refactor gate (Phase 23): no extra calls
 output_contains = ["3 words"]
 events_include = ["tools_loaded"]

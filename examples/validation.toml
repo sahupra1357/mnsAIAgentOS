@@ -265,7 +265,7 @@ min_behavior_accuracy = 0.6
 name = "core"
 description = "Agent loop, durable state, retries, budgets, runaway guards, tool runtime"
 tests = ["test_orchestrator", "test_config", "test_dotenv_profile_switch", "test_durability", "test_reliability", "test_runaway_guards",
-         "test_persistence", "test_store_conformance", "test_tools"]
+         "test_persistence", "test_store_conformance", "test_tools", "test_orchestrator_seams"]
 scenarios = ["calculator", "transient_model_failure", "unknown_tool_recovery",
              "repeated_call_refusal", "tool_calls_per_reply"]
 benchmarks = ["gsm8k"]
@@ -297,7 +297,7 @@ name = "hooks-permissions"
 description = "Command hooks, permission rules and modes, plan mode"
 tests = ["test_hooks_permissions"]
 scenarios = ["full_config_read_with_hooks", "hook_denies_command", "permission_deny_rule",
-             "permission_ask_rule", "plan_mode_then_edit"]
+             "permission_ask_rule", "plan_mode_then_edit", "full_config_parallel_reads_with_hooks"]
 
 [[feature]]
 name = "interaction"

@@ -11,5 +11,6 @@ content = "Following the release-notes skill: grouped into Added, Changed, Fixed
 
 [expect]
 tool_calls = ["load_skill"]
+tool_calls_exact = ["load_skill"]  # registry refactor gate (Phase 23): no extra calls
 output_contains = ["release-notes"]
 events_include = ["tool_responded"]
