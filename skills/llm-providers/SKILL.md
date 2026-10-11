@@ -226,15 +226,16 @@ guard_model = "llama-guard3:1b"
 [models.modal]              # one deployment = one model: three deployments, one profile
 embedding_model = "nomic-ai/nomic-embed-text-v1.5"
 embedding_endpoint = "https://WORKSPACE--agent-harness-vllm-embed-serve.modal.run/v1"
-guard_model = "meta-llama/Llama-Guard-3-1B"
+guard_model = "meta-llama/Llama-Guard-3-8B"
 guard_endpoint = "https://WORKSPACE--agent-harness-vllm-guard-serve.modal.run/v1"
 ```
 
 Modal deploy scripts:
 - `deploy/modal/vllm_embed_server.py`: uses `--runner pooling --trust-remote-code`
   (NomicBertModel). Checked against the vLLM 0.30.0 source.
-- `deploy/modal/vllm_guard_server.py`: Llama Guard 3 1B, which is gated, so the
-  `agent-harness-hf` secret must hold `HF_TOKEN`.
+- `deploy/modal/vllm_guard_server.py`: Llama Guard 3 **8B** on an L4 (16 GB of weights; the 1B
+  misreads code). Each Llama Guard size is gated with manual approval, so the `agent-harness-hf`
+  secret's `HF_TOKEN` account needs access to the 8B itself.
 
 They share the `agent-harness-llm` bearer secret and proxy auth with the chat deployment.
 Changing `models.toml` never requires a redeploy; only the model a deployment serves does.

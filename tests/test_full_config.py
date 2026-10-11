@@ -211,6 +211,7 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(chat["MAX_MODEL_LEN"], modal.context_window)
         self.assertEqual(constants("vllm_embed_server.py")["MODEL_NAME"], modal.embedding_model)
         self.assertEqual(constants("vllm_guard_server.py")["MODEL_NAME"], modal.guard_model)
+        self.assertEqual(modal.guard_model, "meta-llama/Llama-Guard-3-8B")  # the 1B misreads code
         self.assertIn("deploy/modal/vllm_server.py", FULL.read_text())
         self.assertNotIn("examples/modal", FULL.read_text())
         for name in ("vllm_server.py", "vllm_embed_server.py", "vllm_guard_server.py", "sglang_server.py"):

@@ -100,6 +100,10 @@ action = "block"           # "flag": record an unsafe verdict and let the turn g
   src/agent_harness/cli/repl.py" as `violent_crimes`), while the 8B flagged none and caught
   12 of 12 harmful prompts. The 8B does not fit next to a 27B chat model on a 36 GB Mac.
   `on_error` still decides guard failures on its own.
+- **On Modal the guard is the 8B** (`deploy/modal/vllm_guard_server.py`, an L4; the `modal` and
+  `modal_shared` profiles use it). There, set `AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block`
+  in `.env` to refuse unsafe input instead of only flagging it. The action is one setting for all
+  profiles, so switch it back (or remove the line) when you return to `llamacpp` and its 1B.
 - **`parallel = true` (root config).** New input is checked while the main model answers;
   an unsafe verdict with `block` discards the answer before anything is recorded. On Modal the
   guard's container and the chat model's then cold-start together (on 2026-10-10 the guard's
