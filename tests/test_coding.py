@@ -109,9 +109,9 @@ class CodingToolTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(await message("read_file", {"path": "data.bin"}), "not a UTF-8 text file")
             self.assertIn(
-                "no such file or directory: nowhere",
-                await message("apply_patch", {"path": "nowhere/new.py", "new_text": "x",
-                                              "create": True}, approved=True),
+                "no such file or directory: nowhere/old.py",  # editing needs the file; creating makes folders
+                await message("apply_patch", {"path": "nowhere/old.py", "old_text": "a", "new_text": "x"},
+                              approved=True),
             )
             self.assertIn(
                 "no such file or directory: build",
@@ -259,6 +259,29 @@ class GuardrailTests(unittest.TestCase):
                     boundary.read_file("locked.txt")
             finally:
                 locked.chmod(0o600)
+
+    def test_creating_a_file_makes_missing_folders_inside_the_workspace(self) -> None:
+        # 2026-10-11: "create scratch/fib.py" failed because scratch/ did not exist, and the model
+        # put the file in examples/ instead.
+        import os
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            (root / "notes.txt").write_text("x", encoding="utf-8")
+            os.symlink(outside, root / "escape")
+            boundary = WorkspaceBoundary(root)
+            result = boundary.apply_patch("scratch/deep/fib.py", old_text="", new_text="print(1)\n", create=True)
+            self.assertEqual(result["path"], "scratch/deep/fib.py")
+            self.assertEqual((root / "scratch" / "deep" / "fib.py").read_text(encoding="utf-8"), "print(1)\n")
+            for bad, reason in ((".git/hooks/x.py", "protected"), ("../out/x.py", "inside the workspace"),
+                                ("notes.txt/sub/x.py", "not a directory"), ("scratch/new/.env", "credential"),
+                                ("escape/new/x.py", "escapes the workspace")):
+                with self.subTest(path=bad), self.assertRaisesRegex(WorkspaceViolation, reason):
+                    boundary.apply_patch(bad, old_text="", new_text="x", create=True)
+            self.assertEqual(list(Path(outside).iterdir()), [])  # nothing written through the symlink
+            self.assertFalse((root / ".git" / "hooks").exists())  # refused paths make no folders
+            self.assertFalse((root / "scratch" / "new").exists())
 
     def test_docker_config_rejects_unsafe_values(self) -> None:
         with self.assertRaises(ValueError):

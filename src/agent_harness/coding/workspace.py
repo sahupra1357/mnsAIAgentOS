@@ -116,7 +116,9 @@ class WorkspaceBoundary:
         new_text: str,
         create: bool = False,
     ) -> dict[str, Any]:
-        path = self._resolve(relative_path, must_exist=not create)
+        # A new file may go into folders that do not exist yet (created below, after every check):
+        # on 2026-10-11 "create scratch/fib.py" failed and the model wrote into examples/ instead.
+        path = self._resolve_new(relative_path) if create else self._resolve(relative_path, must_exist=True)
         self._assert_writable_target(path)
         if len(new_text.encode("utf-8")) > self.max_file_bytes:
             raise WorkspaceViolation("resulting file would exceed the size limit")
@@ -201,6 +203,33 @@ class WorkspaceBoundary:
         if not resolved.is_relative_to(self.root):
             raise WorkspaceViolation("path escapes the workspace")
         return resolved
+
+    def _resolve_new(self, relative_path: str) -> Path:
+        """Resolve a file to create, whose parent folders may not exist yet.
+
+        The deepest existing ancestor is resolved strictly (so a symlink cannot lead outside the
+        workspace) and must be inside it; the missing parts are appended as plain names. The
+        caller still checks protected folders and credential-like names before anything is made.
+        """
+
+        if not isinstance(relative_path, str) or not relative_path.strip():
+            raise WorkspaceViolation("path must be a non-empty relative string")
+        raw = Path(relative_path)
+        if raw.is_absolute() or ".." in raw.parts:
+            raise WorkspaceViolation("path must stay inside the workspace")
+        existing = self.root / raw.parent
+        missing: list[str] = []
+        while not existing.exists():
+            if existing.is_symlink():  # a dangling link: never follow or replace it
+                raise WorkspaceViolation("path goes through a broken symlink")
+            missing.insert(0, existing.name)
+            existing = existing.parent
+        if not existing.is_dir():
+            raise WorkspaceViolation(f"not a directory: {existing.relative_to(self.root).as_posix() if existing.is_relative_to(self.root) else relative_path}")
+        base = existing.resolve(strict=True)
+        if not base.is_relative_to(self.root):
+            raise WorkspaceViolation("path escapes the workspace")
+        return base.joinpath(*missing, raw.name)
 
     def _assert_readable_file(self, path: Path) -> None:
         if not path.is_file() or path.is_symlink():

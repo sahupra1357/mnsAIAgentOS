@@ -1178,7 +1178,7 @@ Then run a coding request:
   "Inspect the repository, fix the failing tests, and summarize the diff."
 ```
 
-The agent can read and search files, inspect Git status/diffs, apply exact text patches, run allowlisted commands/tests, create commits, and optionally create pull requests through `gh`. Read-only tools run automatically. Writes and execution pause the durable run and print an approval request:
+The agent can read and search files, inspect Git status/diffs, apply exact text patches (creating a new file also creates its missing folders), run allowlisted commands/tests, create commits, and optionally create pull requests through `gh`. Read-only tools run automatically. Writes and execution pause the durable run and print an approval request:
 
 ```text
 approval_required={"call_id":"...","tool":"apply_patch","risk":"side_effect",...}
