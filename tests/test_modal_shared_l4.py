@@ -226,48 +226,62 @@ class SharedDeploymentTests(unittest.TestCase):
 
 
 class LifecycleScriptTests(unittest.TestCase):
-    SCRIPTS = ("deploy.sh", "undeploy.sh", "start.sh", "stop.sh")
+    """Two separate script sets: deploy/modal/scripts/ (embed, guard, H200 chat) and
+    deploy/modal/shared_l4/ (the companions app only). Neither takes app arguments."""
 
-    def test_app_names_and_paths_match_the_deploy_files(self) -> None:
-        helper = (SCRIPTS / "_apps.sh").read_text(encoding="utf-8")
+    NAMES = ("deploy.sh", "undeploy.sh", "start.sh", "stop.sh")
+
+    def bash(self, helper: Path, command: str) -> str:
+        return subprocess.run(["bash", "-c", f'source "{helper}"; {command}'],
+                              capture_output=True, text=True, check=True).stdout
+
+    @staticmethod
+    def app_name_in(path: str) -> str:
+        app = re.search(r'modal\.App\("([^"]+)"\)', (ROOT / path).read_text(encoding="utf-8"))
+        assert app is not None, path
+        return app.group(1)
+
+    def test_separate_set_names_the_three_separate_apps_in_order(self) -> None:
+        helper = SCRIPTS / "_apps.sh"
         for key, path in (("embed", "deploy/modal/vllm_embed_server.py"),
                           ("guard", "deploy/modal/vllm_guard_server.py"),
-                          ("chat", "deploy/modal/vllm_server.py"),
-                          ("companions", "deploy/modal/shared_l4/vllm_companions_server.py")):
-            app = re.search(r'modal\.App\("([^"]+)"\)', (ROOT / path).read_text(encoding="utf-8"))
-            assert app is not None, path
-            output = subprocess.run(
-                ["bash", "-c", f'source "{SCRIPTS / "_apps.sh"}"; app_name {key}; app_script {key}'],
-                capture_output=True, text=True, check=True).stdout.split()
-            self.assertEqual(output, [app.group(1), str(ROOT / path)], key)
-        self.assertIn('apps=(embed guard chat)', helper)  # the default order
-        self.assertIn('apps=(companions chat)', helper)
+                          ("chat", "deploy/modal/vllm_server.py")):
+            out = self.bash(helper, f"app_name {key}; app_script {key}").split()
+            self.assertEqual(out, [self.app_name_in(path), str(ROOT / path)], key)
+        self.assertEqual(self.bash(helper, 'echo "${START_ORDER[*]}"; echo "${STOP_ORDER[*]}"').splitlines(),
+                         ["embed guard chat", "chat guard embed"])
+        self.assertNotIn("companions", helper.read_text(encoding="utf-8").split("nothing here touches it")[1])
+
+    def test_shared_set_names_only_the_companions_app(self) -> None:
+        helper = SHARED / "_apps.sh"
+        path = "deploy/modal/shared_l4/vllm_companions_server.py"
+        out = self.bash(helper, 'echo "$APP_NAME"; echo "$APP_SCRIPT"; echo "${PROFILES[*]}"').splitlines()
+        self.assertEqual(out, [self.app_name_in(path), str(ROOT / path), "modal.guard modal.embed"])
+        for name in self.NAMES:
+            text = (SHARED / name).read_text(encoding="utf-8")
+            for other in ("vllm_server.py", "vllm_embed_server.py", "vllm_guard_server.py", '"modal"'):
+                self.assertNotIn(other, text, f"shared_l4/{name} mentions {other}")
 
     def test_scripts_parse_and_are_executable(self) -> None:
-        for name in self.SCRIPTS:
-            path = SCRIPTS / name
-            subprocess.run(["bash", "-n", str(path)], check=True)
-            self.assertTrue(path.stat().st_mode & 0o111, name)
+        for folder in (SCRIPTS, SHARED):
+            for name in self.NAMES:
+                path = folder / name
+                subprocess.run(["bash", "-n", str(path)], check=True)
+                self.assertTrue(path.stat().st_mode & 0o111, path)
 
-    def test_selection_and_reverse_order(self) -> None:
-        def pick(*args: str) -> list[str]:
-            command = f'source "{SCRIPTS / "_apps.sh"}"; select_apps "$@"; echo "${{apps[*]}}"; reversed_apps'
-            out = subprocess.run(["bash", "-c", command, "x", *args],
-                                 capture_output=True, text=True, check=True).stdout.splitlines()
-            return [out[0], " ".join(out[1:])]
-
-        self.assertEqual(pick(), ["embed guard chat", "chat guard embed"])
-        self.assertEqual(pick("--shared"), ["companions chat", "chat companions"])
-        self.assertEqual(pick("guard"), ["guard", "guard"])
-        bad = subprocess.run(["bash", "-c", f'source "{SCRIPTS / "_apps.sh"}"; select_apps nope', "x"],
-                             capture_output=True, text=True)
-        self.assertEqual(bad.returncode, 2)
+    def test_scripts_take_no_arguments(self) -> None:
+        for folder in (SCRIPTS, SHARED):
+            for name in self.NAMES:
+                result = subprocess.run(["bash", str(folder / name), "chat"], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, folder / name)
+                self.assertIn("takes no arguments", result.stderr)
 
     def test_undeploy_asks_first(self) -> None:
-        declined = subprocess.run(["bash", str(SCRIPTS / "undeploy.sh"), "guard"], input="n\n",
+        declined = subprocess.run(["bash", str(SCRIPTS / "undeploy.sh")], input="n\n",
                                   capture_output=True, text=True)
         self.assertEqual(declined.returncode, 1)
         self.assertIn("nothing undeployed", declined.stdout)
+        self.assertIn("read -r -p", (SHARED / "undeploy.sh").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

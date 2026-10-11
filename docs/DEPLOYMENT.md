@@ -114,23 +114,35 @@ embed and guard). The deploy files are in `deploy/modal/`, grouped as:
 | Folder | Contents |
 |---|---|
 | `deploy/modal/` | one deployment per model: `vllm_server.py` (chat, H200), `vllm_embed_server.py` (L4), `vllm_guard_server.py` (L4), `sglang_server.py` |
-| `deploy/modal/scripts/` | `deploy.sh`, `start.sh`, `stop.sh`, `undeploy.sh` (and `_apps.sh`, which they share) |
-| `deploy/modal/shared_l4/` | `vllm_companions_server.py` + `router.py`: embeddings and the guard on one L4 |
+| `deploy/modal/scripts/` | lifecycle scripts for the three separate apps: `deploy.sh`, `start.sh`, `stop.sh`, `undeploy.sh` (+ `_apps.sh`) |
+| `deploy/modal/shared_l4/` | `vllm_companions_server.py` + `router.py` (embeddings and the guard on one L4), and their own `deploy.sh`, `start.sh`, `stop.sh`, `undeploy.sh` (+ `_apps.sh`) |
 
 ### Lifecycle scripts
 
-Every script acts on embed, guard, chat in that order; `stop.sh` and `undeploy.sh` go in
-reverse. `--shared` uses `companions chat` instead, and naming apps (`embed`, `guard`, `chat`,
-`companions`) acts on only those, in the order given. They work from any directory.
+Two independent sets with the same four script names. They take no arguments, never act on each
+other's apps, and work from any directory.
+
+Separate apps, embed (L4), guard (L4), chat (H200); deploy and start go embed, guard, chat, and
+stop and undeploy go chat, guard, embed:
 
 ```bash
-deploy/modal/scripts/deploy.sh               # modal deploy, one after the other
-deploy/modal/scripts/start.sh                # warm up: doctor --model-profile modal.embed, modal.guard, modal
-deploy/modal/scripts/stop.sh                 # modal container stop: billing ends, apps stay deployed
-deploy/modal/scripts/undeploy.sh             # modal app stop (asks first; -y skips it)
-deploy/modal/scripts/stop.sh chat            # only the H200
-deploy/modal/scripts/start.sh guard          # only the guard, before using /ui
+deploy/modal/scripts/deploy.sh       # modal deploy, one after the other
+deploy/modal/scripts/start.sh        # warm up: doctor --model-profile modal.embed, modal.guard, modal
+deploy/modal/scripts/stop.sh         # modal container stop: billing ends, apps stay deployed
+deploy/modal/scripts/undeploy.sh     # modal app stop (asks first)
 ```
+
+Shared L4, only `agent-harness-vllm-companions` (the H200 is never touched):
+
+```bash
+deploy/modal/shared_l4/deploy.sh     # modal deploy
+deploy/modal/shared_l4/start.sh      # warm up: doctor --model-profile modal.guard, then modal.embed
+deploy/modal/shared_l4/stop.sh       # modal container stop
+deploy/modal/shared_l4/undeploy.sh   # modal app stop (asks first)
+```
+
+For a single app, use Modal directly: `modal container list` then `modal container stop <id>`, or
+`agent-harness doctor --model-profile modal.guard` to warm only the guard.
 
 - **Start** has no Modal command for a web endpoint: a container starts on its first request.
   `start.sh` sends that request through `agent-harness doctor`, which waits through the cold
@@ -160,13 +172,14 @@ the other and exits, and the container ends, so Modal replaces it instead of kee
 container warm.
 
 To use it:
-1. `deploy/modal/scripts/deploy.sh companions` (same secrets as the guard: `agent-harness-llm`,
+1. `deploy/modal/shared_l4/deploy.sh` (same secrets as the guard: `agent-harness-llm`,
    `agent-harness-hf`).
 2. In `.env`, point both companion endpoints at it:
    `AGENT_HARNESS_MODEL__MODAL__EMBEDDING_ENDPOINT=https://<workspace>--agent-harness-vllm-companions-serve.modal.run/v1`
    and the same URL for `AGENT_HARNESS_MODEL__MODAL__GUARD_ENDPOINT`.
-3. `agent-harness doctor --model-profile modal.guard` and `--model-profile modal.embed`.
-4. Optionally `deploy/modal/scripts/undeploy.sh embed guard` to remove the separate pair.
+3. `deploy/modal/shared_l4/start.sh` (doctor for `modal.guard`, then `modal.embed`).
+4. Optionally remove the separate pair: `modal app stop agent-harness-vllm-embed` and
+   `modal app stop agent-harness-vllm-guard` (`deploy/modal/scripts/undeploy.sh` would also remove the H200 app).
 
 Trade-offs against the separate deployments:
 
@@ -180,7 +193,7 @@ Trade-offs against the separate deployments:
 
 Embeddings are only used when a run calls `memory_search` or `memory_write`, so the saving is
 small unless memory is used often. Either way, warm the companions before you use `/ui`
-(`start.sh guard`, or `start.sh companions`), or the first turn waits for the guard's cold start.
+(`agent-harness doctor --model-profile modal.guard`, or `deploy/modal/shared_l4/start.sh`), or the first turn waits for the guard's cold start.
 
 Scaling: Modal scales a deployment by adding containers, each with the same contents. With the
 separate layout one container is one vLLM on one GPU, so the guard and embed scale on their own

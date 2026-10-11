@@ -23,7 +23,7 @@ Trade-offs (see docs/DEPLOYMENT.md, "Modal: one L4 for embeddings and the guard"
 Setup: the same secrets as vllm_guard_server.py (agent-harness-llm with VLLM_API_KEY, and
 agent-harness-hf with HF_TOKEN from an account granted access to Llama Guard 3 8B).
 
-Deploy (or deploy/modal/scripts/deploy.sh --shared):
+Deploy (or deploy/modal/shared_l4/deploy.sh; start.sh, stop.sh, undeploy.sh are next to it):
     modal deploy deploy/modal/shared_l4/vllm_companions_server.py
 
 Then point both companion endpoints of the modal profile at it, in .env:

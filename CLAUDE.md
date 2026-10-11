@@ -202,10 +202,11 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   presets in comments; `[models.modal]` matches it (price $0.001261/s,
   `cold_start_timeout_seconds = 1200`).
   `tests/test_full_config.py` checks the model, length, GPU, and parsers against `[models.modal]`.
-- **Modal lifecycle and the shared L4 (`deploy/modal/scripts/`, `deploy/modal/shared_l4/`).** The scripts
-  run embed, guard, chat in order (stop/undeploy reversed; `--shared` = companions, chat). `start.sh`
-  warms through `doctor` (no Modal start command for web endpoints); `stop.sh` stops containers, apps
-  stay deployed; `undeploy.sh` asks first. macOS runs bash 3.2: no `mapfile`, and expand possibly-empty
+- **Modal lifecycle and the shared L4 (`deploy/modal/scripts/`, `deploy/modal/shared_l4/`).** Two
+  independent sets, no arguments (the user rejected a parameterised `--shared`/app-name design):
+  `scripts/` runs embed, guard, H200 chat in order (stop/undeploy reversed); `shared_l4/` has its own
+  four scripts for the companions app only. `start.sh` warms through `doctor` (no Modal start command for web endpoints); `stop.sh` stops containers, apps
+  stay deployed; `undeploy.sh` asks first (no `-y`). macOS runs bash 3.2: no `mapfile`, and expand possibly-empty
   arrays as `${a[@]+"${a[@]}"}`. The shared layout runs two vLLM processes (embed 0.10, guard 0.80 of an
   L4) behind stdlib `router.py`; untested on Modal. `tests/test_modal_shared_l4.py` checks the router
   with in-process fakes and the scripts' app names against each `modal.App(...)`.
