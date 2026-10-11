@@ -83,5 +83,17 @@ class WebUiTests(unittest.TestCase):
 
         self.assertGreaterEqual(SERVE_MAX_BODY_BYTES, 16 * 1024 * 1024)
 
+    def test_streaming_refreshes_are_coalesced_and_429_is_retried(self) -> None:
+        # 2026-10-11: a fast model (14 steps in 13 s) made /ui send ~64 requests, four per event, and
+        # rate_limit_per_minute = 120 answered one with 429. Refreshes are now coalesced, skip the
+        # event list (it arrives on the stream), and a 429 waits for Retry-After instead of an error.
+        source = PAGE.read_text(encoding="utf-8")
+        self.assertIn("const REFRESH_GAP_MS = 1500;", source)
+        self.assertIn('refreshSoon(name === "approval_requested")', source)
+        self.assertNotIn('name === "approval_requested") { live = null; liveText = ""; liveReasoning = ""; await refresh(); }', source)
+        self.assertIn("refresh({ withEvents: false })", source)
+        self.assertIn("if (error.status === 429) setTimeout(() => refreshSoon()", source)
+        self.assertIn('error.retryAfter = Number(response.headers.get("retry-after")) || 0;', source)
+
 if __name__ == "__main__":
     unittest.main()

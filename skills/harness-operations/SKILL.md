@@ -227,6 +227,9 @@ the feature is not configured.
   - It uses only the existing endpoints: `/runs`, `/runs/{id}/stream`, `/messages`,
     `/approval`, `/answer`, `/usage`, `/events`.
   - The API key is entered in the page and kept in `sessionStorage`.
+  - Refreshes while streaming are coalesced (`refreshSoon`, at most one per 1.5 s, approval cards
+    immediately), skip `/events` (the stream carries them), and a 429 is retried after `Retry-After`.
+    Before, every model reply and tool result cost four requests, and a fast model hit the rate limit.
   - Images: 📎, paste, or drop; shrunk in the browser (longest side 1600 px, JPEG) and sent as
     `images` on `POST /runs` / `POST /runs/{id}/messages`; thumbnails are `<img>` elements built
     with `el()` (never `innerHTML`). `create_api` allows 20 MB request bodies for them.
