@@ -16,4 +16,5 @@ tool_calls = [{ name = "submit_result", arguments = { city = "Paris", country = 
 [expect]
 status = "completed"
 tool_calls = ["submit_result"]
+tool_calls_exact = ["submit_result"]  # registry refactor gate (Phase 23): no extra calls
 result = { city = "Paris", country = "France" }

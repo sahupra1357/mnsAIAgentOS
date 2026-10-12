@@ -204,6 +204,10 @@ final_answer_reserve_seconds = 120
 # answer. Up to this many extra turns (0 = off); still cut off after that, run_completed says
 # answer_truncated. On 2026-10-10 two answers (Modal, Qwen 3.6) ended mid-sentence at 2048.
 max_answer_continuations = 2
+# Read-only calls in one reply run concurrently even with the audit pre_tool hooks below: the
+# hooks run first (concurrently) and their decisions are recorded in call order afterwards.
+# Off, any pre_tool hook makes the calls run one by one.
+prefetch_with_hooks = true
 # A run without its own token limit reserves this many tokens of the daily quota per turn,
 # instead of everything left (which refused every other run with HTTP 429 while it was
 # active). Its budget stays open; [[quotas]] is still enforced at each step.

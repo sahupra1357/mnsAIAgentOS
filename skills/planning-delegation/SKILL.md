@@ -52,10 +52,17 @@ user messages.
   **prefetched concurrently** before the normal sequential loop. A call is eligible when:
   - its tool is read-only, is not an orchestrator tool, and has no recorded request yet;
   - its permission decision is not `deny` or `ask`;
-  - no `pre_tool` hook is configured, since a hook could change the arguments.
+  - no `pre_tool` hook is configured, since a hook could change the arguments, unless
+    `OrchestratorSettings.prefetch_with_hooks` is on (Phase 23a, `[orchestrator]`, on in the
+    root config): then the hooks run first, concurrently, and a call runs with the
+    arguments its hook left; a denied call does not run. `agent` calls are never
+    prefetched with hooks (a hook decides before a child exists).
+  - the repeated-call check would not refuse it, and it is not a registered orchestrator
+    tool (`ToolHandlerRegistry.claims`).
 
-  The prefetch uses the same idempotency key, so the sequential loop gets the cached
-  result instantly. Events, hooks, and ordering stay exactly as before. Read-only tools
+  `_prefetch_parallel` returns `{call_id: _Prefetched}` (hook result, final call, tool
+  result). The sequential loop records each hook decision and uses the prefetched result
+  when the arguments match, so events, hooks, and ordering stay exactly as before. Read-only tools
   have no side effects, so a prefetched result that is later refused changes nothing.
 - **Subagents:** several `agent` calls in one response (or several ready agent steps)
   create their children one by one, then run them together with `asyncio.gather`.
@@ -110,7 +117,8 @@ Use scripted models:
 - **Agent steps:** they run without a model turn, and ready ones run concurrently.
   Measure with an event log of start and finish order, not wall-clock sleeps.
 - **Parallel reads:** prefetch runs calls concurrently, and is skipped when a `pre_tool`
-  hook exists.
+  hook exists unless `prefetch_with_hooks` is on (`tests/test_orchestrator_seams.py`: peak
+  concurrency, event order, hook deny/rewrite, approval stays serial).
 - **Resume:** a plan interrupted mid-step resumes correctly.
 
 ## Live delegation benchmark (Phase 16h)

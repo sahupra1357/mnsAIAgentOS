@@ -18,5 +18,6 @@ content = "It is in docs/release.md: releases happen on Fridays."
 
 [expect]
 tool_calls = ["agent"]
+tool_calls_exact = ["agent"]  # registry refactor gate (Phase 23): no extra calls
 output_contains = ["docs/release.md"]
 events_include = ["subagent_started", "subagent_finished"]

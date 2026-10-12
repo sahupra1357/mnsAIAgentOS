@@ -13,4 +13,5 @@ content = "Tests are done; release notes are in progress."
 
 [expect]
 tool_calls = ["todo_write"]
+tool_calls_exact = ["todo_write"]  # registry refactor gate (Phase 23): no extra calls
 events_include = ["todos_updated"]

@@ -607,6 +607,7 @@ class OrchestratorConfig:
     final_answer_on_last_step: bool = False  # last allowed step: answer without tools
     final_answer_reserve_seconds: float = 120.0  # ...also this close to the time limit (0: off)
     max_answer_continuations: int = 0  # continue an answer cut off at max_tokens (0: off)
+    prefetch_with_hooks: bool = False  # run a reply's read-only calls concurrently despite pre_tool hooks
 
     def __post_init__(self) -> None:
         if self.turn_max_steps < 0 or self.turn_max_wall_seconds < 0:

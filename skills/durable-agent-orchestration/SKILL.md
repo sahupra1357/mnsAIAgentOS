@@ -55,6 +55,24 @@ State any atomicity guarantees required from the store and provide network-free 
 - **Parallel prefetch:** it reuses idempotency keys, so the sequential loop remains the
   only place that records events.
 
+## Orchestrator seams (Phase 23)
+
+- **Tool handlers:** orchestrator-owned tools are `ToolHandler`s (`orchestration/handlers.py`):
+  `applies(run, call)`, `before_approval` (runs before the permission `ask` pause, like
+  `ask_user` and `exit_plan`), `parallel_safe`, and `offer` (a spec appended after the built-in
+  ones). Add a control primitive with `register_tool_handler()`, not another `if` in
+  `_execute_tool`. `_ORCHESTRATOR_TOOLS` stays, and a test checks the registry covers it.
+- **Compaction:** `CompactionPolicy` (`orchestration/compaction.py`) decides whether and what to
+  summarize; `DefaultCompactionPolicy` is the old trigger (the builder's omitted range). A custom
+  range must start where the stored summary ends (or after the pinned head) and end at a unit
+  boundary, or it is ignored; a range ending at the stored `covers` reuses the summary.
+- **Message skeleton:** events hold no message text, but the history's shape follows from them
+  (`orchestration/replay.py`): `run_created.message_roles`, `model_responded.tool_call_ids`,
+  `tool_responded.retrying`. Any new code that changes `run.messages` must checkpoint an event
+  that `derive_message_skeleton` understands; every scenario eval checks it, and
+  `tests/test_orchestrator_seams.py` checks it at every checkpoint. Full event sourcing is
+  deliberately deferred.
+
 
 ## Repeated calls within one reply (Phase 16f)
 

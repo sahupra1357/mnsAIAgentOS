@@ -74,6 +74,12 @@ prefix, so the context view must keep its prefix stable:
 
 ## Summarization (Phase 2, step 3)
 
+- **When and what (Phase 23c):** a `CompactionPolicy` (`orchestration/compaction.py`, the
+  orchestrator's `compaction=` argument) decides. The default summarizes exactly the range the
+  builder omitted, as before. Custom policies may summarize earlier or less, but the range must
+  continue the stored summary (`compaction_start`) and end at a unit boundary; otherwise it is
+  ignored. The hook, usage, and `CONTEXT_SUMMARIZED` event are unchanged.
+
 - **Domain:** `ContextSummary(covers, content)` sits on `RunRecord.context_summary`, with
   a default of `None` (SQLite round-trips it). `covers` is the index in `run.messages`
   where the kept history resumes.

@@ -406,6 +406,7 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         final_answer_on_last_step=section.final_answer_on_last_step,
         final_answer_reserve_seconds=section.final_answer_reserve_seconds,
         max_answer_continuations=section.max_answer_continuations,
+        prefetch_with_hooks=section.prefetch_with_hooks,
     )
 
 

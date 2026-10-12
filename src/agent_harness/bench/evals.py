@@ -30,6 +30,7 @@ A scenario is a TOML file::
     [expect]
     status = "completed"              # default "completed"
     tool_calls = ["calculator"]       # ordered subsequence of requested tools
+    tool_calls_exact = ["calculator"] # exactly these requested tools, in this order (no extras)
     output_contains = ["42"]
     output_not_contains = ["error"]
     max_steps = 3
@@ -37,6 +38,9 @@ A scenario is a TOML file::
     error_contains = "..."            # for scenarios expected to fail
     result = { city = "Paris" }       # the validated structured result (with output_schema)
     event_payloads = [{ type = "approval_resolved", actor = "timeout" }]  # an event with these values
+
+Every scenario also checks that the message shape derived from the run's events
+matches the stored messages (``orchestration/replay.py``, Phase 23d).
 
 A scripted ``[[model]]`` entry may also be ``error = "context_overflow"`` (the server
 rejects the request as too long).
@@ -89,6 +93,7 @@ from agent_harness.domain import (
     RetryableModelError,
     Role,
     RunBudget,
+    RunEvent,
     RunRecord,
     RunStatus,
     ToolCall,
@@ -98,6 +103,7 @@ from agent_harness.domain import (
 from agent_harness.guardrails import Guardrails, GuardrailsConfig, GuardrailsConfigError
 from agent_harness.model_gateway import ScriptedModelClient
 from agent_harness.orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
+from agent_harness.orchestration.replay import SkeletonUnavailable, derive_message_skeleton, message_skeleton
 from agent_harness.persistence import InMemoryRunStore
 
 _TOP_LEVEL = {"name", "prompt", "system", "model_profile", "approve", "budget", "model", "expect",
@@ -106,7 +112,7 @@ _TOP_LEVEL = {"name", "prompt", "system", "model_profile", "approve", "budget", 
 # Scenario keys that configure a bare orchestrator; with config/[harness] they go in [harness].
 _BARE_ONLY = {"guardrails", "orchestrator", "interaction", "ask_user", "wait_seconds"}
 _EXPECT = {
-    "status", "tool_calls", "output_contains", "output_not_contains",
+    "status", "tool_calls", "tool_calls_exact", "output_contains", "output_not_contains",
     "max_steps", "events_include", "error_contains", "result", "event_payloads",
 }
 _UNSET: Any = object()
@@ -121,6 +127,7 @@ class ScenarioError(ValueError):
 class Expectations:
     status: str = "completed"
     tool_calls: tuple[str, ...] = ()
+    tool_calls_exact: tuple[str, ...] | None = None
     output_contains: tuple[str, ...] = ()
     output_not_contains: tuple[str, ...] = ()
     max_steps: int | None = None
@@ -410,6 +417,7 @@ def _expectations(file: Path, raw: Any) -> Expectations:
     return Expectations(
         status=status,
         tool_calls=tuple(raw.get("tool_calls", ())),
+        tool_calls_exact=tuple(raw["tool_calls_exact"]) if "tool_calls_exact" in raw else None,
         output_contains=tuple(raw.get("output_contains", ())),
         output_not_contains=tuple(raw.get("output_not_contains", ())),
         max_steps=raw.get("max_steps"),
@@ -561,6 +569,7 @@ async def _execute(
     result.tokens = run.consumed_tokens
     result.cost_usd = run.consumed_cost_usd
     result.failures = _check(scenario.expect, run, [e.type.value for e in events])
+    result.failures.extend(_skeleton_failures(run, events))
     for wanted in scenario.expect.event_payloads:
         expected = {k: v for k, v in wanted.items() if k != "type"}
         if not any(e.type.value == wanted["type"] and all(e.payload.get(k) == v for k, v in expected.items())
@@ -578,6 +587,8 @@ def _check(expect: Expectations, run: RunRecord, event_types: Sequence[str]) -> 
     requested = [call.name for m in run.messages for call in m.tool_calls]
     if not _is_subsequence(expect.tool_calls, requested):
         failures.append(f"tool calls {requested} do not contain {list(expect.tool_calls)} in order")
+    if expect.tool_calls_exact is not None and requested != list(expect.tool_calls_exact):
+        failures.append(f"tool calls {requested} != exactly {list(expect.tool_calls_exact)}")
     output = next(
         (m.content for m in reversed(run.messages) if m.role is Role.ASSISTANT and not m.tool_calls),
         "",
@@ -598,6 +609,21 @@ def _check(expect: Expectations, run: RunRecord, event_types: Sequence[str]) -> 
     if expect.result is not _UNSET and run.output != expect.result:
         failures.append(f"result {run.output!r} != expected {expect.result!r}")
     return failures
+
+
+def _skeleton_failures(run: RunRecord, events: Sequence[RunEvent]) -> list[str]:
+    """The history's shape must follow from the events (no change without an event)."""
+
+    try:
+        derived = derive_message_skeleton(events)
+    except SkeletonUnavailable:
+        return []
+    actual = message_skeleton(run.messages)
+    if derived == actual:
+        return []
+    at = next((i for i, (a, b) in enumerate(zip(derived, actual)) if a != b), min(len(derived), len(actual)))
+    return [f"message skeleton drift at message {at}: events give {len(derived)} messages, "
+            f"the run has {len(actual)}"]
 
 
 def _is_subsequence(expected: Sequence[str], actual: Sequence[str]) -> bool:

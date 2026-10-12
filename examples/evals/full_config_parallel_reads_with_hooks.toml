@@ -1,0 +1,23 @@
+# Feature: parallel read-only calls with pre_tool hooks (Phase 23a). The repository's models.toml
+# sets [orchestrator] prefetch_with_hooks = true, so both reads in one reply run concurrently
+# after the audit hooks; hook decisions and tool results are still recorded in call order.
+name = "full_config_parallel_reads_with_hooks"
+config = "../../models.toml"
+prompt = "Compare README.md and NOTES.md."
+
+[workspace]
+"README.md" = "Project Falcon ships on Fridays."
+"NOTES.md" = "Falcon's release train leaves at noon."
+
+[[model]]
+tool_calls = [{ name = "read_file", arguments = { path = "README.md" } },
+              { name = "read_file", arguments = { path = "NOTES.md" } }]
+[[model]]
+content = "Falcon ships on Fridays; the release train leaves at noon."
+
+[expect]
+tool_calls_exact = ["read_file", "read_file"]
+output_contains = ["Fridays", "noon"]
+events_include = ["hook_decided", "tool_responded"]
+event_payloads = [{ type = "tool_responded", status = "success" },
+                  { type = "hook_decided", hook_event = "pre_tool", decision = "allow" }]

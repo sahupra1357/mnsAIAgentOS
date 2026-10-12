@@ -196,10 +196,10 @@ class BudgetedContextBuilder:
             # Only the newest unit is left (the loop above omits every older one first).
             # Its tool outputs are shortened together, in proportion to their size,
             # instead of failing the step.
-            newest, shortened = self._fit_newest_unit(units[-1], total - budget, reasoning)
-            if shortened:
+            newest, fitted_outputs = self._fit_newest_unit(units[-1], total - budget, reasoning)
+            if fitted_outputs:
                 units[-1] = newest
-                trimmed_outputs += shortened
+                trimmed_outputs += fitted_outputs
                 total = head_tokens + sum(self._message_tokens(m, reasoning) for m in newest)
                 if omitted and head:
                     total += self._text_tokens(notice)
@@ -357,6 +357,12 @@ def latest_request_index(messages: Sequence[Message], *, start: int = 0) -> int 
 
 def _latest_request_block(message: Message) -> str:
     return f"\n\n[Latest user message - answer this one]\n{message.content.strip()}"
+
+
+def pinned_head_end(messages: Sequence[Message]) -> int:
+    """Index after the leading system messages and the first user message (always kept)."""
+
+    return _pinned_head_end(messages)
 
 
 def _pinned_head_end(messages: Sequence[Message]) -> int:

@@ -10,5 +10,6 @@ content = "Booked a table in Rome at 8pm."
 [expect]
 status = "completed"
 tool_calls = ["ask_user"]
+tool_calls_exact = ["ask_user"]  # registry refactor gate (Phase 23): no extra calls
 output_contains = ["Rome"]
 events_include = ["approval_requested", "approval_resolved"]

@@ -841,7 +841,7 @@ class HarnessAPI:
         unknown = set(body) - {"value", "message_index", "comment"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
-        votes = {"up": True, "down": False, True: True, False: False, 1: True, 0: False, -1: False}
+        votes = {"up": True, "down": False, True: True, False: False, -1: False}  # 1 and 0 equal True and False
         value = body.get("value")
         if not isinstance(value, (str, bool, int)) or value not in votes:
             raise ApiError(400, 'value must be "up" or "down"')
