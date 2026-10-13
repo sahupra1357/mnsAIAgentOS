@@ -42,3 +42,5 @@ baselines/
 !.env.example
 # Public benchmark datasets (scripts/fetch_datasets.sh)
 datasets/
+# Personal scratch files
+scratch/
