@@ -2,6 +2,138 @@
 
 A small, durable agent runtime that can point at different model endpoints without changing the orchestration loop.
 
+**One agent harness, three model backends: run the same agent on Ollama, llama.cpp, or Modal by changing one config profile.**
+
+<p align="center">
+  <img alt="Python 3.12+" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=for-the-badge&logo=python&logoColor=white">
+  <a href="#ollama-llamacpp-and-modal"><img alt="Ollama" src="https://img.shields.io/badge/Ollama-local-000000?style=for-the-badge&logo=ollama&logoColor=white"></a>
+  <a href="#ollama-llamacpp-and-modal"><img alt="llama.cpp" src="https://img.shields.io/badge/llama.cpp-llama--server-8A2BE2?style=for-the-badge"></a>
+  <a href="#ollama-llamacpp-and-modal"><img alt="Modal" src="https://img.shields.io/badge/Modal-cloud%20GPUs-7FEE64?style=for-the-badge&labelColor=0B0B0B"></a>
+  <a href="#ollama-llamacpp-and-modal"><img alt="vLLM" src="https://img.shields.io/badge/vLLM-served-30A2FF?style=for-the-badge"></a>
+  <a href="#ollama-llamacpp-and-modal"><img alt="SGLang" src="https://img.shields.io/badge/SGLang-served-E4572E?style=for-the-badge"></a>
+  <a href="#langfuse-traces-feedback-and-evaluations"><img alt="Langfuse" src="https://img.shields.io/badge/Langfuse-tracing%20%26%20evals-0A60FF?style=for-the-badge"></a>
+</p>
+<p align="center">
+  <a href="#tools-catalog-sources-mcp-and-dynamic-loading"><img alt="MCP" src="https://img.shields.io/badge/MCP-stdio%20%7C%20HTTP-111111?style=for-the-badge"></a>
+  <a href="#coding-agent-mode"><img alt="Docker" src="https://img.shields.io/badge/Docker-sandbox-2496ED?style=for-the-badge&logo=docker&logoColor=white"></a>
+  <img alt="SQLite" src="https://img.shields.io/badge/SQLite-default%20store-003B57?style=for-the-badge&logo=sqlite&logoColor=white">
+  <a href="#production-storage-access-quotas-security-deployment"><img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-optional-4169E1?style=for-the-badge&logo=postgresql&logoColor=white"></a>
+  <a href="#telemetry-and-streaming"><img alt="OpenTelemetry" src="https://img.shields.io/badge/OpenTelemetry-optional-000000?style=for-the-badge&logo=opentelemetry&logoColor=white"></a>
+  <a href="#litellm-optional"><img alt="LiteLLM" src="https://img.shields.io/badge/LiteLLM-optional-6B7280?style=for-the-badge"></a>
+  <a href="#guardrails"><img alt="Llama Guard 3" src="https://img.shields.io/badge/Llama%20Guard%203-guard%20model-0467DF?style=for-the-badge"></a>
+</p>
+<p align="center">
+  <img alt="Runtime dependencies: none" src="https://img.shields.io/badge/runtime%20deps-none-success">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue">
+  <img alt="Tests: network-free" src="https://img.shields.io/badge/tests-network--free-informational">
+  <img alt="CI: GitHub Actions" src="https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white">
+</p>
+
+| Backend | Runs on | What the harness handles for it |
+|---|---|---|
+| **Ollama** | your machine (`ollama serve`) | missing tool-call IDs, object arguments, optional native `/api/chat` for `num_ctx` |
+| **llama.cpp** | your machine (`llama-server --jinja`) | 503 while the model loads, `/health` probe, one merged system message, server-side token counting |
+| **Modal** | cloud GPUs (vLLM or SGLang) | bearer key plus `Modal-Key`/`Modal-Secret` headers, cold-start timeouts, GPU-second cost, prefix-cache affinity |
+
+Switch backends with `--model-profile` or `AGENT_HARNESS_MODEL_PROFILE`. The orchestrator code stays the same.
+
+<p align="center">
+  <img src="docs/diagrams/01-end-to-end.animated.svg"
+       alt="agent_harness end-to-end flow: entry and setup, the orchestrator loop, model gateway, tool runtime, and persistence"
+       width="100%">
+</p>
+
+<p align="center"><em>End-to-end flow. More diagrams are in <a href="docs/diagrams/README.md"><code>docs/diagrams/</code></a>.</em></p>
+
+## Highlights
+
+- **One loop, any model server.** Ollama, llama.cpp, and vLLM/SGLang on Modal all go through
+  one OpenAI-compatible client. Provider quirks live in thin adapters, and a profile in
+  `models.toml` picks the model. LiteLLM is an optional route to other providers.
+- **Durable by design.** Runs are a persisted state machine
+  (`queued → running → awaiting_input → completed | failed | cancelled | budget_exhausted`)
+  with an append-only event log, optimistic checkpoints, resume after a crash, and durable
+  tool idempotency.
+- **Hard budgets.** Steps, wall time, tokens, and estimated cost (token prices or GPU-seconds)
+  are checked at every step. There is one shared retry budget, fallback chains, and detection
+  of repeated tool calls.
+- **Context engineering for small local models.** Token-budgeted context and cache-friendly
+  trimming that keeps the prompt prefix fixed. Optional summarization, recovery when the
+  provider reports a context overflow, and optional server-side token counting.
+- **Claude Code-style interactivity:**
+  - multi-turn chat, steering, and cancel;
+  - hooks, permission rules and modes, and plan mode;
+  - `ask_user`, subagents, task lists, and rewind with file snapshots;
+  - skills, templates, instruction files, layered settings, and plugins.
+- **Planning and delegation.** Plan-and-execute with step dependencies and replanning.
+  Subagents run in parallel within a split budget, and read-only tool calls run concurrently.
+- **Tool platform:**
+  - a persistent tool catalog;
+  - tools from Python modules, declarative HTTP definitions, and web search/fetch;
+  - a stdlib MCP client (stdio and streamable HTTP) and dynamic tool loading.
+- **Coding agent.** Workspace-safe file, git, and command tools in a per-run Docker sandbox,
+  with approval pauses.
+- **Safety.**
+  - Input, output, and tool-output guardrails detect injection, secrets, and PII.
+  - Taint mode, plus an optional Llama Guard model.
+  - Egress allowlist, secret references, and redaction.
+- **Production ready.**
+  - HTTP API with SSE streams.
+  - Lease-based queue workers with dead-lettering.
+  - Tenants, roles, quotas, and rate limits.
+  - SQLite or Postgres with versioned migrations.
+  - An OpenAI-compatible `/v1/chat/completions` endpoint and a built-in `/ui`.
+- **Measured, not guessed.**
+  - 860+ network-free unit tests and scripted scenario evaluations.
+  - Per-feature validation.
+  - Live benchmarks: GSM8K, BFCL, HumanEval, guardrails, context, memory, subagents, real tasks.
+  - Langfuse traces and scores.
+
+## Language, Tools, and Technologies
+
+| Area | Used |
+|---|---|
+| **Language** | Python 3.12+ (`asyncio`, `dataclasses`, `typing.Protocol`), standard library only at runtime |
+| **Standard library pieces** | `sqlite3` (with FTS5), `tomllib`, `urllib`/`http.client`, `json`, `subprocess`, `unittest` |
+| **Model servers** | [Ollama](https://ollama.com), [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`, [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) on [Modal](https://modal.com) |
+| **Models used in practice** | Qwen 3.6 35B-A3B, Qwen 27B, gpt-oss, Llama Guard 3 (1B / 8B), nomic-embed-text |
+| **APIs and protocols** | OpenAI-compatible Chat Completions and Embeddings, SSE streaming, [MCP](https://modelcontextprotocol.io) (stdio and streamable HTTP), OTLP/HTTP JSON |
+| **Storage** | SQLite (default), PostgreSQL via `psycopg` 3 (optional), in-memory store for tests |
+| **Sandboxing and deployment** | Docker (per-run containers), Docker Compose (API, workers, Postgres, optional Open WebUI), Modal GPU apps (H200, L4) |
+| **Observability** | Structured JSON logs, OpenTelemetry (optional), [Langfuse](https://langfuse.com) v4 |
+| **Optional extras** | `api` (uvicorn), `postgres` (psycopg), `otel` (opentelemetry-api), `litellm` |
+| **External tools** | Tavily web search, Excalidraw MCP server |
+| **Web UI** | Vanilla JavaScript and HTML, no build step, strict CSP |
+| **Quality and CI** | `unittest`, `ruff`, `mypy`, GitHub Actions, scripted model clients and fake HTTP transports |
+| **Benchmarks** | GSM8K, BFCL v4, HumanEval, plus the repository's own guardrails, context, memory, agents, and tasks suites |
+
+## Contents
+
+- **Get started:** [Architecture](#architecture) · [Quick Start](#quick-start) ·
+  [Everything On](#everything-on-modelstoml) · [Development](#development)
+- **Models:** [Pointing at Different Models](#pointing-at-different-models) ·
+  [One Profile Serves Everything](#one-profile-serves-everything) ·
+  [Ollama, llama.cpp, and Modal](#ollama-llamacpp-and-modal) ·
+  [Retries, Cost, Fallback, and Routes](#retries-cost-fallback-and-routes) ·
+  [LiteLLM](#litellm-optional) · [Adding a Model Adapter](#adding-a-model-adapter)
+- **Running agents:** [Conversations, Steering, and Status](#conversations-steering-and-status) ·
+  [Permissions, Modes, Plan Mode, and Hooks](#permissions-modes-plan-mode-and-hooks) ·
+  [Asking the User](#asking-the-user-ask_user) · [Subagents and Task Lists](#subagents-and-task-lists) ·
+  [Instructions, Skills, Templates, Settings, Plugins](#instructions-skills-templates-settings-layers-and-plugins) ·
+  [Rewind](#rewind) · [Structured Output](#structured-output) ·
+  [Planning and Parallel Delegation](#planning-and-parallel-delegation)
+- **Tools and context:** [Tools: Catalog, Sources, MCP, Dynamic Loading](#tools-catalog-sources-mcp-and-dynamic-loading) ·
+  [Context Window](#context-window) · [Coding-Agent Mode](#coding-agent-mode) · [Adding Tools](#adding-tools)
+- **Safety and limits:** [Guardrails](#guardrails) · [Limits, Deadlines, and Overrides](#limits-deadlines-and-overrides) ·
+  [Budgets and Durability](#budgets-and-durability)
+- **Operations:** [Production](#production-storage-access-quotas-security-deployment) ·
+  [HTTP API and Workers](#http-api-and-workers) · [Artifacts, Memory, and Evaluations](#artifacts-memory-and-evaluations) ·
+  [Telemetry and Streaming](#telemetry-and-streaming) · [Langfuse](#langfuse-traces-feedback-and-evaluations) ·
+  [Programmatic Composition](#programmatic-composition)
+- **Quality:** [Validation](#validation) · [Architecture Diagrams](#architecture-diagrams) · [Current Scope](#current-scope)
+
+## Core Guarantees
+
 It provides:
 
 - Named, configurable model profiles.
