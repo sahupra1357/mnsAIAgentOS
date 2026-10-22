@@ -309,6 +309,15 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
     from them; its shape can (`orchestration/replay.py`). A new code path that changes
     `run.messages` needs an event `derive_message_skeleton` understands, or the scenario evals fail.
   - **Evals:** `[expect] tool_calls_exact` (no extra calls); every scenario checks the skeleton.
+- **Run from any folder (Phase 24, `config/project.py`, docs/RUN_ANYWHERE.md).** `[project] root = "cwd"`
+  (off in code, on in the root config) or `--workspace DIR` makes the launch folder's project (nearest
+  `.git`/`.agent-harness/`, never `$HOME`) the workspace, state in `~/.agent-harness/projects/<slug>/`
+  (CLI `--database` now defaults to `None` → `default_database(config)`), and merges the layers
+  `workspace` / `workspace-local` (`<project>/.agent-harness/settings*.toml`, paths absolutized) before
+  enterprise. Started in the config's own folder, `config.project_root` is `None` and nothing changes.
+  `claude_code` adds `CLAUDE.md`, `.claude/skills`, `~/.claude/skills`. `init --global` symlinks
+  `~/.agent-harness/models.toml`; discovery follows the link so paths stay repo-relative. Tests that copy
+  the root config elsewhere get project mode: pass `cwd=` or set `root = "config"`.
 - **Durable idempotency (Phase 4a).** `ToolRuntime` backs its in-memory cache with an
   `IdempotencyStore`. `build_application` attaches the SQLite store. A crash *after* a
   handler succeeds but *before* the checkpoint no longer repeats the side effect. A
@@ -795,6 +804,15 @@ From an architecture review comparing harnesses; no rewrite, seams that stop `_e
    fields); full event sourcing deferred.
 5. Evals: `tool_calls_exact`, skeleton check per scenario, `full_config_parallel_reads_with_hooks`.
 Tests: `tests/test_orchestrator_seams.py`. Also fixed ruff/mypy errors that were already on `main`.
+
+**Phase 24 – Run from any folder** [interactive-extensibility, harness-operations] — on `phase-24-run-anywhere`
+1. `[project]` (`root = "config" | "cwd"`, `markers`, `settings`, `state_dir`, `instruction_files`,
+   `claude_code`) and `HarnessConfig.project_root`; `--workspace` on runtime commands, `config show`,
+   `templates`, `skills`.
+2. Per-project state, project settings layers, project instructions/skills/templates, `.env` from the
+   config's folder and `~/.agent-harness/.env`.
+3. `agent-harness init` (project settings template) and `init --global` (home config link).
+Tests: `tests/test_run_anywhere.py`.
 
 ## Validation
 

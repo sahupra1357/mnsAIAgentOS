@@ -797,6 +797,28 @@ class TemplatesConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectConfig:
+    """Run from any folder, like Claude Code (Phase 24; see ``config/project.py``).
+
+    ``root = "cwd"`` makes the launch directory's project (nearest ``markers``
+    directory) the workspace, keeps its run state in ``state_dir/<slug>``, and
+    merges ``<project>/.agent-harness/settings.toml`` when ``settings`` is on.
+    ``instruction_files`` at the project root are added to the instructions;
+    ``claude_code`` also reads ``CLAUDE.md``, ``.claude/skills``, and ``~/.claude/skills``;
+    ``claude_skills`` (name globs) picks which ``~/.claude/skills`` are offered, since each
+    skill's description is in every system prompt.
+    """
+
+    root: str = "config"
+    markers: tuple[str, ...] = (".git", ".agent-harness")
+    settings: bool = True
+    state_dir: str = "~/.agent-harness/projects"
+    instruction_files: tuple[str, ...] = ("AGENTS.md",)
+    claude_code: bool = True
+    claude_skills: tuple[str, ...] = ("*",)
+
+
+@dataclass(frozen=True, slots=True)
 class PluginsConfig:
     """Installed plugins live in ``directory``; only ``enabled`` ones take effect."""
 
@@ -849,6 +871,10 @@ class HarnessConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     templates: TemplatesConfig = field(default_factory=TemplatesConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
+    project: ProjectConfig = field(default_factory=ProjectConfig)
+    # The launch directory's project root for project runs (``[project] root = "cwd"``
+    # or ``--workspace``); ``None`` keeps everything relative to the config file.
+    project_root: Path | None = None
     # Profiles switched off with ``enabled = false``; listed, never resolved.
     disabled_models: tuple[str, ...] = ()
     # Hidden companion profiles (Phase 16): name -> (owner profile, "embed" | "guard").
@@ -946,7 +972,8 @@ def discover_config_path(
     cwd: Path | None = None,
 ) -> Path:
     """Resolve the config file: ``explicit`` → ``AGENT_HARNESS_CONFIG`` → ``./models.toml``
-    → ``~/.agent-harness/models.toml``. ``load_config`` itself does not search."""
+    → ``~/.agent-harness/models.toml``. ``load_config`` itself does not search.
+    A found symlink is followed to its target."""
 
     if explicit is not None:
         return Path(explicit)
@@ -956,7 +983,9 @@ def discover_config_path(
         return candidates[0]  # named explicitly: a missing file is reported by the loader
     for candidate in candidates:
         if candidate.is_file():
-            return candidate
+            # A symlinked ~/.agent-harness/models.toml (``init --global``) keeps its relative
+            # paths pointing next to the real file, e.g. a repository's .agent-harness/.
+            return candidate.resolve() if candidate.is_symlink() else candidate
     tried = ", ".join(str(path) for path in candidates)
     raise ConfigError(f"no config file found (tried {tried}); pass --config FILE")
 
@@ -967,12 +996,17 @@ def load_config(
     environ: Mapping[str, str] | None = None,
     layered: bool = False,
     overrides: Mapping[str, Any] | None = None,
+    workspace: Path | None = None,
+    cwd: Path | None = None,
 ) -> HarnessConfig:
     """Load TOML configuration and apply environment overrides.
 
     ``overrides`` (a table, e.g. a scenario's ``[harness]``) is merged over the file:
     tables merge key by key, anything else replaces. ``AGENT_HARNESS_SET__`` variables
     still apply last.
+
+    ``workspace`` (an explicit project root) and ``cwd`` (the launch directory,
+    default ``Path.cwd()``) decide the project of a project run (Phase 24).
 
     If *path* is omitted, ``AGENT_HARNESS_CONFIG`` may name the TOML file.
     Profiles can also be defined entirely through variables of the form
@@ -987,9 +1021,11 @@ def load_config(
         from agent_harness.config.settings import SettingsError, load_layers
 
         try:
-            raw = load_layers(Path(configured_path) if configured_path else None, env).raw
+            layers = load_layers(Path(configured_path) if configured_path else None, env,
+                                 workspace=workspace, cwd=cwd)
         except SettingsError as exc:
             raise ConfigError(str(exc)) from exc
+        raw, project_root = layers.raw, layers.project_root
     elif configured_path:
         config_path = Path(configured_path)
         try:
@@ -1003,6 +1039,13 @@ def load_config(
     if overrides:
         raw = merge_tables(raw, overrides)
     raw = _apply_set_overrides(raw, env)
+    if not layered:
+        from agent_harness.config.project import resolve_project_root
+
+        project_root = resolve_project_root(
+            raw, env, config_dir=Path(configured_path).parent if configured_path else None,
+            workspace=workspace, cwd=cwd,
+        )
 
     raw_models = raw.get("models", {})
     if not isinstance(raw_models, dict):
@@ -1118,6 +1161,8 @@ def load_config(
         skills=_parse_section(raw, "skills", SkillsConfig),
         templates=_parse_section(raw, "templates", TemplatesConfig),
         plugins=_parse_section(raw, "plugins", PluginsConfig),
+        project=_parse_project(raw),
+        project_root=project_root,
         disabled_models=tuple(sorted(disabled)),
         companions=companions,
     )
@@ -1520,6 +1565,15 @@ def _parse_guardrails(raw: Any) -> GuardrailsConfig:
         return GuardrailsConfig.from_mapping(raw)
     except GuardrailsConfigError as exc:
         raise ConfigError(str(exc)) from exc
+
+
+def _parse_project(raw: Mapping[str, Any]) -> ProjectConfig:
+    project = _parse_section(raw, "project", ProjectConfig)
+    if project.root not in ("config", "cwd"):
+        raise ConfigError("project.root must be one of config, cwd")
+    if not project.markers:
+        raise ConfigError("project.markers must not be empty")
+    return project
 
 
 def _parse_section(raw: Mapping[str, Any], name: str, section_type: Any) -> Any:

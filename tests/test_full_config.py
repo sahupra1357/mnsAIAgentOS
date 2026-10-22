@@ -79,6 +79,7 @@ class FullConfigTests(unittest.TestCase):
             "mcp server": any(server.enabled for server in c.mcp_servers),
             "web_search offered every turn": "web_search" in c.tool_loading.core,
             "planning (model decides)": c.planning.effective_mode == "auto",
+            "run from any folder": c.project.root == "cwd" and c.project.claude_code,
             "auto-plan reminder": c.planning.auto_reminder_after_steps == 6,
             "plugin": c.plugins.enabled == ("security-review",),
             "api keys (secret in .env)": [dict(k) for k in c.api_keys] == [
@@ -94,6 +95,15 @@ class FullConfigTests(unittest.TestCase):
             and c.coding.docker.mode == "per_run",
         }
         self.assertEqual([name for name, value in on.items() if not value], [])
+
+    def test_started_in_the_repository_it_is_not_a_project_run(self) -> None:
+        # Phase 24: root = "cwd" only differs in other folders; here the config's folder is the root.
+        config = load_config(FULL, environ=HERMETIC, layered=True, cwd=ROOT)
+        self.assertIsNone(config.project_root)
+        with tempfile.TemporaryDirectory() as directory:
+            elsewhere = load_config(FULL, environ={**HERMETIC, "HOME": directory}, layered=True,
+                                    cwd=Path(directory))
+            self.assertEqual(elsewhere.project_root, Path(directory).resolve())
 
     def test_relative_paths_exist(self) -> None:
         c = self.config

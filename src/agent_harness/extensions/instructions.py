@@ -222,9 +222,19 @@ def _frontmatter(text: str) -> dict[str, str]:
     if end == -1:
         return {}
     meta: dict[str, str] = {}
-    for line in text[3:end].splitlines():
+    lines = text[3:end].splitlines()
+    for index, line in enumerate(lines):
         key, separator, value = line.partition(":")
         if separator and key.strip() and not line.startswith((" ", "\t")):
+            value = value.strip()
+            if value[:1] in {">", "|"}:
+                # YAML block scalar (``description: >`` and indented lines), as in Claude Code skills.
+                block = []
+                for following in lines[index + 1 :]:
+                    if following.strip() and not following.startswith((" ", "\t")):
+                        break
+                    block.append(following.strip())
+                value = (" " if value[0] == ">" else "\n").join(part for part in block if part)
             meta[key.strip()] = value.strip().strip('"').strip("'")
     return meta
 

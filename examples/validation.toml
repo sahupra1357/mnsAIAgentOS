@@ -302,7 +302,7 @@ scenarios = ["full_config_read_with_hooks", "hook_denies_command", "permission_d
 [[feature]]
 name = "interaction"
 description = "Conversations, steering, ask_user, deadlines, structured output, CLI defaults and chat"
-tests = ["test_conversation", "test_ask_user", "test_structured_output", "test_cli_defaults"]
+tests = ["test_conversation", "test_ask_user", "test_structured_output", "test_cli_defaults", "test_run_anywhere"]
 scenarios = ["ask_user", "question_deadline", "structured_output", "ask_user_full_config"]
 
 [[feature]]

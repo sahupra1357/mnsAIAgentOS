@@ -110,7 +110,8 @@ Switch backends with `--model-profile` or `AGENT_HARNESS_MODEL_PROFILE`. The orc
 ## Contents
 
 - **Get started:** [Architecture](#architecture) · [Quick Start](#quick-start) ·
-  [Everything On](#everything-on-modelstoml) · [Development](#development)
+  [Everything On](#everything-on-modelstoml) · [Run From Any Folder](#run-from-any-folder) ·
+  [Development](#development)
 - **Models:** [Pointing at Different Models](#pointing-at-different-models) ·
   [One Profile Serves Everything](#one-profile-serves-everything) ·
   [Ollama, llama.cpp, and Modal](#ollama-llamacpp-and-modal) ·
@@ -228,6 +229,22 @@ Resume an interrupted run:
   --database agent-harness.sqlite3 \
   RUN_ID
 ```
+
+## Run From Any Folder
+
+Like Claude Code, one installed `agent-harness` works in any folder; the project you
+start it in is the workspace:
+
+```bash
+uv tool install --editable /path/to/mnsAIAgentOS
+cd /path/to/mnsAIAgentOS && agent-harness init --global   # links ~/.agent-harness/models.toml
+cd ~/dev_data/VideoPipeline && agent-harness              # works on VideoPipeline
+```
+
+Runs are kept in `~/.agent-harness/projects/<path>/`; the project's
+`.agent-harness/settings.toml` (`agent-harness init` writes one), `AGENTS.md`,
+`CLAUDE.md`, and skills (also `~/.claude/skills`) are added. Details:
+[docs/RUN_ANYWHERE.md](docs/RUN_ANYWHERE.md).
 
 ## Everything On (`models.toml`)
 
