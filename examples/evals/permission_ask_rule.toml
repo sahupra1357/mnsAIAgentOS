@@ -5,6 +5,10 @@ config = "../../models.toml"
 prompt = "Show me the settings in prod.env."
 approve = "deny"
 
+# Ask rules pause in the default mode; the root config may run in bypass, which skips them.
+[harness.permissions]
+mode = "default"
+
 [workspace]
 "prod.env" = "TOKEN=not-a-real-token"
 

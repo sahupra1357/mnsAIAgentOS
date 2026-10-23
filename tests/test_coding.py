@@ -298,11 +298,16 @@ class GuardrailTests(unittest.TestCase):
             ["git", "reset", "--hard"],
             ["python3", "-c", "import os; os.remove('main.py')"],
             ["sh", "-c", "echo unsafe"],
-            ["git", "-C", "/tmp", "status"],
-            ["python3", "/tmp/outside.py"],
         ):
             with self.assertRaises(CommandRejected):
                 guardrails.validate(argv)
+        # Paths outside the workspace and git push are allowed; approval pauses still apply.
+        for argv in (
+            ["git", "-C", "/tmp", "status"],
+            ["python3", "/tmp/outside.py"],
+            ["git", "push", "-u", "origin", "branch"],
+        ):
+            self.assertEqual(guardrails.validate(argv), tuple(argv))
 
     def test_find_may_only_list_files(self) -> None:
         # The workspace mount is read-write, so find must not delete files or run programs.
