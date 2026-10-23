@@ -91,8 +91,12 @@ class FullConfigTests(unittest.TestCase):
             "quotas": bool(c.quotas) and c.user_quotas.enabled,
             "rate limit": c.api_rate_limit.requests_per_minute > 0,
             "cors": bool(c.api_cors_origins),
-            "coding (docker, per run)": c.coding.enabled and c.coding.execution_runtime == "docker"
-            and c.coding.docker.mode == "per_run",
+            # 2026-10-23: the user moved to one global config that runs commands on the host,
+            # like Claude Code (any program; rm, sudo, ... still forbidden), with no folder overrides.
+            "coding (local, any command)": c.coding.enabled and c.coding.execution_runtime == "local"
+            and c.coding.allowed_commands == ("*",) and "sh" not in c.coding.forbidden_commands
+            and {"rm", "sudo"} <= c.coding.forbidden_commands,
+            "no per-project settings": not c.project.settings,
         }
         self.assertEqual([name for name, value in on.items() if not value], [])
 
@@ -162,7 +166,8 @@ class FullConfigTests(unittest.TestCase):
         c = self.config
         policy = PermissionPolicy.from_lists(allow=c.permissions.allow, ask=c.permissions.ask,
                                              deny=c.permissions.deny)
-        guardrails = CommandGuardrails(allowed_commands=c.coding.allowed_commands)
+        guardrails = CommandGuardrails(allowed_commands=c.coding.allowed_commands,
+                                       forbidden_commands=c.coding.forbidden_commands)
         spec = ToolSpec(name="run_command", description="", input_schema={"type": "object"},
                         risk=ToolRisk.HIGH_RISK)
 
@@ -175,7 +180,7 @@ class FullConfigTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(action(argv), "allow")
                 guardrails.validate(argv)
-        self.assertIn("git", c.coding.allowed_commands)  # the defaults are kept
+        guardrails.validate(["git", "status"])  # git is allowed (enable_git_commit)
         self.assertEqual(action(["cat", ".env"]), "ask")
         self.assertEqual(action(["head", "-n", "5", ".env"]), "ask")
         self.assertEqual(action(["rm", "-rf", "."]), "deny")

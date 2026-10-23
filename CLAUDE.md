@@ -192,6 +192,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   `head`, `wc`, and `find`; `[permissions] allow` pre-approves them, and `ask` keeps a pause for a
   `.env` argument. The guardrails refuse find's `-delete`/`-exec`/`-execdir`/`-ok`/`-okdir`/
   `-fls`/`-fprint*`: the workspace is mounted read-write, and permission rules only see `argv[0]`.
+- **Command allowlist globs (2026-10-22).** `[coding] allowed_commands` entries are globs; `"*"` leaves
+  commands to `[permissions]` rules, like Claude Code. `[coding] forbidden_commands` replaces the built-in
+  forbidden set (`DEFAULT_FORBIDDEN_COMMANDS`). A VideoPipeline run could not start `narrate.sh` (not
+  allowlisted) or `sh narrate.sh` (forbidden). The user wants one configuration: the root `models.toml`
+  runs commands locally with `"*"` and no `sh` in the forbidden set, and `[project] settings = false`
+  so no folder's `.agent-harness/settings*.toml` is merged (`tests/test_full_config.py` pins both).
 - **Workspace errors.** A wrong path is reported as "no such file or directory: X; search_files
   can find the right path" (`WorkspacePathNotFound`), not "Tool execution failed."; unreadable and
   binary files get their own messages, and `search_files` skips unreadable files.

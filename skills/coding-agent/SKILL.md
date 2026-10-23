@@ -54,6 +54,11 @@ Read-only inspection tools can run automatically. File writes, test/code executi
   with `allow` rules so they run without an approval pause, and `ask` rules for a `.env`
   argument (positions 1–4), matching `read_file(path=*.env)`. `allowed_commands` replaces
   the default list, so the defaults are repeated there.
+- `allowed_commands` entries are globs: `"*.sh"` allows any script, and `"*"` allows any
+  program, leaving the decision to `[permissions]` rules (Claude Code's model). The
+  forbidden set still applies; `[coding] forbidden_commands` replaces it (for example
+  without `sh`, so skill scripts run on a trusted local workspace). Argument checks (git,
+  find, inline Python, privilege flags) always apply.
 - Keep local host execution explicitly opt-in. Prefer the Docker runtime.
 
 ## Docker Runtime

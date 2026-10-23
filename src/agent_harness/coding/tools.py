@@ -36,7 +36,9 @@ def create_coding_tool_runtime(
 ) -> ToolRuntime:
     workspace_path = config.workspace_path(base=base_path)
     boundary = WorkspaceBoundary(workspace_path)
-    guardrails = CommandGuardrails(allowed_commands=config.allowed_commands)
+    guardrails = CommandGuardrails(
+        allowed_commands=config.allowed_commands, forbidden_commands=config.forbidden_commands
+    )
     runtime = execution_runtime or _create_execution_runtime(
         config, workspace_path, guardrails
     )
