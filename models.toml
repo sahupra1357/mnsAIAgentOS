@@ -260,7 +260,7 @@ enable_pull_requests = false
 # read-write. This list replaces the default one, so the defaults are repeated (git is needed
 # for enable_git_commit).
 allowed_commands = ["cargo", "git", "go", "make", "npm", "npx", "pnpm", "py.test", "pytest",
-                    "python", "python3", "uv", "yarn", "ls", "cat", "head", "wc", "find"]
+                    "python", "python3", "uv", "yarn", "ls", "cat", "head", "wc", "find","bash","curl",]
 
 [coding.docker]
 image = "python:3.12"

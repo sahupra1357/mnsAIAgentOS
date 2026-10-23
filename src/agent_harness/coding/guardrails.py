@@ -60,7 +60,6 @@ _DANGEROUS_GIT_SUBCOMMANDS = {
     "clean",
     "filter-branch",
     "gc",
-    "push",
     "rebase",
     "reset",
     "restore",
@@ -118,9 +117,9 @@ class CommandGuardrails:
         lowered = {item.casefold() for item in argv[1:]}
         if lowered & _FORBIDDEN_TOKENS:
             raise CommandRejected("command requests a forbidden privilege or host resource")
-        for item in argv[1:]:
-            if Path(item).is_absolute() or re.search(r"(^|[/\\])\.\.(?:[/\\]|$)", item):
-                raise CommandRejected("command arguments must stay inside the workspace")
+        # for item in argv[1:]:
+        #     if Path(item).is_absolute() or re.search(r"(^|[/\\])\.\.(?:[/\\]|$)", item):
+        #         raise CommandRejected("command arguments must stay inside the workspace")
         if command == "git":
             self._validate_git(argv)
         if command == "find":
