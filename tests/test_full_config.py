@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_harness.application import build_application
-from agent_harness.config.loader import load_config
+from agent_harness.config.loader import ConfigError, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 FULL = ROOT / "models.toml"
@@ -184,17 +184,22 @@ class FullConfigTests(unittest.TestCase):
             guardrails.validate(["find", ".", "-delete"])
 
     def test_modal_shared_endpoint_profile(self) -> None:
-        # DeepSeek V4.1 Flash on a Modal Shared Endpoint: per-token, borrows modal's embed and guard.
+        # A Modal Shared Endpoint: per-token, borrows modal's embed and guard.
         self.assertNotIn("modal_shared", self.config.models)  # off until .env enables it
         env = {"AGENT_HARNESS_MODEL__MODAL__ENABLED": "true",
                "AGENT_HARNESS_MODEL__MODAL_SHARED__ENABLED": "true",
                "AGENT_HARNESS_MODEL_PROFILE": "modal_shared"}
+        # .env drives the model and endpoint; there is no hard-coded fallback, so it fails hard.
+        with self.assertRaisesRegex(ConfigError, "AGENT_HARNESS_MODEL__MODAL_SHARED__MODEL"):
+            load_config(FULL, environ=env)
+        env |= {"AGENT_HARNESS_MODEL__MODAL_SHARED__MODEL": "served/model",
+                "AGENT_HARNESS_MODEL__MODAL_SHARED__ENDPOINT": "https://ws--ep.modal.direct/v1"}
         c = load_config(FULL, environ=env)
         shared = c.models["modal_shared"]
-        self.assertEqual((shared.adapter, shared.model), ("openai_compatible", "deepseek-ai/DeepSeek-V4.1-Flash"))
+        self.assertEqual((shared.adapter, shared.model, shared.endpoint),
+                         ("openai_compatible", "served/model", "https://ws--ep.modal.direct/v1"))
         self.assertEqual(shared.api_key_env, "MODAL_SHARED_TOKEN")
         self.assertEqual(shared.affinity_header, "Modal-Routing-Affinity-Key")
-        self.assertIn("WORKSPACE", shared.endpoint)  # the real URL is in .env, not here
         self.assertEqual(shared.token_counting, "estimate")
         self.assertEqual((shared.pricing.input_usd_per_million_tokens,
                           shared.pricing.cached_input_usd_per_million_tokens,

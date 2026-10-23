@@ -1058,7 +1058,12 @@ def load_config(
 
     _apply_environment_overrides(models, env)
     disabled = _disabled_profiles(models)
-    profiles = {name: _parse_profile(name, values) for name, values in models.items()}
+    profiles = {
+        name: _parse_profile(name, values)
+        for name, values in models.items()
+        # A switched-off profile may leave model/endpoint to .env; it is checked once enabled.
+        if not (name in disabled and _missing_profile_fields(values))
+    }
     profiles = _without_disabled(profiles, disabled)
     companions = _add_companions(profiles)
 
@@ -1649,6 +1654,13 @@ def _parse_environment_value(key: str, field_name: str, value: str) -> Any:
         raise ConfigError(f"invalid value for {key}: {exc}") from exc
 
 
+def _missing_profile_fields(raw: Mapping[str, Any]) -> list[str]:
+    required = ["adapter", "model"]
+    if raw.get("adapter") not in ENDPOINT_OPTIONAL_ADAPTERS:
+        required.append("endpoint")
+    return [field for field in required if field not in raw]
+
+
 def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
     allowed = {
         "adapter",
@@ -1684,12 +1696,12 @@ def _parse_profile(name: str, raw: Mapping[str, Any]) -> ModelProfile:
     unknown = set(raw) - allowed
     if unknown:
         raise ConfigError(f"unknown fields in models.{name}: {', '.join(sorted(unknown))}")
-    required = ["adapter", "model"]
-    if raw.get("adapter") not in ENDPOINT_OPTIONAL_ADAPTERS:
-        required.append("endpoint")
-    missing = [field for field in required if field not in raw]
+    missing = _missing_profile_fields(raw)
     if missing:
-        raise ConfigError(f"models.{name} is missing: {', '.join(missing)}")
+        variables = ", ".join(f"{_ENV_PREFIX}{name.upper()}__{field.upper()}" for field in missing)
+        raise ConfigError(
+            f"models.{name} is missing: {', '.join(missing)} (set it in the config, or {variables} in .env)"
+        )
     parameters = raw.get("parameters", {})
     if not isinstance(parameters, dict):
         raise ConfigError(f"models.{name}.parameters must be a table/object")
