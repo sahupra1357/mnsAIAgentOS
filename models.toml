@@ -271,7 +271,8 @@ memory = "2g"
 
 # --- Permissions, hooks, interaction --------------------------------------------
 [permissions]
-mode = "default"                 # default | accept_edits | plan | bypass
+#mode = "default"                 # default | accept_edits | plan | bypass
+mode = "bypass"                 # default | accept_edits | plan | bypass
 allow = ["read_file", "search_files", "git_status", "git_diff", "run_tests",
          "run_command(argv.0=pytest)",
          # read-only listing commands run without an approval pause

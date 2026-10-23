@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Sequence
 
 
@@ -117,9 +116,6 @@ class CommandGuardrails:
         lowered = {item.casefold() for item in argv[1:]}
         if lowered & _FORBIDDEN_TOKENS:
             raise CommandRejected("command requests a forbidden privilege or host resource")
-        # for item in argv[1:]:
-        #     if Path(item).is_absolute() or re.search(r"(^|[/\\])\.\.(?:[/\\]|$)", item):
-        #         raise CommandRejected("command arguments must stay inside the workspace")
         if command == "git":
             self._validate_git(argv)
         if command == "find":
