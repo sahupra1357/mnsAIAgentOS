@@ -73,6 +73,18 @@ execution_runtime = "local"        # use the Mac's own ffmpeg, Node, and modal l
 allow_local_execution = true
 ```
 
+To let it run any program, as Claude Code does, and decide with `[permissions]` rules instead
+(skill scripts such as `narrate.sh`, `grep`, `sh script.sh`):
+
+```toml
+[coding]
+allowed_commands = ["*"]           # globs; "*.sh" would allow only scripts
+# Replaces the built-in forbidden set; this one drops "sh". Keep rm and sudo here.
+forbidden_commands = ["chmod", "chown", "dd", "docker", "doas", "fdisk", "kill", "killall",
+                      "mkfs", "mount", "nc", "netcat", "powershell", "pwsh", "reboot", "rm",
+                      "shutdown", "sudo", "su", "umount", "wget", "zsh"]
+```
+
 or keep the Docker sandbox with an image that has the tools:
 
 ```toml

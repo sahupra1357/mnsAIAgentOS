@@ -9,7 +9,7 @@ from typing import Any, Mapping
 from agent_harness.tools import ApprovalMode
 
 from .execution import DockerRuntimeConfig
-from .guardrails import DEFAULT_ALLOWED_COMMANDS
+from .guardrails import DEFAULT_ALLOWED_COMMANDS, DEFAULT_FORBIDDEN_COMMANDS, command_allowed
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +19,7 @@ class CodingAgentConfig:
     execution_runtime: str = "docker"
     approval_mode: ApprovalMode = ApprovalMode.SIDE_EFFECTS
     allowed_commands: tuple[str, ...] = DEFAULT_ALLOWED_COMMANDS
+    forbidden_commands: frozenset[str] = DEFAULT_FORBIDDEN_COMMANDS
     command_timeout_seconds: float = 120.0
     max_output_bytes: int = 128_000
     allow_local_execution: bool = False
@@ -41,10 +42,10 @@ class CodingAgentConfig:
             raise ValueError(
                 "local code execution requires allow_local_execution = true"
             )
-        if self.enabled and self.enable_git_commit and "git" not in self.allowed_commands:
+        if self.enabled and self.enable_git_commit and not command_allowed("git", self.allowed_commands):
             raise ValueError("git must be allowlisted when enable_git_commit is true")
         if self.enabled and self.enable_pull_requests:
-            if "gh" not in self.allowed_commands:
+            if not command_allowed("gh", self.allowed_commands):
                 raise ValueError("gh must be allowlisted when enable_pull_requests is true")
             if self.execution_runtime == "docker" and not self.docker.network_enabled:
                 raise ValueError(
@@ -67,6 +68,7 @@ def parse_coding_config(raw: Mapping[str, Any] | None) -> CodingAgentConfig:
         "execution_runtime",
         "approval_mode",
         "allowed_commands",
+        "forbidden_commands",
         "command_timeout_seconds",
         "max_output_bytes",
         "allow_local_execution",
@@ -102,6 +104,11 @@ def parse_coding_config(raw: Mapping[str, Any] | None) -> CodingAgentConfig:
         isinstance(item, str) for item in commands
     ):
         raise ValueError("coding.allowed_commands must be an array of strings")
+    forbidden = raw.get("forbidden_commands", sorted(DEFAULT_FORBIDDEN_COMMANDS))
+    if not isinstance(forbidden, (list, tuple)) or not all(
+        isinstance(item, str) for item in forbidden
+    ):
+        raise ValueError("coding.forbidden_commands must be an array of strings")
     try:
         docker = DockerRuntimeConfig(**dict(docker_raw))
         return CodingAgentConfig(
@@ -110,6 +117,7 @@ def parse_coding_config(raw: Mapping[str, Any] | None) -> CodingAgentConfig:
             execution_runtime=_string(raw, "execution_runtime", "docker"),
             approval_mode=ApprovalMode(_string(raw, "approval_mode", "side_effects")),
             allowed_commands=tuple(commands),
+            forbidden_commands=frozenset(forbidden),
             command_timeout_seconds=float(raw.get("command_timeout_seconds", 120.0)),
             max_output_bytes=int(raw.get("max_output_bytes", 128_000)),
             allow_local_execution=_boolean(raw, "allow_local_execution", False),

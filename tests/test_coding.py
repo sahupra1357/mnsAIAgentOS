@@ -325,6 +325,42 @@ class GuardrailTests(unittest.TestCase):
         # Only find's own actions are refused; the same word is fine for other commands.
         self.assertEqual(guardrails.validate(["ls", "-delete"]), ("ls", "-delete"))
 
+    def test_allowlist_globs_and_configurable_forbidden_commands(self) -> None:
+        # 2026-10-22: a VideoPipeline run could not start narrate.sh (not allowlisted) or
+        # `sh narrate.sh` (always forbidden). `*` leaves the decision to permission rules.
+        from agent_harness.coding.config import parse_coding_config
+
+        script = "/home/u/.claude/skills/video/scripts/narrate.sh"
+        with self.assertRaisesRegex(CommandRejected, "not allowlisted"):
+            CommandGuardrails().validate([script, "slug", "text"])
+        anything = CommandGuardrails(allowed_commands=("*",))
+        self.assertEqual(anything.validate([script, "slug"]), (script, "slug"))
+        self.assertEqual(anything.validate(["grep", "-n", "x"]), ("grep", "-n", "x"))
+        with self.assertRaisesRegex(CommandRejected, "always forbidden"):
+            anything.validate(["sh", script])  # the default forbidden set still applies
+        with self.assertRaises(CommandRejected):
+            anything.validate(["git", "reset", "--hard"])  # so do the argument checks
+        scripts = CommandGuardrails(allowed_commands=("*.sh",))
+        self.assertEqual(scripts.validate([script]), (script,))
+        with self.assertRaisesRegex(CommandRejected, "not allowlisted"):
+            scripts.validate(["grep", "x"])
+
+        config = parse_coding_config(
+            {"allowed_commands": ["*"], "forbidden_commands": ["rm", "sudo"]}
+        )
+        self.assertEqual(config.forbidden_commands, frozenset({"rm", "sudo"}))
+        relaxed = CommandGuardrails(
+            allowed_commands=config.allowed_commands, forbidden_commands=config.forbidden_commands
+        )
+        self.assertEqual(relaxed.validate(["sh", script]), ("sh", script))
+        with self.assertRaisesRegex(CommandRejected, "always forbidden"):
+            relaxed.validate(["rm", "-rf", "."])
+        self.assertEqual(parse_coding_config({}).forbidden_commands, CommandGuardrails().forbidden_commands)
+        with self.assertRaisesRegex(ValueError, "forbidden_commands"):
+            parse_coding_config({"forbidden_commands": "sh"})
+        # git commits need git; a glob that covers it counts.
+        CodingAgentConfig(enabled=True, allowed_commands=("*",), enable_git_commit=True)
+
     def test_docker_runtime_builds_restricted_command(self) -> None:
         calls: list[tuple[str, ...]] = []
 

@@ -236,38 +236,55 @@ parameters = { chat_template_kwargs = { enable_thinking = false } }
 # --- Run from any folder (like Claude Code) -------------------------------------
 # Started in another folder (after `agent-harness init --global`), the project around that
 # folder is the workspace; its runs live in ~/.agent-harness/projects/<path>/, and its
-# .agent-harness/settings.toml, AGENTS.md, CLAUDE.md, and skills are added. Started here,
-# nothing changes. docs/RUN_ANYWHERE.md.
+# AGENTS.md, CLAUDE.md, and skills are added. Started here, nothing changes.
+# docs/RUN_ANYWHERE.md.
 [project]
 root = "cwd"
+settings = false                 # this file is the only config; folder settings.toml files are ignored
 claude_code = true               # also CLAUDE.md, .claude/skills, ~/.claude/skills
 # Every ~/.claude/skills description is in each system prompt (68 skills ≈ 3.5K tokens of a
 # 16K window); narrow them by name, e.g. claude_skills = ["aisystems-video", "hyperframes*"].
 claude_skills = ["*"]
 
-# --- Coding tools (Docker sandbox) ----------------------------------------------
-# Needs a running Docker daemon. python:3.12 (not -slim) includes git.
+
+# --- Coding tools (local) ----------------------------------------------
 [coding]
 enabled = true
 workspace = "."
-execution_runtime = "docker"
+execution_runtime = "local"
+allow_local_execution = true
 approval_mode = "side_effects"   # pause before writes and commands
-command_timeout_seconds = 120
+command_timeout_seconds = 1800
 enable_git_commit = true
 enable_pull_requests = false
+allowed_commands = ["*"]
+forbidden_commands = ["chmod", "chown", "dd", "docker", "doas", "fdisk", "kill", "killall", "mkfs",
+                      "mount", "nc", "netcat", "powershell", "pwsh", "reboot", "rm", "shutdown",
+                      "sudo", "su", "umount", "wget", "zsh"]
+
+# --- Coding tools (Docker sandbox) ----------------------------------------------
+# Needs a running Docker daemon. python:3.12 (not -slim) includes git.
+#[coding]
+#enabled = true
+#workspace = "."
+#execution_runtime = "docker"
+#approval_mode = "side_effects"   # pause before writes and commands
+#command_timeout_seconds = 120
+#enable_git_commit = true
+#enable_pull_requests = false
 # The default commands plus read-only listing tools (ls, cat, head, wc, find). The guardrails
 # refuse find's -delete/-exec/-execdir/-ok/-okdir/-fprint*/-fls, since the workspace mount is
 # read-write. This list replaces the default one, so the defaults are repeated (git is needed
 # for enable_git_commit).
-allowed_commands = ["cargo", "git", "go", "make", "npm", "npx", "pnpm", "py.test", "pytest",
-                    "python", "python3", "uv", "yarn", "ls", "cat", "head", "wc", "find","bash","curl",]
+#allowed_commands = ["cargo", "git", "go", "make", "npm", "npx", "pnpm", "py.test", "pytest",
+#                    "python", "python3", "uv", "yarn", "ls", "cat", "head", "wc", "find","bash","curl",]
 
-[coding.docker]
-image = "python:3.12"
-mode = "per_run"                 # one warm container per run, removed when it ends
-network_enabled = false
-cpus = 2.0
-memory = "2g"
+#[coding.docker]
+#image = "python:3.12"
+#mode = "per_run"                 # one warm container per run, removed when it ends
+#network_enabled = false
+#cpus = 2.0
+#memory = "2g"
 
 # --- Permissions, hooks, interaction --------------------------------------------
 [permissions]

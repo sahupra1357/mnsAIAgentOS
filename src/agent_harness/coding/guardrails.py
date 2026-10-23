@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -29,6 +30,8 @@ DEFAULT_ALLOWED_COMMANDS = (
     "curl",
 )
 
+# Refused even when allowlisted. ``[coding] forbidden_commands`` replaces this set, for
+# example to allow ``sh`` scripts on a trusted local workspace.
 _ALWAYS_FORBIDDEN = {
     "chmod",
     "chown",
@@ -54,6 +57,8 @@ _ALWAYS_FORBIDDEN = {
     "wget",
     "zsh",
 }
+
+DEFAULT_FORBIDDEN_COMMANDS = frozenset(_ALWAYS_FORBIDDEN)
 
 _DANGEROUS_GIT_SUBCOMMANDS = {
     "clean",
@@ -93,6 +98,7 @@ _FORBIDDEN_TOKENS = {
 @dataclass(frozen=True, slots=True)
 class CommandGuardrails:
     allowed_commands: tuple[str, ...] = DEFAULT_ALLOWED_COMMANDS
+    forbidden_commands: frozenset[str] = DEFAULT_FORBIDDEN_COMMANDS
     allow_inline_python: bool = False
     max_arguments: int = 128
     max_argument_length: int = 16_384
@@ -108,9 +114,9 @@ class CommandGuardrails:
             raise CommandRejected("command contains an invalid or oversized argument")
 
         command = Path(argv[0]).name
-        if command in _ALWAYS_FORBIDDEN:
+        if command in self.forbidden_commands:
             raise CommandRejected(f"command {command!r} is always forbidden")
-        if command not in self.allowed_commands:
+        if not command_allowed(command, self.allowed_commands):
             raise CommandRejected(f"command {command!r} is not allowlisted")
 
         lowered = {item.casefold() for item in argv[1:]}
@@ -142,3 +148,10 @@ class CommandGuardrails:
             raise CommandRejected(f"git {subcommand} is forbidden by the safety policy")
         if "--force" in argv or "-f" in argv and subcommand in {"checkout", "branch"}:
             raise CommandRejected("forced git operations are forbidden")
+
+
+def command_allowed(command: str, patterns: Sequence[str]) -> bool:
+    """Whether a program name matches the allowlist; entries are globs, so ``*`` allows any
+    program and leaves the decision to the permission rules (as Claude Code does)."""
+
+    return any(fnmatch.fnmatchcase(command, pattern) for pattern in patterns)
