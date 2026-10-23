@@ -17,7 +17,7 @@ from dataclasses import replace
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..application import HarnessApplication, build_application
+from ..application import HarnessApplication, build_application, default_database, state_directory
 from ..coding import CODING_AGENT_SYSTEM_PROMPT
 from ..config.loader import ConfigError, discover_config_path, load_config
 from ..config.dotenv import load_dotenv
@@ -45,6 +45,10 @@ from ..knowledge.artifacts import LocalArtifactStore, referenced_artifacts
 
 _CONFIG_HELP = (
     "config file (default: $AGENT_HARNESS_CONFIG, ./models.toml, or ~/.agent-harness/models.toml)"
+)
+_WORKSPACE_HELP = (
+    "project folder to work on (default: with [project] root = \"cwd\", the project around "
+    "the current folder; otherwise the config file's folder)"
 )
 
 
@@ -229,8 +233,10 @@ def _parser() -> argparse.ArgumentParser:
 
     templates = subcommands.add_parser("templates", help="list prompt templates (/name)")
     templates.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
+    templates.add_argument("--workspace", type=Path, default=None, help=_WORKSPACE_HELP)
     skills = subcommands.add_parser("skills", help="list skills available to the model")
     skills.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
+    skills.add_argument("--workspace", type=Path, default=None, help=_WORKSPACE_HELP)
 
     rewind = subcommands.add_parser(
         "rewind", help="restore files and conversation to before a step (dry run without --yes)"
@@ -244,6 +250,15 @@ def _parser() -> argparse.ArgumentParser:
     config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show", help="print effective settings and where each came from")
     show.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
+    show.add_argument("--workspace", type=Path, default=None, help=_WORKSPACE_HELP)
+
+    init = subcommands.add_parser(
+        "init", help="set up this folder as a project, or (--global) use a config from any folder"
+    )
+    init.add_argument("--global", dest="global_", action="store_true",
+                      help="link ~/.agent-harness/models.toml to the config, so agent-harness runs anywhere")
+    init.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
+    init.add_argument("--force", action="store_true", help="replace an existing link or settings file")
 
     tools = subcommands.add_parser("tools", help="list, sync, enable, or disable tools in the catalog")
     tools_sub = tools.add_subparsers(dest="tools_command", required=True)
@@ -312,11 +327,13 @@ def _parser() -> argparse.ArgumentParser:
 
 def _common_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, default=None, help=_CONFIG_HELP)
+    parser.add_argument("--workspace", type=Path, default=None, help=_WORKSPACE_HELP)
     parser.add_argument(
         "--database",
-        default="agent-harness.sqlite3",
+        default=None,
         help="SQLite file, or a postgresql:// URL (needs the [postgres] extra); "
-        "[storage] url_env can supply the URL instead",
+        "[storage] url_env can supply the URL instead (default: agent-harness.sqlite3, or "
+        "runs.sqlite3 in the project's state folder for project runs)",
     )
     parser.add_argument(
         "--telemetry-file",
@@ -354,6 +371,7 @@ def _build(args: argparse.Namespace, *, stream: StreamListener | None = None) ->
         database_path=args.database,
         telemetry=telemetry,
         stream_listener=stream,
+        workspace=getattr(args, "workspace", None),
     )
 
 
@@ -521,7 +539,7 @@ async def _print_result(
 
 
 def _list_profiles(args: argparse.Namespace) -> int:
-    config = load_config(args.config, layered=True)
+    config = load_config(args.config, layered=True, workspace=getattr(args, "workspace", None))
     for name in config.chat_models():
         profile = config.models[name]
         marker = " *" if name == config.default_model_profile else ""
@@ -543,7 +561,7 @@ def _list_profiles(args: argparse.Namespace) -> int:
 
 
 async def _doctor_command(args: argparse.Namespace) -> int:
-    config = load_config(args.config, layered=True)
+    config = load_config(args.config, layered=True, workspace=getattr(args, "workspace", None))
     profile = config.resolve_model_name(args.model_profile)
     transport = StdlibHttpTransport()
     client = ModelGateway(config, transport=transport).resolve(profile)
@@ -753,8 +771,75 @@ def _named_args(pairs: Sequence[str]) -> dict[str, str]:
     return values
 
 
-def _inspect(config: Path) -> HarnessApplication:
-    return build_application(config_path=config, database_path=":memory:")
+def _inspect(config: Path, workspace: Path | None = None) -> HarnessApplication:
+    return build_application(config_path=config, database_path=":memory:", workspace=workspace)
+
+
+def _state_base(config: Any, config_path: Path) -> Path:
+    """Where relative state paths (memory) resolve: the project's state folder or the config's."""
+
+    return state_directory(config) or config_path.parent
+
+
+_PROJECT_SETTINGS = """\
+# Project settings for agent-harness (Phase 24). Merged over the global config when
+# agent-harness runs in this folder; relative paths resolve against this project.
+# Lists add to the global ones; values replace them. See docs/RUN_ANYWHERE.md.
+
+# [coding]
+# allowed_commands = ["ffmpeg", "ffprobe", "npx", "node", "bash"]  # added to the global list
+# command_timeout_seconds = 1800
+#
+# [coding.docker]
+# image = "my-project-image:latest"   # an image with the project's tools
+# network_enabled = true
+# memory = "8g"
+#
+# [permissions]
+# allow = ["run_command(argv.0=ffprobe)"]
+#
+# [skills]
+# paths = ["skills"]                  # .agent-harness/skills is always read
+#
+# [instructions]
+# files = ["docs/AGENT_NOTES.md"]     # AGENTS.md and CLAUDE.md at the root are always read
+"""
+
+
+def _init_command(args: argparse.Namespace) -> int:
+    home = Path(os.environ.get("HOME", str(Path.home()))) / ".agent-harness"
+    if not args.global_:
+        folder = Path.cwd() / ".agent-harness"
+        target = folder / "settings.toml"
+        if target.exists() and not args.force:
+            raise ValueError(f"{target} already exists (pass --force to replace it)")
+        if folder.resolve() == home.resolve():
+            raise ValueError("this is the home folder; run init in a project folder")
+        folder.mkdir(exist_ok=True)
+        target.write_text(_PROJECT_SETTINGS, encoding="utf-8")
+        print(f"wrote {target}")
+        return 0
+    source = discover_config_path(args.config).resolve()
+    if not source.is_file():
+        raise ValueError(f"config {source} does not exist")
+    link = home / "models.toml"
+    if link.is_symlink() and link.resolve() == source:
+        print(f"{link} already links to {source}")
+    else:
+        if link.exists() or link.is_symlink():
+            if not args.force:
+                raise ValueError(f"{link} already exists (pass --force to replace it)")
+            link.unlink()
+        home.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(source)
+        print(f"linked {link} -> {source}")
+    if load_config(source, layered=True, cwd=home).project.root != "cwd":
+        print('note: set [project] root = "cwd" in the config (or ~/.agent-harness/settings.toml) '
+              "so the folder you start agent-harness in becomes the workspace", file=sys.stderr)
+    if shutil.which("agent-harness") is None:
+        print("note: agent-harness is not on PATH; install it with "
+              f"`uv tool install --editable {source.parent}` (or pipx install -e)", file=sys.stderr)
+    return 0
 
 
 async def _rewind_command(args: argparse.Namespace) -> int:
@@ -774,14 +859,14 @@ async def _rewind_command(args: argparse.Namespace) -> int:
 
 
 async def _templates_command(args: argparse.Namespace) -> int:
-    async with _inspect(args.config) as app:
+    async with _inspect(args.config, args.workspace) as app:
         for name, template in sorted(app.templates.items()):
             print(f"/{name:20} {template.description or '(no description)'}  [{template.path}]")
     return 0
 
 
 async def _skills_command(args: argparse.Namespace) -> int:
-    async with _inspect(args.config) as app:
+    async with _inspect(args.config, args.workspace) as app:
         for name, skill in sorted(app.skills.items()):
             print(f"{name:20} {skill.description}  [{skill.path}]")
     return 0
@@ -790,7 +875,7 @@ async def _skills_command(args: argparse.Namespace) -> int:
 def _config_command(args: argparse.Namespace) -> int:
     from agent_harness.config.loader import apply_set_overrides, set_override_keys
 
-    settings = load_layers(args.config, os.environ)
+    settings = load_layers(args.config, os.environ, workspace=args.workspace)
     settings.raw = apply_set_overrides(settings.raw, os.environ)
     for dotted, variable in set_override_keys(os.environ).items():
         settings.provenance[dotted] = f"env {variable}"
@@ -843,10 +928,10 @@ def _open_memory_spec(spec: str, config_path: Path) -> Any:
 
 async def _memory_command(args: argparse.Namespace) -> int:
     if args.memory_command == "reindex":
-        config = load_config(args.config, layered=True)
+        config = load_config(args.config, layered=True, workspace=getattr(args, "workspace", None))
         if not config.memory.enabled or config.memory.search == "keyword":
             raise ValueError("reindex needs [memory] enabled = true and search = \"semantic\" or \"hybrid\"")
-        store = open_memory_store(config, args.config.parent, args.database)
+        store = open_memory_store(config, _state_base(config, args.config), args.database)
         try:
             embedded = await store.reindex()
         finally:
@@ -858,8 +943,8 @@ async def _memory_command(args: argparse.Namespace) -> int:
         if args.target:
             target = _open_memory_spec(args.target, args.config)
         else:
-            config = load_config(args.config, layered=True)
-            target = open_memory_store(config, args.config.parent, args.database)
+            config = load_config(args.config, layered=True, workspace=getattr(args, "workspace", None))
+            target = open_memory_store(config, _state_base(config, args.config), args.database)
         try:
             items = await source.export_items()
             inserted = await target.import_items(items)
@@ -903,7 +988,9 @@ async def _unreferenced_artifacts(
     stores: list[LocalArtifactStore] = []
     if isinstance(app.artifacts, LocalArtifactStore):
         stores.append(app.artifacts)
-    snapshots = config_path.resolve().parent / ".agent-harness" / "snapshots"
+    state = state_directory(app.config)
+    snapshots = (state / "snapshots" if state is not None
+                 else config_path.resolve().parent / ".agent-harness" / "snapshots")
     if snapshots.is_dir() and not any(s.root.resolve() == snapshots.resolve() for s in stores):
         stores.append(LocalArtifactStore(snapshots))
     lister = getattr(app.store, "list_runs", None)
@@ -1080,6 +1167,21 @@ def _subcommand_names(parser: argparse.ArgumentParser) -> list[str]:
     return []
 
 
+def _load_global_dotenv(config_path: Path) -> None:
+    """After ``./.env``: the config's own ``.env``, then ``~/.agent-harness/.env``.
+
+    Earlier files and shell variables win, so a project's ``.env`` can override the
+    keys kept next to the global config (Phase 24).
+    """
+
+    seen = {(Path.cwd() / ".env").resolve()}
+    home = Path(os.environ.get("HOME", str(Path.home())))
+    for path in (config_path.resolve().parent / ".env", home / ".agent-harness" / ".env"):
+        if path.resolve() not in seen:
+            seen.add(path.resolve())
+            load_dotenv(path)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     if argv is None:  # started as a program (not called by a test or library): read ./.env
         load_dotenv()
@@ -1087,8 +1189,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(_with_default_command(raw, _subcommand_names(parser)))
     try:
+        if args.command == "init":
+            return _init_command(args)
         if hasattr(args, "config"):
             args.config = discover_config_path(args.config)
+            if argv is None:
+                _load_global_dotenv(args.config)
+        if hasattr(args, "database") and args.database is None:
+            args.database = default_database(
+                load_config(args.config, layered=True, workspace=getattr(args, "workspace", None))
+            )
         if args.command == "chat":
             return asyncio.run(_chat_command(args))
         if args.command == "run":

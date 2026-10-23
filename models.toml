@@ -233,6 +233,18 @@ max_output_tokens = 1536
 # allowance thinking and returned an empty summary (~95 s wasted per attempt). Chats keep thinking.
 parameters = { chat_template_kwargs = { enable_thinking = false } }
 
+# --- Run from any folder (like Claude Code) -------------------------------------
+# Started in another folder (after `agent-harness init --global`), the project around that
+# folder is the workspace; its runs live in ~/.agent-harness/projects/<path>/, and its
+# .agent-harness/settings.toml, AGENTS.md, CLAUDE.md, and skills are added. Started here,
+# nothing changes. docs/RUN_ANYWHERE.md.
+[project]
+root = "cwd"
+claude_code = true               # also CLAUDE.md, .claude/skills, ~/.claude/skills
+# Every ~/.claude/skills description is in each system prompt (68 skills ≈ 3.5K tokens of a
+# 16K window); narrow them by name, e.g. claude_skills = ["aisystems-video", "hyperframes*"].
+claude_skills = ["*"]
+
 # --- Coding tools (Docker sandbox) ----------------------------------------------
 # Needs a running Docker daemon. python:3.12 (not -slim) includes git.
 [coding]

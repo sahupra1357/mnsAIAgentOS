@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 from dataclasses import dataclass, field, replace
 from collections.abc import Callable
@@ -13,6 +14,7 @@ from pathlib import Path
 from .orchestration.agents import SubagentDefinition, SubagentLimits
 from .knowledge.artifacts import READ_ARTIFACT_SPEC, LocalArtifactStore, read_artifact_handler
 from .coding import create_coding_tool_runtime
+from .config.project import project_state_dir
 from .config.loader import (
     AgentConfig,
     ConfigError,
@@ -176,46 +178,63 @@ def build_application(
     hooks: HookRunner | None = None,
     config_overrides: Mapping[str, Any] | None = None,
     model_resolver: ModelResolver | None = None,
+    workspace: Path | None = None,
 ) -> HarnessApplication:
     """Compose the default local application from replaceable implementations.
 
     ``config_overrides`` is merged over the config file (see ``load_config``).
     ``model_resolver`` replaces the model gateway for runs, guardrails, and memory
     embeddings (scripted scenarios); ``app.models`` stays the configured gateway.
+    ``workspace`` names the project root of a project run (the CLI's ``--workspace``);
+    with ``[project] root = "cwd"`` it is found from the launch directory instead.
     """
 
-    config = load_config(config_path, layered=True, overrides=config_overrides)
+    config = load_config(config_path, layered=True, overrides=config_overrides, workspace=workspace)
     base_path = Path(config_path).parent
+    # Project runs (Phase 24): the workspace is the project, run state lives in its state dir.
+    project_root = config.project_root
+    state = state_directory(config)
+    state_path = state or base_path
+    workspace_base = project_root or base_path
     context_policy = context_policy or context_policy_from_config(config)
     # Validated before any store or file is opened.
     context_limits = limits_from_profiles(config.models)
     summarizer = _summarizer(config, context_limits, context_policy)
     plugins = enabled_plugins(resolve_path(config.plugins.directory, base_path), config.plugins.enabled)
     templates = discover_templates(
-        [resolve_path(path, base_path) for path in config.templates.paths]
+        _project_dirs(config, "templates")
+        + [resolve_path(path, base_path) for path in config.templates.paths]
         + [plugin.templates_dir for plugin in plugins if plugin.templates_dir]
     )
     skills = discover_skills(
-        ([resolve_path(path, base_path) for path in config.skills.paths] if config.skills.enabled else [])
+        (
+            _project_dirs(config, "skills")
+            + [resolve_path(path, base_path) for path in config.skills.paths]
+            if config.skills.enabled
+            else []
+        )
         + [plugin.skills_dir for plugin in plugins if plugin.skills_dir]
     )
+    if config.skills.enabled:
+        for name, skill in _claude_code_skills(config).items():
+            skills.setdefault(name, skill)
     models = ModelGateway(config)
     run_models: ModelResolver = model_resolver if model_resolver is not None else models
     # Configuration errors surface before any database connection is attempted.
     if config.memory.enabled and config.memory.backend == "sqlite":
-        _memory_path(config, base_path, database_path)
+        _memory_path(config, state_path, database_path)
     elif config.memory.enabled:
         memory_postgres_url(config, database_path)
     store = open_run_store(database_path, config)
     memory: Any = None  # SQLiteMemoryStore or PostgresMemoryStore
     try:
         artifacts = (
-            LocalArtifactStore(base_path / config.artifacts.directory)
+            LocalArtifactStore(_state_file(config.artifacts.directory, base_path, state))
             if config.artifacts.enabled
             else None
         )
         memory = (
-            open_memory_store(config, base_path, database_path, models=run_models)
+            open_memory_store(config, state_path, database_path, models=run_models)
             if config.memory.enabled
             else None
         )
@@ -224,7 +243,7 @@ def build_application(
             if config.coding.enabled:
                 tool_runtime = create_coding_tool_runtime(
                     config.coding,
-                    base_path=Path(config_path).parent,
+                    base_path=workspace_base,
                 )
             else:
                 tool_runtime = create_default_runtime()
@@ -248,9 +267,16 @@ def build_application(
                     subdirectory_filenames = validate_instruction_filenames(config.instructions.filenames)
                 except ValueError as exc:
                     raise ConfigError(f"instructions.filenames: {exc}") from exc
+            instruction_files: tuple[str, ...] = config.instructions.files
+            if project_root is not None:
+                # Configured files stay next to the config; the project's own files follow, and
+                # subdirectory files are discovered between the project root and the launch dir.
+                instruction_files = tuple(
+                    str(resolve_path(entry, base_path)) for entry in config.instructions.files
+                ) + tuple(str(project_root / name) for name in _project_instruction_files(config))
             system_context = SystemContextBuilder(
-                instruction_files=config.instructions.files if config.instructions.enabled else (),
-                base=base_path,
+                instruction_files=instruction_files if config.instructions.enabled else (),
+                base=project_root or base_path,
                 max_bytes=config.instructions.max_bytes,
                 skills=skills,
                 subdirectory_filenames=subdirectory_filenames,
@@ -302,8 +328,8 @@ def build_application(
             system_context=system_context,
             snapshots=(
                 WorkspaceSnapshotter(
-                    config.coding.workspace_path(base=base_path),
-                    artifacts or LocalArtifactStore(base_path / ".agent-harness" / "snapshots"),
+                    config.coding.workspace_path(base=workspace_base),
+                    artifacts or LocalArtifactStore(snapshot_directory(config, base_path)),
                 )
                 if config.coding.enabled
                 else None
@@ -481,6 +507,69 @@ def open_memory_store(
     except BaseException:
         store.close_now()
         raise
+
+
+def state_directory(config: HarnessConfig) -> Path | None:
+    """The run-state folder of a project run (created on demand); ``None`` otherwise."""
+
+    if config.project_root is None:
+        return None
+    state = project_state_dir(config.project_root, config.project.state_dir, os.environ)
+    state.mkdir(parents=True, exist_ok=True)
+    return state
+
+
+def default_database(config: HarnessConfig, fallback: str = "agent-harness.sqlite3") -> str:
+    """The CLI's default run database: in the project's state folder for project runs."""
+
+    state = state_directory(config)
+    return str(state / "runs.sqlite3") if state is not None else fallback
+
+
+def snapshot_directory(config: HarnessConfig, base_path: Path) -> Path:
+    """Where rewind snapshots go when artifacts are off."""
+
+    state = state_directory(config)
+    return state / "snapshots" if state is not None else base_path / ".agent-harness" / "snapshots"
+
+
+def _state_file(value: str, base_path: Path, state: Path | None) -> Path:
+    """A configured state path: next to the config, or by name in a project's state folder."""
+
+    if state is None:
+        return base_path / value
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else state / path.name
+
+
+def _project_dirs(config: HarnessConfig, kind: str) -> list[Path]:
+    """``<project>/.agent-harness/<kind>`` (and ``.claude/skills``) for project runs."""
+
+    root = config.project_root
+    if root is None:
+        return []
+    dirs = [root / ".agent-harness" / kind]
+    if kind == "skills" and config.project.claude_code:
+        dirs.append(root / ".claude" / "skills")
+    return dirs
+
+
+def _claude_code_skills(config: HarnessConfig) -> dict[str, Skill]:
+    """``~/.claude/skills`` whose names match ``[project] claude_skills``."""
+
+    if config.project_root is None or not config.project.claude_code:
+        return {}
+    found = discover_skills([Path(os.environ.get("HOME", str(Path.home()))) / ".claude" / "skills"])
+    patterns = config.project.claude_skills
+    return {name: skill for name, skill in found.items()
+            if any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)}
+
+
+def _project_instruction_files(config: HarnessConfig) -> tuple[str, ...]:
+    names = config.project.instruction_files
+    if config.project.claude_code and "CLAUDE.md" not in names:
+        names = (*names, "CLAUDE.md")
+    return names
 
 
 def _memory_path(config: HarnessConfig, base_path: Path, database: str | PathLike[str]) -> Path:

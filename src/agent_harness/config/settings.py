@@ -9,9 +9,16 @@ user        ~/.agent-harness/settings.toml                    personal defaults
             (AGENT_HARNESS_USER_SETTINGS)
 project     the --config file (e.g. models.toml)              shared, committed
 local       <config>.local.toml next to it                    personal, gitignored
+workspace   <project>/.agent-harness/settings.toml            per project (Phase 24)
+workspace-  <project>/.agent-harness/settings.local.toml      personal, per project
+local
 enterprise  /etc/agent-harness/settings.toml                  managed policy
             (AGENT_HARNESS_ENTERPRISE_SETTINGS)
 ==========  ================================================  ==================
+
+The two workspace layers apply only to project runs (``[project] root = "cwd"``
+or ``--workspace``, see ``config/project.py``) with ``[project] settings`` on;
+relative paths in them resolve against the project root.
 
 Merge rules: tables merge key by key; scalars from a later layer replace
 earlier ones; lists concatenate (duplicates dropped), so permission rules,
@@ -32,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-LAYER_ORDER = ("user", "project", "local", "enterprise")
+LAYER_ORDER = ("user", "project", "local", "workspace", "workspace-local", "enterprise")
 
 
 class SettingsError(ValueError):
@@ -44,6 +51,7 @@ class LayeredSettings:
     raw: dict[str, Any]
     layers: list[tuple[str, Path]] = field(default_factory=list)
     provenance: dict[str, str] = field(default_factory=dict)  # dotted key -> layer(s)
+    project_root: Path | None = None  # set for project runs (Phase 24)
 
 
 def layer_paths(config_path: Path | None, environ: Mapping[str, str]) -> list[tuple[str, Path]]:
@@ -60,21 +68,51 @@ def layer_paths(config_path: Path | None, environ: Mapping[str, str]) -> list[tu
     return paths
 
 
-def load_layers(config_path: Path | None, environ: Mapping[str, str]) -> LayeredSettings:
+def load_layers(
+    config_path: Path | None,
+    environ: Mapping[str, str],
+    *,
+    workspace: Path | None = None,
+    cwd: Path | None = None,
+) -> LayeredSettings:
+    """Merge the layers. Whether this is a project run is decided after the user,
+    project, and local layers; the workspace layers then go before enterprise."""
+
+    from .project import absolutize_layer, project_layer_paths, resolve_project_root
+
     settings = LayeredSettings(raw={})
-    for name, path in layer_paths(config_path, environ):
-        if not path.is_file():
-            if name == "project" and config_path is not None:
-                raise SettingsError(f"could not load config {path}: file not found")
-            continue
-        try:
-            with path.open("rb") as file:
-                data = tomllib.load(file)
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise SettingsError(f"could not load {name} settings {path}: {exc}") from exc
-        merge_into(settings.raw, data, layer=name, provenance=settings.provenance)
-        settings.layers.append((name, path))
+    paths = layer_paths(config_path, environ)
+    enterprise = paths.pop()
+    for name, path in paths:
+        _merge_layer(settings, name, path, required=name == "project" and config_path is not None)
+    root = resolve_project_root(
+        settings.raw, environ, config_dir=config_path.parent if config_path is not None else None,
+        workspace=workspace, cwd=cwd,
+    )
+    settings.project_root = root
+    project = settings.raw.get("project")
+    if root is not None and not (isinstance(project, Mapping) and project.get("settings") is False):
+        for name, path in project_layer_paths(root):
+            _merge_layer(settings, name, path, transform=lambda data: absolutize_layer(data, root))
+    _merge_layer(settings, *enterprise)
     return settings
+
+
+def _merge_layer(
+    settings: LayeredSettings, name: str, path: Path, *, required: bool = False, transform: Any = None
+) -> None:
+    if not path.is_file():
+        if required:
+            raise SettingsError(f"could not load config {path}: file not found")
+        return
+    try:
+        with path.open("rb") as file:
+            data = tomllib.load(file)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SettingsError(f"could not load {name} settings {path}: {exc}") from exc
+    merge_into(settings.raw, transform(data) if transform else data, layer=name,
+               provenance=settings.provenance)
+    settings.layers.append((name, path))
 
 
 def merge_into(
@@ -107,6 +145,8 @@ def render_effective(settings: LayeredSettings) -> str:
     """Human-readable effective settings with the layer each value came from."""
 
     lines = ["# layers: " + ", ".join(f"{name}={path}" for name, path in settings.layers)]
+    if settings.project_root is not None:
+        lines.append(f"# project: {settings.project_root}")
 
     def walk(value: Any, prefix: str) -> None:
         if isinstance(value, dict):

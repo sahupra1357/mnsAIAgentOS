@@ -26,13 +26,13 @@ DEFAULT_ALLOWED_COMMANDS = (
     "python3",
     "uv",
     "yarn",
+    "bash",
+    "curl",
 )
 
 _ALWAYS_FORBIDDEN = {
-    "bash",
     "chmod",
     "chown",
-    "curl",
     "dd",
     "docker",
     "doas",
