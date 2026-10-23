@@ -216,6 +216,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   A doctor waiting on a crash-looping endpoint keeps Modal starting containers (the proxy does not
   cancel abandoned requests): kill it, then redeploy the fix. `tests/test_modal_shared_l4.py` checks the router
   with in-process fakes and the scripts' app names against each `modal.App(...)`.
+- **`.env`-driven profiles fail hard.** A profile switched off (`enabled = false`) may omit `model` /
+  `endpoint`; once enabled, a missing field is a `ConfigError` naming the `AGENT_HARNESS_MODEL__X__FIELD`
+  variable. `[models.modal_shared]` has no model or endpoint in `models.toml`, so `.env` must set both
+  (no hard-coded fallback that silently asks a server for a model it does not serve).
 - **Borrowed companions and affinity (Modal Shared Endpoints).** Profile fields `embedding_profile` /
   `guard_profile` name another profile (usually a companion such as `modal.embed`) for memory and the
   guard when that profile is the default; they exclude `embedding_model` / `guard_model`. A missing

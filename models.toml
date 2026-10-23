@@ -151,8 +151,8 @@ gpu_usd_per_second = 0.001261
 [models.modal_shared]
 enabled = false
 adapter = "openai_compatible"          # one bearer token; the modal adapter wants Modal-Key/Secret
-model = "deepseek-ai/DeepSeek-V4.1-Flash"
-endpoint = "https://WORKSPACE--ep-deepseek-v4-1-flash-server.us-west.modal.direct/v1"
+# No model or endpoint here: .env must set AGENT_HARNESS_MODEL__MODAL_SHARED__MODEL and
+# __ENDPOINT, so a missing or stale value fails at load instead of running a hard-coded default.
 api_key_env = "MODAL_SHARED_TOKEN"
 # One routing key per conversation (run id + summary point), so its requests reach the container
 # that has its prefix cached; cached prompt tokens cost a tenth (pricing below).
