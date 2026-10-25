@@ -287,6 +287,7 @@ class FullConfigTests(unittest.TestCase):
         (server,) = [s for s in c.mcp_servers if s.name == "excalidraw"]
         self.assertEqual((server.transport, server.url), ("http", "https://mcp.excalidraw.com/mcp"))
         self.assertEqual(server.tools, ("read_me", "create_view"))  # widget-only tools are not offered
+        self.assertEqual(server.trusted, ("read_me",))  # fixed docs: no taint prompts after it
         self.assertIn("mcp.excalidraw.com", c.network.allowed_hosts)
         self.assertIn("api.tavily.com", c.network.allowed_hosts)
         from agent_harness.tools.sources import host_policy_from
@@ -297,7 +298,7 @@ class FullConfigTests(unittest.TestCase):
             self.assertTrue(allowed(host), host)
         self.assertFalse(allowed("evil.example"))
         self.assertEqual(c.orchestrator.reserve_tokens_per_run, 200_000)
-        self.assertEqual((c.orchestrator.turn_max_steps, c.orchestrator.turn_max_wall_seconds), (100, 3600))
+        self.assertEqual((c.orchestrator.turn_max_steps, c.orchestrator.turn_max_wall_seconds), (200, 3600))
         self.assertEqual(c.orchestrator.max_cut_off_retries, 2)
         self.assertEqual(dict(c.summarization.parameters),
                          {"chat_template_kwargs": {"enable_thinking": False}})

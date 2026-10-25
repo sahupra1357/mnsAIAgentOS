@@ -706,6 +706,9 @@ def _decode_run(value: str) -> RunRecord:
         output_schema=data.get("output_schema"),
         output=data.get("output"),
         guarded_through=int(data.get("guarded_through", 0)),
+        taint_accepted_at=(
+            int(data["taint_accepted_at"]) if data.get("taint_accepted_at") is not None else None
+        ),
         end_user=data.get("end_user"),
         dispatch=str(data.get("dispatch", "inline")),
         plan=_decode_plan(data.get("plan")),

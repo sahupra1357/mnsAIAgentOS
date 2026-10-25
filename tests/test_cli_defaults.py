@@ -17,6 +17,7 @@ from unittest import mock
 import agent_harness.cli.main as cli
 from agent_harness.config.loader import ConfigError, discover_config_path, load_config
 from agent_harness.domain import (
+    EventType,
     FinishReason,
     JsonObject,
     ModelRequest,
@@ -225,9 +226,20 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
         await session.loop()
         self.assertEqual(app.deployed, [{"env": "prod"}])
         self.assertEqual(io_.said, ["deployed", "ok staging"])
-        self.assertIn("allow? [y/N] ", io_.prompts)
+        self.assertTrue(io_.prompts[1].startswith("allow? [y/N/a] "), io_.prompts)
         self.assertIn("? Which env?", io_.notes)
         self.assertIn("staging", model.requests[-1].messages[-1].content)
+
+    async def test_a_allows_the_rest_of_the_turn(self) -> None:
+        # "a" approves and stops taint-mode prompts until the next message (2026-10-25).
+        model = Model([call("deploy", {"env": "prod"}), text("deployed")])
+        app = app_for(model)
+        session = ChatSession(app, ChatOptions(profile="p"), ScriptedIO(["deploy", "a"]))
+        await session.loop()
+        self.assertEqual(app.deployed, [{"env": "prod"}])
+        resolved = [e.payload for e in await app.store.list_events(session.run_id)
+                    if e.type is EventType.APPROVAL_RESOLVED]
+        self.assertEqual(resolved[0]["rest_of_turn"], True)
 
     async def test_denied_call_and_stopped_run_start_fresh(self) -> None:
         model = Model([call("deploy", {"env": "prod"}), text("not deployed"), text("new run")])

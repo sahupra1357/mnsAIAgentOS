@@ -23,6 +23,9 @@ class McpServerConfig:
     url: str | None = None
     headers_env: Mapping[str, str] = field(default_factory=dict)
     read_only: tuple[str, ...] = ()
+    # Server tools whose output is trusted (not wrapped as untrusted data, no taint), e.g. a
+    # tool that returns fixed documentation. Every other tool's output is untrusted.
+    trusted: tuple[str, ...] = ()
     tools: tuple[str, ...] | None = None  # allowlist of server tool names; None = all
     trust_annotations: bool = False
     default_risk: ToolRisk = ToolRisk.HIGH_RISK

@@ -1142,6 +1142,7 @@ class AgentOrchestrator:
         mode: PermissionMode | str | None = None,
         actor: str | None = None,
         answer: str | None = None,
+        rest_of_turn: bool = False,
     ) -> RunRecord:
         """Resolve one paused tool call without executing it in this operation.
 
@@ -1149,6 +1150,8 @@ class AgentOrchestrator:
         plan). ``mode`` applies to plan approvals: the permission mode to switch
         to once the plan is approved (default ``default``). ``answer`` answers an
         ``ask_user`` question (``kind = "question"``); denying one declines it.
+        ``rest_of_turn`` approves a tool call and stops taint mode asking again until
+        the user's next message (other approval reasons still ask).
         """
 
         if feedback is not None:
@@ -1171,6 +1174,7 @@ class AgentOrchestrator:
             return await self._resolve_child_approval(
                 run, events, waiting, call_id=call_id, approved=approved,
                 feedback=feedback, mode=target_mode, actor=actor, answer=answer,
+                rest_of_turn=rest_of_turn,
             )
         if request is None or request.payload.get("call_id") != call_id:
             raise ValueError("tool call is not awaiting approval")
@@ -1184,6 +1188,8 @@ class AgentOrchestrator:
             raise ValueError("only an ask_user question takes an answer")
         if question and approved and answer is None:
             raise ValueError("a question is answered with answer text, not approved")
+        if rest_of_turn and (not approved or request.payload.get("kind") in {"plan", "question"}):
+            raise ValueError("only an approved tool call can allow the rest of the turn")
 
         now = self._clock()
         if run.started_at is not None and now > request.created_at:
@@ -1200,6 +1206,9 @@ class AgentOrchestrator:
             resolution["kind"] = "question"
         if answer is not None:
             resolution["answer_chars"] = len(answer)  # the text itself goes to the model only
+        if rest_of_turn:
+            resolution["rest_of_turn"] = True
+            run.taint_accepted_at = len(run.messages)
         approval_event = RunEvent(
             run_id=run.id,
             type=EventType.APPROVAL_RESOLVED,
@@ -1559,13 +1568,14 @@ class AgentOrchestrator:
         mode: PermissionMode | None,
         actor: str | None = None,
         answer: str | None = None,
+        rest_of_turn: bool = False,
     ) -> RunRecord:
         """Forward a decision to the subagent the run waits on, then unpause it."""
 
         child_id = str(waiting.payload["child_run_id"])
         await self.resolve_approval(
             child_id, call_id=call_id, approved=approved, feedback=feedback, mode=mode, actor=actor,
-            answer=answer,
+            answer=answer, rest_of_turn=rest_of_turn,
         )
         now = self._clock()
         if run.started_at is not None and now > waiting.created_at:
@@ -2680,7 +2690,7 @@ class AgentOrchestrator:
             and run is not None
             and spec.risk is not ToolRisk.READ_ONLY
             and decision.action in {None, "allow"}
-            and _tainted(run.messages)
+            and _tainted(run.messages, run.taint_accepted_at)
         ):
             # Taint mode: untrusted content may be steering the model, so a person decides.
             return PermissionDecision(
@@ -2986,6 +2996,8 @@ class AgentOrchestrator:
         archived = run.messages[cut:]
         run.archived_messages.extend(archived)
         del run.messages[cut:]
+        if run.taint_accepted_at is not None and run.taint_accepted_at > cut:
+            run.taint_accepted_at = None  # accepted for a turn that was undone
         # A summary that covers archived messages would describe undone work.
         summary_cleared = run.context_summary is not None and run.context_summary.covers > cut
         if summary_cleared:
@@ -4462,11 +4474,23 @@ def _guarded_input(message: Message) -> bool:
             and message.content.startswith("The user answered:"))
 
 
-def _tainted(messages: Sequence[Message]) -> bool:
-    """True when untrusted tool output arrived since the latest user message."""
+def _tainted(messages: Sequence[Message], accepted_at: int | None = None) -> bool:
+    """True when untrusted tool output arrived since the user's latest message.
 
+    Hook context and orchestrator notes (``[Plan]``, ``[Budget]``) are user messages the user
+    did not write, so they do not end the taint. ``accepted_at`` (``RunRecord.taint_accepted_at``):
+    the user allowed the rest of the turn when the run had that many messages, so nothing is
+    tainted until they write again.
+    """
+
+    def from_user(message: Message) -> bool:
+        return message.role is Role.USER and not message.content.startswith(
+            ("[Context from hooks]", *ORCHESTRATOR_NOTE_PREFIXES))
+
+    if accepted_at is not None and not any(from_user(m) for m in messages[accepted_at:]):
+        return False
     for message in reversed(messages):
-        if message.role is Role.USER and not message.content.startswith("[Context from hooks]"):
+        if from_user(message):
             return False
         if message.role is Role.TOOL and message.content.startswith("<untrusted-tool-output"):
             return True

@@ -381,10 +381,18 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (await harness.call("POST", f"/runs/{run_id}/approval", {"call_id": "other", "decision": "allow"}))[0], 409
         )
+        self.assertEqual(
+            (await harness.call("POST", f"/runs/{run_id}/approval",
+                                {"call_id": "call-1", "decision": "allow", "rest_of_turn": "yes"}))[0], 400
+        )
+        self.assertEqual(
+            (await harness.call("POST", f"/runs/{run_id}/approval",
+                                {"call_id": "call-1", "decision": "deny", "rest_of_turn": True}))[0], 409
+        )
         self.assertEqual(harness.deployer.deployed, [])
 
         status, decided = await harness.call(
-            "POST", f"/runs/{run_id}/approval", {"call_id": "call-1", "decision": "allow"}
+            "POST", f"/runs/{run_id}/approval", {"call_id": "call-1", "decision": "allow", "rest_of_turn": True}
         )
         self.assertEqual((status, decided["decision"]), (202, "allow"))
         await harness.worker.run_once()

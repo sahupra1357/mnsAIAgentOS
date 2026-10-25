@@ -309,6 +309,9 @@ class RunRecord:
     output: Any = None
     # Guardrails: messages[:guarded_through] have passed the input guard.
     guarded_through: int = 0
+    # Taint mode: the user approved with "allow for the rest of this turn" when the run had this
+    # many messages, so untrusted output asks again only after their next message.
+    taint_accepted_at: int | None = None
     # Chat API (Phase 12b): the end user a service created this run for (audit, listing).
     end_user: str | None = None
     # Worker reliability (Phase 12c): "queue" runs are executed by queue workers and are

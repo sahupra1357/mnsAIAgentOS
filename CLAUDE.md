@@ -209,7 +209,7 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   and created (st_birthtime) after the run started (`CURRENT_RUN_STARTED`, set by `_run`). No creation times
   (Linux) means no rm. `run_command`'s description says so when rm is allowed, and shows argv and `bash -lc` usage.
 - **Terminal turn budget.** `run` and `chat` use `[orchestrator] turn_max_steps` / `turn_max_wall_seconds`
-  (root config: 100 / 3600) unless `--max-steps` / `--max-wall-seconds` are given; before, they fixed 20 / 300.
+  (root config: 200 / 3600) unless `--max-steps` / `--max-wall-seconds` are given; before, they fixed 20 / 300.
 - **Absolute paths.** Workspace tools accept an absolute path under the workspace root (made relative,
   then the usual checks); paths elsewhere are still refused.
 - **Workspace errors.** A wrong path is reported as "no such file or directory: X; search_files
@@ -278,6 +278,16 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   event lists them (`left`), `run`/`chat` print "plan stopped with N step(s) left", and the next `continue_run`
   reopens the plan (`resumed` event; a step left in progress starts again). A finished or abandoned plan stays done
   (`resumable_steps`). The video pipeline's "render" and "package" steps never ran because follow-ups dropped the plan.
+- **Taint prompts (2026-10-25).** One `excalidraw__read_me` call (MCP output is untrusted) made all 32 later
+  commands of a video run ask, even in bypass mode. Now:
+  - `[[mcp_servers]] trusted = [...]` lists tools whose output is trusted (root config: Excalidraw's `read_me`);
+    `McpToolSource.register` applies it to catalog-cached specs too.
+  - Answering `a` in the chat (`rest_of_turn` on `resolve_approval`, `approve --rest-of-turn`, the API) sets
+    `RunRecord.taint_accepted_at`: no taint prompts until the user's next message. Rewind clears it.
+  - `_tainted` no longer treats `[Plan]`/`[Budget]` notes or hook context as the user's next message.
+
+  Approval waits were already left out of the wall clock (`resolve_approval` moves `started_at`); that run
+  stopped at the 100-step turn limit, now `turn_max_steps = 200`.
 - **Guard and embedding tokens (2026-10-24).** Each guard check and each embedding made inside a tool call is a
   `usage_recorded` event (`kind` guard/embedding) and a Langfuse generation; embeddings now count toward
   `consumed_tokens`. Clients report embeddings through `model_gateway/usage.py` (`collect_embedding_usage`).

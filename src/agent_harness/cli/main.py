@@ -140,6 +140,10 @@ def _parser() -> argparse.ArgumentParser:
     approve.add_argument("--call-id", help="call ID when more than one approval is pending")
     approve.add_argument("--feedback", help="message returned to the model with a denial")
     approve.add_argument(
+        "--rest-of-turn", action="store_true",
+        help="with --allow: stop asking about untrusted tool output until the next message",
+    )
+    approve.add_argument(
         "--mode",
         choices=["default", "accept_edits", "plan", "bypass"],
         help="for plan approvals: permission mode to switch to",
@@ -480,6 +484,7 @@ async def _approve_command(args: argparse.Namespace) -> int:
             approved=args.allow,
             feedback=args.feedback,
             mode=args.mode,
+            rest_of_turn=args.rest_of_turn,
         )
         resumed = await app.orchestrator.resume(resolved.id)
         return await _print_result(app, resumed)

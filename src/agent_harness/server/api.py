@@ -33,7 +33,7 @@ a principal with a tenant and a role (viewer < operator < admin; see
     GET  /runs/{id}/usage
     POST /runs/{id}/resume
     GET  /runs/{id}/approval
-    POST /runs/{id}/approval        {"call_id", "decision", "feedback"?, "mode"?}
+    POST /runs/{id}/approval        {"call_id", "decision", "feedback"?, "mode"?, "rest_of_turn"?}
     POST /runs/{id}/answer          {"call_id", "answer"}  (reply to an ask_user question;
                                      "decision": "deny" on /approval declines it)
     POST /runs/{id}/mode            {"mode": "default" | "accept_edits" | "plan" | "bypass"}
@@ -779,7 +779,7 @@ class HarnessAPI:
 
     async def _decide(self, send: Send, run_id: str, receive: Receive, principal: Principal) -> None:
         body = await self._body(receive)
-        unknown = set(body) - {"call_id", "decision", "feedback", "mode"}
+        unknown = set(body) - {"call_id", "decision", "feedback", "mode", "rest_of_turn"}
         if unknown:
             raise ApiError(400, f"unknown fields: {', '.join(sorted(unknown))}")
         decision = body.get("decision")
@@ -795,6 +795,9 @@ class HarnessAPI:
         if pending.call_id != call_id:
             raise ApiError(409, f"pending call ID is {pending.call_id!r}")
         feedback = _text(body.get("feedback"), "feedback", required=False)
+        rest_of_turn = body.get("rest_of_turn", False)
+        if not isinstance(rest_of_turn, bool):
+            raise ApiError(400, "rest_of_turn must be true or false")
         try:
             run = await self._orchestrator.resolve_approval(
                 run_id,
@@ -803,6 +806,7 @@ class HarnessAPI:
                 feedback=feedback,
                 mode=_mode(body.get("mode")),
                 actor=principal.name,
+                rest_of_turn=rest_of_turn,
             )
         except ValueError as exc:
             raise ApiError(409, str(exc)) from exc
