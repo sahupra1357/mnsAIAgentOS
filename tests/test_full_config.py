@@ -92,10 +92,11 @@ class FullConfigTests(unittest.TestCase):
             "rate limit": c.api_rate_limit.requests_per_minute > 0,
             "cors": bool(c.api_cors_origins),
             # 2026-10-23: the user moved to one global config that runs commands on the host,
-            # like Claude Code (any program; rm, sudo, ... still forbidden), with no folder overrides.
+            # like Claude Code (any program; sudo, ... still forbidden), with no folder overrides.
+            # 2026-10-24: rm is allowed, for files the run created only (coding/removal.py).
             "coding (local, any command)": c.coding.enabled and c.coding.execution_runtime == "local"
             and c.coding.allowed_commands == ("*",) and "sh" not in c.coding.forbidden_commands
-            and {"rm", "sudo"} <= c.coding.forbidden_commands,
+            and "rm" not in c.coding.forbidden_commands and "sudo" in c.coding.forbidden_commands,
             "no per-project settings": not c.project.settings,
         }
         self.assertEqual([name for name, value in on.items() if not value], [])
@@ -183,7 +184,10 @@ class FullConfigTests(unittest.TestCase):
         guardrails.validate(["git", "status"])  # git is allowed (enable_git_commit)
         self.assertEqual(action(["cat", ".env"]), "ask")
         self.assertEqual(action(["head", "-n", "5", ".env"]), "ask")
-        self.assertEqual(action(["rm", "-rf", "."]), "deny")
+        # rm is no longer denied by a rule; the guardrails refuse -r/-rf and removal.py checks each file.
+        self.assertIsNone(action(["rm", "scratch.png"]))
+        with self.assertRaisesRegex(CommandRejected, "strictly prohibited"):
+            guardrails.validate(["rm", "-rf", "."])
         self.assertIsNone(action(["python3", "x.py"]))  # other commands still pause
         with self.assertRaises(CommandRejected):
             guardrails.validate(["find", ".", "-delete"])
@@ -341,6 +345,16 @@ class LiveAuditHookTests(AuditHookTests):
     """The copy the root models.toml runs (Phase 17) behaves the same."""
 
     script = ROOT / ".agent-harness" / "hooks" / "audit_hook.py"
+
+    def test_plain_rm_is_left_to_the_harness_and_recursive_rm_is_refused(self) -> None:
+        # 2026-10-24: rm may delete files the run created (coding/removal.py checks each one).
+        with tempfile.TemporaryDirectory() as directory:
+            decide = lambda argv: self.run_hook(  # noqa: E731
+                {"event": "pre_tool", "run_id": "r", "tool": "run_command", "arguments": {"argv": argv}},
+                directory)["decision"]
+            self.assertEqual(decide(["rm", "-f", "renders/.frame0.png"]), "allow")
+            for argv in (["rm", "-r", "x"], ["rm", "x", "-Rf"], ["/bin/rm", "--recursive", "x"], ["rm", "-d", "x"]):
+                self.assertEqual(decide(argv), "deny", argv)
 
 
 class EgressGuardHookTests(unittest.TestCase):

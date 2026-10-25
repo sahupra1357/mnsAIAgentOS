@@ -20,12 +20,12 @@ from .execution import (
     ExecutionRuntime,
     LocalProcessRuntime,
 )
-from .guardrails import CommandGuardrails, CommandRejected
+from .guardrails import CommandGuardrails, CommandRejected, command_allowed
 from .workspace import WorkspaceBoundary, WorkspacePathNotFound, WorkspaceViolation
 
 
 CODING_AGENT_SYSTEM_PROMPT = """You are a careful coding agent working inside one configured workspace.
-Inspect before editing. Prefer narrow patches. Use structured argv commands, run the relevant tests, inspect the final diff, and summarize changed files and verification. Read-only inspection may run automatically. File writes, code execution, commits, and pull requests require explicit user approval. A denial is final for that exact call; choose a safer alternative or explain the limitation. Never attempt to bypass tool policy, workspace boundaries, command allowlists, or the Docker sandbox."""
+Inspect before editing. Prefer narrow patches. Use structured argv commands, run the relevant tests, inspect the final diff, and summarize changed files and verification. Read-only inspection may run automatically. File writes, code execution, commits, and pull requests require explicit user approval. A denial is final for that exact call; choose a safer alternative or explain the limitation. Never attempt to bypass tool policy, workspace boundaries, command allowlists, or the execution environment (a Docker sandbox, or this machine when execution is local; the command tools say which)."""
 
 
 def create_coding_tool_runtime(
@@ -50,6 +50,7 @@ def create_coding_tool_runtime(
         command_timeout_seconds=config.command_timeout_seconds,
         enable_git_commit=config.enable_git_commit,
         enable_pull_requests=config.enable_pull_requests,
+        rm_allowed="rm" not in guardrails.forbidden_commands and command_allowed("rm", guardrails.allowed_commands),
     )
     tool_runtime = ToolRuntime(
         registry,
@@ -92,6 +93,7 @@ def register_coding_tools(
     command_timeout_seconds: float = 120.0,
     enable_git_commit: bool = True,
     enable_pull_requests: bool = False,
+    rm_allowed: bool = False,
 ) -> None:
     async def read_file(arguments: JsonObject) -> JsonObject:
         return _safe_workspace_call(
@@ -282,6 +284,7 @@ def register_coding_tools(
         ),
         git_diff,
     )
+    where = getattr(execution_runtime, "location", "in the configured execution environment")
     command_schema = _object_schema(
         {
             "argv": {
@@ -298,7 +301,7 @@ def register_coding_tools(
     registry.register(
         ToolSpec(
             name="run_tests",
-            description="Run an allowlisted test command in the configured code-execution sandbox.",
+            description=f"Run an allowlisted test command {where}.",
             input_schema=command_schema,
             timeout_seconds=command_timeout_seconds + 5,
             risk=ToolRisk.HIGH_RISK,
@@ -309,7 +312,13 @@ def register_coding_tools(
     registry.register(
         ToolSpec(
             name="run_command",
-            description="Run one structured, allowlisted argv command in the configured sandbox; shell strings are not accepted.",
+            description=(
+                f"Run one allowlisted command {where}, given as an argv list such as "
+                '["./script.sh", "arg"]; one string with the whole command line is not accepted. '
+                'For pipes, &&, redirects or heredocs, run them through bash: ["bash", "-lc", "<commands>"].'
+                + (" rm deletes only files this run created, one by one (no -r/-rf, no folders, not inside "
+                   "a bash script)." if rm_allowed else "")
+            ),
             input_schema=command_schema,
             timeout_seconds=command_timeout_seconds + 5,
             risk=ToolRisk.HIGH_RISK,
