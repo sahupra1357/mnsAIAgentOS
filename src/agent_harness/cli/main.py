@@ -19,6 +19,7 @@ from pathlib import Path
 
 from ..application import HarnessApplication, build_application, default_database, state_directory
 from ..coding import CODING_AGENT_SYSTEM_PROMPT
+from ..orchestration.handoff import linked_note
 from ..config.loader import ConfigError, HarnessConfig, discover_config_path, load_config
 from ..config.dotenv import load_dotenv
 from ..application import open_memory_store
@@ -102,6 +103,8 @@ def _parser() -> argparse.ArgumentParser:
                           help="plan-and-execute: the model plans, the orchestrator runs the plan")
     planning.add_argument("--no-plan", dest="planning", action="store_false",
                           help="turn off plan-and-execute even if [planning] enabled = true")
+    run.add_argument("--no-link", dest="link", action="store_false", default=True,
+                     help="do not start from a matching earlier run's handoff ([project] link_runs)")
 
     chat = subcommands.add_parser(
         "chat", help="interactive chat in the terminal (the default with no arguments)"
@@ -121,6 +124,13 @@ def _parser() -> argparse.ArgumentParser:
                       help="permission mode (default from [permissions] mode)")
     chat.add_argument("--plan", dest="planning", action="store_true", default=None,
                       help="plan-and-execute for each conversation")
+    reopen = chat.add_mutually_exclusive_group()
+    reopen.add_argument("--continue", dest="continue_latest", action="store_true",
+                        help="continue the latest conversation of this project")
+    reopen.add_argument("--resume", metavar="RUN_ID",
+                        help="continue an earlier conversation (a run id or its first 8+ characters)")
+    chat.add_argument("--no-link", dest="link", action="store_false", default=True,
+                      help="do not start from a matching earlier run's handoff ([project] link_runs)")
 
     resume = subcommands.add_parser("resume", help="resume a durable run by ID")
     _common_runtime_arguments(resume)
@@ -412,7 +422,11 @@ async def _run_command(args: argparse.Namespace) -> int:
             output_schema=_load_schema(args.output_schema),
             messages=messages,
             budget=_turn_budget(args, app.config),
+            link=args.link and app.config.project.link_runs,
         )
+        note = linked_note(await app.store.list_events(run.id))
+        if note:
+            print(f"({note})", file=sys.stderr)
         completed = await app.orchestrator.run(run.id)
         return await _print_result(
             app, completed, streamed=stream is not None and stream.printed,
@@ -457,8 +471,10 @@ async def _chat_command(args: argparse.Namespace) -> int:
             mode=args.mode,
             planning=args.planning,
             budget=_turn_budget(args, app.config),
+            link=args.link and app.config.project.link_runs,
         )
-        return await ChatSession(app, options, TerminalIO(), stream=stream).loop()
+        return await ChatSession(app, options, TerminalIO(), stream=stream).loop(
+            resume=args.resume, latest=args.continue_latest)
 
 
 async def _resume_command(args: argparse.Namespace) -> int:

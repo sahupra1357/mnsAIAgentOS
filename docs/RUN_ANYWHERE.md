@@ -56,6 +56,31 @@ config's own folder, nothing changes.
 daemon, `Task`) work less well; the harness offers `read_file`, `search_files`,
 `apply_patch`, and `run_command`.
 
+## Earlier runs: linking and resuming
+
+Every run of a project is kept in its `runs.sqlite3`. Three ways to build on them:
+
+- **Linking (automatic).** With `[project] link_runs = true` (the root config), a new `run` or
+  `chat` whose first message matches what an earlier run worked on starts with that run's
+  **handoff**: its request, final answer, task list, the files it wrote, and its last summary
+  (a few thousand tokens, not its history). The terminal says so:
+  `(linked to earlier run 3b6878b4 (digital-document-docling, storyboard.md, captions.html))`.
+  - **How it matches:** distinctive terms in your message (slugs, paths, file names) found in
+    a recent handoff (30 days); plain words and "continue" / "where you stopped" add a little.
+    The best match wins, and ties go to the newest.
+  - **What is never linked:** a message with no such terms, and a run that left nothing
+    (no answer, task list, summary or files).
+  - **Turning it off:** `--no-link` for one run or chat.
+- **`previous_runs` tool.** The model can list recent runs, search them (`query`), or read one
+  run's handoff (`run_id`, 8+ characters).
+- **Resuming a whole conversation.**
+  - `agent-harness chat --continue` reopens the conversation used last.
+  - `chat --resume RUN_ID` reopens a given one.
+  - In the chat, `/resume` lists recent conversations and `/resume N` continues one.
+
+Handoffs are written at the end of every turn. Runs from before this feature get one the first
+time they are searched.
+
 ## Project settings
 
 `agent-harness init` in a project writes a commented `.agent-harness/settings.toml`.

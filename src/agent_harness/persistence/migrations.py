@@ -155,6 +155,16 @@ CREATE TABLE IF NOT EXISTS chat_conversations (
 );
 CREATE INDEX IF NOT EXISTS chat_conversations_run ON chat_conversations(run_id);
 """
+# Run handoffs (orchestration/handoff.py): what each top-level run left for later runs.
+HANDOFFS = """
+CREATE TABLE IF NOT EXISTS run_handoffs (
+    run_id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    handoff_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_handoffs_tenant_updated ON run_handoffs(tenant, updated_at);
+"""
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline tables", BASELINE),
     (2, "tool catalog", TOOL_CATALOG),
@@ -164,6 +174,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (6, "queue attempt counts", QUEUE_ATTEMPTS),
     (7, "per-user quotas", USER_QUOTAS),
     (8, "chat conversations", CONVERSATIONS),
+    (9, "run handoffs", HANDOFFS),
 )
 LATEST = MIGRATIONS[-1][0]
 

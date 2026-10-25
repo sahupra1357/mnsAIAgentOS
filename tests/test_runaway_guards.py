@@ -209,8 +209,9 @@ class ToolCallsPerTurnTests(unittest.IsolatedAsyncioTestCase):
     async def _run(self, responses: Sequence[ModelResponse], settings: OrchestratorSettings):
         model = ScriptedModel(responses)
         tools = Tools()
+        self.store = InMemoryRunStore()
         orchestrator = AgentOrchestrator(
-            models=Resolver(model), tools=tools, store=InMemoryRunStore(), settings=settings
+            models=Resolver(model), tools=tools, store=self.store, settings=settings
         )
         run = await orchestrator.create_run(
             model_profile="p", messages=[USER], budget=RunBudget(max_steps=20)
@@ -224,9 +225,29 @@ class ToolCallsPerTurnTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(finished.status, RunStatus.COMPLETED)
         self.assertEqual(sorted({c.id for c in tools.executed}), ["d0", "d1"])
-        refusals = [m for m in finished.messages if m.role is Role.TOOL and "at most 3" in m.content]
-        self.assertEqual(len(refusals), 5)  # every call gets an answer
-        self.assertIn("at most 3", model.requests[1].messages[-1].content)
+        # Since 2026-10-25 the reply is set aside instead of answered call by call.
+        self.assertFalse([m for m in finished.messages if any(c.id.startswith("c") for c in m.tool_calls)])
+        self.assertEqual([len(m.tool_calls) for m in finished.archived_messages], [5])
+        note = model.requests[1].messages[-1]
+        self.assertEqual(note.role, Role.USER)
+        self.assertTrue(note.content.startswith("[Budget] Your last reply made 5 tool calls"))
+
+    async def test_oversized_reply_keeps_the_earlier_context(self) -> None:
+        # 2026-10-25: GLM's 693-call loop stayed in the history with 693 refusals; trimming
+        # them dropped everything the run had read, and it started over blind.
+        finished, tools, model = await self._run(
+            [calls(2, "r"), calls(40, "x"), done()], OrchestratorSettings(max_tool_calls_per_turn=32)
+        )
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        retried = model.requests[2].messages
+        self.assertEqual([m.tool_call_id for m in retried if m.role is Role.TOOL], ["r0", "r1"])
+        self.assertLess(len(retried), 8)  # system/user, the reads, the note: no 40 refusals
+        events = await self.store.list_events(finished.id)
+        discarded = [e.payload for e in events if e.type is EventType.REPLY_DISCARDED]
+        self.assertEqual(discarded, [{"tool_calls": 40, "limit": 32, "archived_messages": 1}])
+        from agent_harness.orchestration.replay import derive_message_skeleton, message_skeleton
+
+        self.assertEqual(derive_message_skeleton(events), message_skeleton(finished.messages))
 
     async def test_run_fails_after_too_many_oversized_replies(self) -> None:
         finished, tools, _ = await self._run(

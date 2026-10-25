@@ -14,6 +14,7 @@ from pathlib import Path
 from .orchestration.agents import SubagentDefinition, SubagentLimits
 from .knowledge.artifacts import READ_ARTIFACT_SPEC, LocalArtifactStore, read_artifact_handler
 from .coding import create_coding_tool_runtime
+from .orchestration.handoff import PREVIOUS_RUNS_SPEC, previous_runs_tool
 from .config.project import project_state_dir
 from .config.loader import (
     AgentConfig,
@@ -258,6 +259,8 @@ def build_application(
                 tool_runtime.register(MEMORY_WRITE_SPEC, write)
             if skills:
                 tool_runtime.register(load_skill_spec(skills), load_skill_handler(skills))
+            if config.project.link_runs and hasattr(store, "recent_handoffs"):
+                tool_runtime.register(PREVIOUS_RUNS_SPEC, previous_runs_tool(store))
         catalog, mcp_sources, sandbox_sources = _load_tool_sources(config, tool_runtime, store, base_path)
         system_context = None
         if config.instructions.enabled or skills:

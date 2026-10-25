@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import math
 import re
 import time
@@ -26,6 +27,13 @@ from agent_harness.orchestration.agents import (
     parse_todos,
 )
 from agent_harness.orchestration.runcontext import CURRENT_RUN_ID, CURRENT_RUN_STARTED
+from agent_harness.orchestration.handoff import (
+    build_handoff,
+    ensure_handoffs,
+    find_link,
+    link_payload,
+    linked_block,
+)
 from agent_harness.server.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
 from agent_harness.orchestration.context import (
     ORCHESTRATOR_NOTE_PREFIXES,
@@ -360,6 +368,9 @@ def _summary_task(messages: Sequence[Message]) -> str | None:
     return first if first == latest else f"{first}\n\nLatest message:\n{latest}"
 
 
+_LOG = logging.getLogger(__name__)
+
+
 class AgentOrchestrator:
     """Advance persisted runs through deterministic model and tool boundaries.
 
@@ -544,8 +555,14 @@ class AgentOrchestrator:
         output_schema: Mapping[str, Any] | None = None,
         end_user: str | None = None,
         enqueue: bool = False,
+        link: bool = False,
     ) -> RunRecord:
         """Create and persist a queued run before any provider is contacted.
+
+        ``link`` (top-level runs whose store keeps handoffs): when the latest user message
+        matches what an earlier run of the project worked on, that run's handoff is added as
+        a system message before the first user message and a ``run_linked`` event records
+        it (orchestration/handoff.py). A prompt that matches nothing links nothing.
 
         The lineage arguments are set when the orchestrator spawns a subagent.
         ``output_schema`` requires the run to end with a result matching that JSON
@@ -592,6 +609,13 @@ class AgentOrchestrator:
             head = next((i for i, m in enumerate(initial_messages) if m.role is not Role.SYSTEM),
                         len(initial_messages))
             initial_messages.insert(head, Message(role=Role.SYSTEM, content=PLANNER_INSTRUCTIONS))
+        found = None
+        if link and parent_run_id is None and not enqueue and not any(m.role is Role.ASSISTANT for m in initial_messages):
+            found = await self._find_link(tenant, initial_messages)
+            if found is not None:
+                first_user = next((i for i, m in enumerate(initial_messages) if m.role is Role.USER),
+                                  len(initial_messages))
+                initial_messages.insert(first_user, Message(role=Role.SYSTEM, content=linked_block(found)))
         if self._guardrails is not None and self._guardrails.uses_canary:
             _add_canary(initial_messages)
         if self._settings.current_date_note and parent_run_id is None:
@@ -680,7 +704,20 @@ class AgentOrchestrator:
                 await release(identifier)
             raise
         self._emit_event(run, event)
+        if found is not None:
+            await self._checkpoint(run, [event], RunEvent(
+                run_id=run.id, type=EventType.RUN_LINKED, payload=link_payload(found), created_at=now))
         return run
+
+    async def _find_link(self, tenant: str, messages: Sequence[Message]) -> Any:
+        """The earlier run the latest user message continues, if any (orchestration/handoff.py)."""
+
+        if getattr(self._store, "recent_handoffs", None) is None:
+            return None
+        prompt = next((m.content for m in reversed(messages) if m.role is Role.USER), "")
+        if not prompt.strip():
+            return None
+        return find_link(prompt, await ensure_handoffs(self._store, tenant), now=self._clock())
 
     async def _admit(
         self,
@@ -782,12 +819,19 @@ class AgentOrchestrator:
             self._usage_cache[key] = cached
         return usage_over_limit(quota, cached[1], run.end_user, kind="user")
 
-    async def _on_terminal(self, run: RunRecord) -> None:
-        """Release what a finished run held: its quota reservation and run-scoped resources."""
+    async def _on_terminal(self, run: RunRecord, events: Sequence[RunEvent] = ()) -> None:
+        """Release what a finished run held (its quota reservation and run-scoped resources),
+        and save a top-level run's handoff for later runs (orchestration/handoff.py)."""
 
         release = getattr(self._store, "release_reservation", None)
         if release is not None and run.parent_run_id is None:
             await release(run.id)
+        save_handoff = getattr(self._store, "save_handoff", None)
+        if save_handoff is not None and run.parent_run_id is None:
+            try:
+                await save_handoff(build_handoff(run, events))
+            except Exception:  # a handoff is a convenience; never fail a finished run over it
+                _LOG.warning("could not save the handoff of run %s", run.id, exc_info=True)
         finalize = getattr(self._tools, "release_run", None)
         if finalize is not None:
             await finalize(run.id)
@@ -2291,39 +2335,42 @@ class AgentOrchestrator:
     async def _refuse_oversized_turn(
         self, run: RunRecord, events: list[RunEvent], pending: Sequence[ToolCall]
     ) -> bool:
-        """Refuse every call of a reply with too many tool calls; return True if handled."""
+        """Discard a reply with too many tool calls and ask again; return True if handled.
+
+        The reply is moved to ``archived_messages`` (as rewind does) and a short ``[Budget]``
+        note takes its place, so the next request has the context from before the reply.
+        Before 2026-10-25 the reply stayed in the history with one refusal per call: GLM's
+        693-call loop added about 1,400 messages, and trimming them dropped everything the
+        run had read before. After ``max_refused_repeats`` discarded replies the run fails.
+        """
 
         limit = self._settings.max_tool_calls_per_turn
         if limit is None:
             return False
-        reply = next((m for m in reversed(run.messages) if m.role is Role.ASSISTANT), None)
-        if reply is None or len(reply.tool_calls) <= limit:
+        index = next((i for i in range(len(run.messages) - 1, -1, -1)
+                      if run.messages[i].role is Role.ASSISTANT), None)
+        if index is None or len(run.messages[index].tool_calls) <= limit:
             return False
-        oversized = sum(
-            1 for m in run.messages if m.role is Role.ASSISTANT and len(m.tool_calls) > limit
-        )
+        count = len(run.messages[index].tool_calls)
+        discarded = sum(1 for e in events if e.type is EventType.REPLY_DISCARDED)
         max_refusals = self._settings.max_refused_repeats
-        if max_refusals is not None and oversized > max_refusals:
-            await self._fail(
-                run,
-                events,
-                f"too many tool calls in one reply: {len(reply.tool_calls)} (limit {limit})",
-            )
+        if max_refusals is not None and discarded >= max_refusals:
+            await self._fail(run, events, f"too many tool calls in one reply: {count} (limit {limit})")
             return True
-        for call in pending:
-            result = ToolResult(
-                call_id=call.id,
-                name=call.name,
-                status=ToolResultStatus.POLICY_DENIED,
-                output={"error": "too_many_tool_calls", "tool_calls": len(reply.tool_calls), "limit": limit},
-                model_message=(
-                    f"Refused: your reply made {len(reply.tool_calls)} tool calls and at most "
-                    f"{limit} are allowed per reply, so none of them ran. Make only the calls "
-                    "you need, without repeating identical ones."
-                ),
-            )
-            self._append_tool_message(run, result)
-            await self._record_tool_result(run, events, result, attempt=0)
+        archived = run.messages[index:]  # the reply (none of its calls has a result yet)
+        run.archived_messages.extend(archived)
+        del run.messages[index:]
+        run.messages.append(Message(role=Role.USER, content=(
+            f"[Budget] Your last reply made {count} tool calls and at most {limit} are allowed per "
+            "reply, so it was discarded and none of them ran. Reply again with only the calls you "
+            "need, without repeating identical ones.")))
+        await self._checkpoint(run, events, RunEvent(
+            run_id=run.id,
+            type=EventType.REPLY_DISCARDED,
+            payload={"tool_calls": count, "limit": limit, "archived_messages": len(archived)},
+            step=run.step_count,
+            created_at=self._clock(),
+        ))
         return True
 
     async def _refuse_repeated_call(
@@ -4164,7 +4211,7 @@ class AgentOrchestrator:
         for event in events:
             self._emit_event(run, event)
         if run.status.is_terminal:
-            await self._on_terminal(run)
+            await self._on_terminal(run, event_log)
 
     def _emit_event(self, run: RunRecord, event: RunEvent) -> None:
         self._emit(
@@ -4364,6 +4411,7 @@ _ANNOTATION_EVENTS = frozenset(
         EventType.GUARDRAIL_DECIDED,
         EventType.RUN_DEAD_LETTERED,
         EventType.USAGE_RECORDED,
+        EventType.RUN_LINKED,
     }
 )
 

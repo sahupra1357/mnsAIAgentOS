@@ -92,6 +92,10 @@ class EventType(StrEnum):
     # Tokens of a model call that is not a chat step: a guard check or an embedding.
     # Before, guard tokens were only in the run total and embedding tokens nowhere.
     USAGE_RECORDED = "usage_recorded"
+    # A new run was given an earlier run's handoff (orchestration/handoff.py).
+    RUN_LINKED = "run_linked"
+    # A reply with too many tool calls was set aside (archived) and the model asked again.
+    REPLY_DISCARDED = "reply_discarded"
 
 
 class PermissionMode(StrEnum):
@@ -741,6 +745,41 @@ class RunLister(Protocol):
     """Optional store capability: list runs without loading their events."""
 
     async def list_runs(self, query: RunQuery) -> RunPage: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RunHandoff:
+    """What a top-level run left for later runs of the project: its request, final answer,
+    todo or plan state, the files it wrote, and its last summary (all shortened).
+
+    Written at the end of every turn (orchestration/handoff.py); a new run whose prompt
+    matches it gets it as context, and the ``previous_runs`` tool reads it.
+    """
+
+    run_id: str
+    tenant: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    request: str = ""
+    latest_request: str = ""
+    answer: str = ""
+    todos: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    summary: str = ""
+    error: str | None = None
+
+
+class HandoffStore(Protocol):
+    """Optional store capability: the handoffs of a project's top-level runs."""
+
+    async def save_handoff(self, handoff: RunHandoff) -> None: ...
+
+    async def get_handoff(self, run_id: str) -> RunHandoff | None: ...
+
+    async def recent_handoffs(self, tenant: str, limit: int = 50) -> Sequence[RunHandoff]:
+        """Newest first (by ``updated_at``)."""
+        ...
 
 
 class ConversationStore(Protocol):

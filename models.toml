@@ -175,6 +175,9 @@ temperature = 0.2
 # writing a video frame and replied with nothing (2026-10-23). The window (65536) minus this
 # leaves 49152 tokens of input.
 max_tokens = 16384
+# On 2026-10-25 GLM looped: one reply repeated 25 read_file calls until max_tokens (693 calls).
+# A mild penalty makes such loops less likely (checked live: the endpoint accepts it).
+repetition_penalty = 1.05
 
 # Modal dashboard rates for DeepSeek V4.1 Flash (2026-10-10), per million tokens.
 [models.modal_shared.pricing]
@@ -257,6 +260,10 @@ claude_code = true               # also CLAUDE.md, .claude/skills, ~/.claude/ski
 # Every ~/.claude/skills description is in each system prompt (68 skills ≈ 3.5K tokens of a
 # 16K window); narrow them by name, e.g. claude_skills = ["aisystems-video", "hyperframes*"].
 claude_skills = ["*"]
+# A new `run`/`chat` whose prompt matches an earlier run of this project (a slug, a path) starts
+# with that run's handoff: its request, final answer, task list, files written, last summary.
+# The previous_runs tool reads more; `chat --continue` / `--resume` / /resume reopen a whole run.
+link_runs = true
 
 
 # --- Coding tools (local) ----------------------------------------------
@@ -479,7 +486,7 @@ threshold_bytes = 16384
 mode = "dynamic"
 core = ["read_file", "search_files", "search_documentation", "apply_patch", "run_tests",
         "run_command", "git_status", "git_diff", "memory_search", "memory_write",
-        "load_skill", "web_fetch", "web_search"]
+        "load_skill", "web_fetch", "web_search", "previous_runs"]
 max_loaded = 30
 search_limit = 8
 

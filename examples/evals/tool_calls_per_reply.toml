@@ -1,5 +1,5 @@
 # A reply with more tool calls than [orchestrator] max_tool_calls_per_turn is
-# refused whole; the model then makes one call and finishes.
+# discarded whole (archived, with a [Budget] note); the model then makes one call and finishes.
 name = "tool_calls_per_reply"
 prompt = "Echo the word ready."
 
@@ -23,6 +23,6 @@ content = "ready"
 status = "completed"
 output_contains = ["ready"]
 event_payloads = [
-  { type = "tool_responded", status = "policy_denied" },
+  { type = "reply_discarded", tool_calls = 3, limit = 2 },
   { type = "tool_responded", status = "success" },
 ]
