@@ -7,9 +7,10 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol, Sequence
+from typing import Any, Awaitable, Callable, ClassVar, Mapping, Protocol, Sequence
 
-from .guardrails import CommandGuardrails
+from .guardrails import CommandGuardrails, rm_operands
+from .removal import check_removal
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,22 @@ ProcessInvoker = Callable[
 ]
 
 
+# Passed to commands besides PATH and LANG: who the user is and where their files and temp
+# folder are. Before, only PATH and LANG were passed, so scripts that use ~ or $HOME
+# (narrate.sh, name_final.sh in the video pipeline) looked in the wrong folders.
+# Everything else, including API keys and tokens in the harness's environment, is left out.
+PASSED_ENVIRONMENT = ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR")
+
+
+def command_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment a command starts with: PATH, LANG, and ``PASSED_ENVIRONMENT`` when set."""
+
+    environ = os.environ if environ is None else environ
+    env = {"PATH": environ.get("PATH", ""), "LANG": "C.UTF-8"}
+    env.update({name: environ[name] for name in PASSED_ENVIRONMENT if environ.get(name)})
+    return env
+
+
 async def _invoke_process(
     argv: Sequence[str], cwd: Path, timeout_seconds: float, max_output_bytes: int
 ) -> CommandResult:
@@ -45,7 +62,7 @@ async def _invoke_process(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"},
+        env=command_environment(),
     )
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -73,6 +90,15 @@ async def _invoke_process(
     )
 
 
+def _check_rm(argv: Sequence[str], cwd: Path, workspace: Path) -> None:
+    """rm deletes only files the current run created (coding/removal.py)."""
+
+    if Path(argv[0]).name == "rm":
+        from agent_harness.orchestration.runcontext import current_run_started
+
+        check_removal(rm_operands(argv), cwd=cwd, workspace=workspace, started=current_run_started())
+
+
 def _bounded_decode(value: bytes, limit: int) -> tuple[str, bool]:
     truncated = len(value) > limit
     bounded = value[:limit]
@@ -82,6 +108,10 @@ def _bounded_decode(value: bytes, limit: int) -> tuple[str, bool]:
 @dataclass(slots=True)
 class LocalProcessRuntime:
     """Explicit opt-in host execution; Docker is safer for untrusted code."""
+
+    # Where commands run, as the tool descriptions tell the model. They said "sandbox" for local
+    # execution too, and the model blamed a sandbox that does not exist.
+    location: ClassVar[str] = "on this machine (local execution, no sandbox)"
 
     workspace: Path
     guardrails: CommandGuardrails = field(default_factory=CommandGuardrails)
@@ -102,6 +132,7 @@ class LocalProcessRuntime:
     ) -> CommandResult:
         normalized = self.guardrails.validate(argv)
         working_directory = _contained_directory(self.workspace, cwd)
+        _check_rm(normalized, working_directory, self.workspace)
         return await self.invoker(
             normalized, working_directory, timeout_seconds, self.max_output_bytes
         )
@@ -141,6 +172,8 @@ class DockerRuntimeConfig:
 
 @dataclass(slots=True)
 class DockerExecutionRuntime:
+    location: ClassVar[str] = "in a Docker sandbox"
+
     workspace: Path
     config: DockerRuntimeConfig = field(default_factory=DockerRuntimeConfig)
     guardrails: CommandGuardrails = field(default_factory=CommandGuardrails)
@@ -169,6 +202,7 @@ class DockerExecutionRuntime:
     ) -> CommandResult:
         normalized = self.guardrails.validate(argv)
         working_directory = _contained_directory(self.workspace, cwd)
+        _check_rm(normalized, working_directory, self.workspace)  # the workspace is mounted read-write
         relative = working_directory.relative_to(self.workspace)
         container_cwd = "/workspace"
         if relative.parts:

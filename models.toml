@@ -268,8 +268,11 @@ command_timeout_seconds = 1800
 enable_git_commit = true
 enable_pull_requests = false
 allowed_commands = ["*"]
+# rm is allowed for files this run created only: each file must be inside the workspace and
+# created after the run started; -r/-rf, folders, and rm inside bash -c are refused
+# (coding/removal.py, coding/guardrails.py).
 forbidden_commands = ["chmod", "chown", "dd", "docker", "doas", "fdisk", "kill", "killall", "mkfs",
-                      "mount", "nc", "netcat", "powershell", "pwsh", "reboot", "rm", "shutdown",
+                      "mount", "nc", "netcat", "powershell", "pwsh", "reboot", "shutdown",
                       "sudo", "su", "umount", "wget", "zsh"]
 
 # --- Coding tools (Docker sandbox) ----------------------------------------------
@@ -308,7 +311,7 @@ allow = ["read_file", "search_files", "git_status", "git_diff", "run_tests",
 # Ask beats allow: cat/head on a .env file still pauses, like read_file does.
 ask = ["read_file(path=*.env)", "run_command(argv.1=*.env)", "run_command(argv.2=*.env)",
        "run_command(argv.3=*.env)", "run_command(argv.4=*.env)"]
-deny = ["run_command(argv.0=rm)", "run_command(argv.0=sudo)", "git_*(force=true)"]
+deny = ["run_command(argv.0=sudo)", "git_*(force=true)"]  # rm: only files the run created (see [coding])
 edit_tools = ["apply_patch"]
 
 [[hooks]]

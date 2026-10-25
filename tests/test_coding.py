@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
+import time
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 from agent_harness.coding import (
     CodingAgentConfig,
@@ -12,10 +17,16 @@ from agent_harness.coding import (
     CommandResult,
     DockerExecutionRuntime,
     DockerRuntimeConfig,
+    LocalProcessRuntime,
     WorkspaceBoundary,
     WorkspaceViolation,
     create_coding_tool_runtime,
 )
+from agent_harness.coding.execution import command_environment
+from agent_harness.coding.guardrails import rm_operands
+from agent_harness.coding.removal import check_removal
+from agent_harness.orchestration.runcontext import CURRENT_RUN_STARTED, current_run_started
+from agent_harness.tools import ToolRegistry, ToolRuntime
 from agent_harness.domain import (
     FinishReason,
     Message,
@@ -24,6 +35,7 @@ from agent_harness.domain import (
     RunStatus,
     ToolCall,
     ToolResultStatus,
+    ToolSpec,
 )
 from agent_harness.model_gateway import ScriptedModelClient
 from agent_harness.orchestration.orchestrator import AgentOrchestrator
@@ -410,3 +422,197 @@ class GuardrailTests(unittest.TestCase):
         self.assertIn("--read-only", command)
         self.assertIn("python:3.12-slim", command)
         self.assertEqual(command[-2:], ("python3", "--version"))
+
+
+class LocalCommandEnvironmentTests(unittest.TestCase):
+    """Local commands see HOME and the user's identity, never the harness's credentials.
+
+    Live run 2026-10-24 (VideoPipeline, execution_runtime = "local"): commands started with only
+    PATH and LANG, so name_final.sh (and narrate.sh before it) resolved ~ to the wrong folder,
+    and the model blamed "the sandbox", which the tool descriptions named for local execution too.
+    """
+
+    def test_home_and_identity_pass_and_credentials_do_not(self) -> None:
+        environ = {"PATH": "/usr/bin", "HOME": "/Users/me", "USER": "me", "LOGNAME": "me", "SHELL": "/bin/zsh",
+                   "TMPDIR": "/tmp/me", "MODAL_SHARED_TOKEN": "x", "AGENT_HARNESS_API_KEY": "y", "LANG": "en_US"}
+        self.assertEqual(command_environment(environ), {
+            "PATH": "/usr/bin", "LANG": "C.UTF-8", "HOME": "/Users/me", "USER": "me", "LOGNAME": "me",
+            "SHELL": "/bin/zsh", "TMPDIR": "/tmp/me"})
+        self.assertEqual(command_environment({"PATH": "/bin", "HOME": ""}), {"PATH": "/bin", "LANG": "C.UTF-8"})
+
+    def test_a_local_command_sees_home(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"HOME": directory, "MODAL_SHARED_TOKEN": "not-for-commands"}):
+            runtime = LocalProcessRuntime(Path(directory), guardrails=CommandGuardrails(allowed_commands=("*",)))
+            result = asyncio.run(runtime.run(["env"], cwd=Path(directory), timeout_seconds=10))
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(f"HOME={directory}", result.stdout.splitlines())
+        self.assertNotIn("MODAL_SHARED_TOKEN", result.stdout)
+
+    def test_command_tools_say_where_commands_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for runtime, where in ((LocalProcessRuntime(root), "on this machine (local execution, no sandbox)"),
+                                   (DockerExecutionRuntime(root), "in a Docker sandbox"),
+                                   (FakeExecution(), "in the configured execution environment")):
+                with self.subTest(where=where):
+                    tools = create_coding_tool_runtime(CodingAgentConfig(enabled=True, workspace=directory),
+                                                       execution_runtime=runtime)
+                    specs = {spec.name: spec.description for spec in tools.specs()}
+                    self.assertIn(where, specs["run_command"])
+                    self.assertIn(where, specs["run_tests"])
+                    self.assertNotIn("sandbox", specs["run_command"].replace(where, ""))
+
+
+class CommandDescriptionTests(unittest.TestCase):
+    def test_run_command_explains_argv_bash_and_rm(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def description(**config: Any) -> str:
+                tools = create_coding_tool_runtime(CodingAgentConfig(enabled=True, workspace=directory, **config),
+                                                   execution_runtime=FakeExecution())
+                return {spec.name: spec.description for spec in tools.specs()}["run_command"]
+
+            default = description()
+            self.assertIn('["bash", "-lc", "<commands>"]', default)
+            self.assertIn('["./script.sh", "arg"]', default)
+            self.assertNotIn("rm deletes", default)  # rm is forbidden by default
+            allowed = description(allowed_commands=("*",), forbidden_commands=frozenset({"sudo"}))
+            self.assertIn("rm deletes only files this run created", allowed)
+
+
+class RmTests(unittest.TestCase):
+    """rm deletes only files the run created; -r/-rf and hidden rm are refused (2026-10-24).
+
+    The video run left .frame0.png and .check_publish.py behind and could not delete them, because
+    rm was forbidden outright. Files that existed before the run must stay untouchable.
+    """
+
+    def setUp(self) -> None:
+        self.guardrails = CommandGuardrails(allowed_commands=("*",), forbidden_commands=frozenset({"sudo"}))
+
+    def test_recursive_and_folder_removal_is_strictly_prohibited(self) -> None:
+        for argv in (["rm", "-rf", "x"], ["rm", "-r", "x"], ["rm", "-R", "x"], ["rm", "-fr", "x"],
+                     ["rm", "-d", "x"], ["rm", "--recursive", "x"], ["rm", "--dir", "x"], ["rm", "x", "-rf"],
+                     ["/bin/rm", "-vfR", "x"]):
+            with self.subTest(argv=argv), self.assertRaisesRegex(CommandRejected, "strictly prohibited"):
+                self.guardrails.validate(argv)
+
+    def test_only_f_and_v_and_at_least_one_file(self) -> None:
+        for argv in (["rm", "-i", "x"], ["rm", "--force", "x"], ["rm", "-P", "x"]):
+            with self.subTest(argv=argv), self.assertRaisesRegex(CommandRejected, "only -f and -v"):
+                self.guardrails.validate(argv)
+        with self.assertRaisesRegex(CommandRejected, "at least one file"):
+            self.guardrails.validate(["rm", "-f"])
+        for argv in (["rm", "a.png"], ["rm", "-f", "a.png", "b.png"], ["rm", "-fv", "a.png"], ["rm", "--", "-odd"]):
+            self.assertEqual(self.guardrails.validate(argv), tuple(argv))
+        self.assertEqual(rm_operands(["rm", "-f", "a", "--", "-b"]), ["a", "-b"])
+
+    def test_rm_hidden_in_a_shell_script_or_a_wrapper_is_refused(self) -> None:
+        for argv in (["bash", "-lc", "cd renders && rm .frame0.png"], ["bash", "-c", "rm -rf /"],
+                     ["sh", "-c", "ls; /bin/rm x"], ["bash", "-lc", "find . -name '*.png' | xargs rm"],
+                     ["xargs", "rm"], ["env", "/bin/rm", "x"], ["nice", "rm", "x"]):
+            with self.subTest(argv=argv), self.assertRaisesRegex(CommandRejected, "rm"):
+                self.guardrails.validate(argv)
+        for argv in (["bash", "-lc", "ls -la renders | head"], ["bash", "-lc", "grep -n rmdir notes.md"],
+                     ["bash", "scripts/narrate.sh", "rm"], ["env", "HOME=/x", "python3", "a.py"]):
+            self.assertEqual(self.guardrails.validate(argv), tuple(argv))
+
+
+class RemovalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name).resolve()
+        self.addCleanup(self.directory.cleanup)
+        (self.root / "renders").mkdir()
+        for name in ("renders/old.mp4", "renders/.frame0.png", "notes.md"):
+            (self.root / name).write_text("x", encoding="utf-8")
+        self.started = datetime(2026, 10, 24, 12, tzinfo=UTC)
+        # creation times: before the run for the user's files, after it for the agent's
+        self.created = {"old.mp4": 100.0, "notes.md": 100.0, ".frame0.png": self.started.timestamp() + 5}
+
+    def check(self, *files: str, cwd: Path | None = None, started: datetime | None = None) -> None:
+        names = {os.stat(self.root / "renders" / n).st_ino: t for n, t in self.created.items()
+                 if (self.root / "renders" / n).exists()}
+        names[os.stat(self.root / "notes.md").st_ino] = self.created["notes.md"]
+        check_removal(files, cwd=cwd or self.root, workspace=self.root, started=started or self.started,
+                      created=lambda status: names.get(status.st_ino, self.started.timestamp() + 1))
+
+    def test_a_file_the_run_created_may_go(self) -> None:
+        self.check("renders/.frame0.png")
+        self.check(str(self.root / "renders" / ".frame0.png"))
+        self.check(".frame0.png", cwd=self.root / "renders")
+
+    def test_files_that_existed_before_the_run_stay(self) -> None:
+        for name in ("renders/old.mp4", "notes.md"):
+            with self.subTest(name=name), self.assertRaisesRegex(CommandRejected, "existed before this run"):
+                self.check(name)
+        with self.assertRaisesRegex(CommandRejected, "existed before"):
+            self.check("renders/.frame0.png", "renders/old.mp4")  # one refused file refuses the command
+
+    def test_folders_missing_files_and_places_outside_are_refused(self) -> None:
+        cases = {"renders": "is a folder", ".": "is a folder", "renders/none.png": "no such file",
+                 "..": "not a file", "/etc/hosts": "outside the workspace"}
+        for name, message in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(CommandRejected, message):
+                self.check(name)
+        (self.root / ".git").mkdir()
+        (self.root / ".git" / "HEAD").write_text("x", encoding="utf-8")
+        with self.assertRaisesRegex(CommandRejected, "protected folder"):
+            self.check(".git/HEAD")
+        with tempfile.TemporaryDirectory() as outside:
+            (Path(outside) / "victim.txt").write_text("x", encoding="utf-8")
+            (self.root / "link").symlink_to(outside)
+            with self.assertRaisesRegex(CommandRejected, "outside the workspace"):
+                self.check("link/victim.txt")
+
+    def test_no_run_or_no_creation_time_refuses(self) -> None:
+        with self.assertRaisesRegex(CommandRejected, "inside an agent run"):
+            check_removal(["notes.md"], cwd=self.root, workspace=self.root, started=None)
+        with self.assertRaisesRegex(CommandRejected, "does not record when files were created"):
+            check_removal(["notes.md"], cwd=self.root, workspace=self.root, started=self.started,
+                          created=lambda status: None)
+
+    @unittest.skipUnless(hasattr(os.stat_result, "st_birthtime"), "needs file creation times (macOS)")
+    def test_local_rm_with_real_creation_times(self) -> None:
+        old = self.root / "notes.md"
+        runtime = LocalProcessRuntime(self.root, guardrails=CommandGuardrails(
+            allowed_commands=("*",), forbidden_commands=frozenset()))
+        token = CURRENT_RUN_STARTED.set(datetime.now(UTC))
+        try:
+            time.sleep(0.05)
+            scratch = self.root / "renders" / ".scratch.png"
+            scratch.write_text("x", encoding="utf-8")
+            result = asyncio.run(runtime.run(["rm", "renders/.scratch.png"], cwd=self.root, timeout_seconds=10))
+            self.assertEqual(result.exit_code, 0)
+            self.assertFalse(scratch.exists())
+            with self.assertRaisesRegex(CommandRejected, "existed before this run"):
+                asyncio.run(runtime.run(["rm", "notes.md"], cwd=self.root, timeout_seconds=10))
+            self.assertTrue(old.exists())
+        finally:
+            CURRENT_RUN_STARTED.reset(token)
+
+    def test_the_orchestrator_tells_tools_when_the_run_started(self) -> None:
+        seen: list[Any] = []
+
+        async def probe(arguments: Any) -> dict[str, Any]:
+            seen.append(current_run_started())
+            return {}
+
+        runtime = ToolRuntime(ToolRegistry())
+        runtime.register(ToolSpec(name="probe", description="p", input_schema={"type": "object"}), probe)
+        model = ScriptedModelClient([
+            ModelResponse(tool_calls=(ToolCall("c1", "probe", {}),), finish_reason=FinishReason.TOOL_CALLS),
+            ModelResponse(content="done", finish_reason=FinishReason.STOP)])
+        class Resolver:
+            def resolve(self, profile: str) -> ScriptedModelClient:
+                return model
+
+        orchestrator = AgentOrchestrator(models=Resolver(), tools=runtime, store=InMemoryRunStore())
+
+        async def go() -> Any:
+            run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "x")])
+            return await orchestrator.run(run.id)
+
+        finished = asyncio.run(go())
+        self.assertEqual(seen, [finished.created_at])
+        self.assertIsNone(current_run_started())  # reset after the run

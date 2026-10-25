@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -83,6 +84,15 @@ _FIND_FORBIDDEN_ACTIONS = {
     "-fprintf",
 }
 
+# rm deletes single files only (each one is also checked against the workspace and the run's
+# start by coding/removal.py): -f and -v, never -r/-R/-d or other options.
+_RM_ALLOWED_FLAGS = frozenset("fv")
+# Programs that run another program from their arguments: "xargs rm" would skip the rm checks.
+_WRAPPERS = {"xargs", "env", "nice", "nohup", "time", "timeout", "command", "stdbuf", "caffeinate"}
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+# rm used as a command word inside a shell script (bash -c "...").
+_SCRIPT_RM = re.compile(r"(?:^|[\s;&|()`{}!])(?:\S*/)?rm(?=[\s;&|)`}]|$)")
+
 _FORBIDDEN_TOKENS = {
     "--cap-add",
     "--privileged",
@@ -118,6 +128,16 @@ class CommandGuardrails:
             raise CommandRejected(f"command {command!r} is always forbidden")
         if not command_allowed(command, self.allowed_commands):
             raise CommandRejected(f"command {command!r} is not allowlisted")
+
+        if command == "rm":
+            _validate_rm(argv)
+        if command in _WRAPPERS and any(Path(item).name == "rm" for item in argv[1:]):
+            raise CommandRejected(f"rm through {command} is not allowed; run rm as its own command")
+        if command in _SHELLS:
+            script = _shell_script(argv)
+            if script is not None and _SCRIPT_RM.search(script):
+                raise CommandRejected("rm inside a shell script is not allowed; run rm as its own command "
+                                      "(argv), so each file can be checked")
 
         lowered = {item.casefold() for item in argv[1:]}
         if lowered & _FORBIDDEN_TOKENS:
@@ -155,3 +175,49 @@ def command_allowed(command: str, patterns: Sequence[str]) -> bool:
     program and leaves the decision to the permission rules (as Claude Code does)."""
 
     return any(fnmatch.fnmatchcase(command, pattern) for pattern in patterns)
+
+
+def _validate_rm(argv: Sequence[str]) -> None:
+    """rm with files only: -f/-v allowed, -r, -rf, -R, -d and every other option refused."""
+
+    for item in argv[1:]:
+        if item == "--":
+            break  # only files after it
+        if not item.startswith("-") or item == "-":
+            continue  # a file; GNU rm also reads options after files ("rm a.png -rf")
+        if item.startswith("--"):
+            if item.startswith(("--recursive", "--dir")):
+                raise CommandRejected("rm -r / -rf / -d is strictly prohibited: rm deletes single files only")
+            raise CommandRejected(f"rm option {item!r} is not allowed (only -f and -v)")
+        if set(item[1:]) & set("rRd"):
+            raise CommandRejected("rm -r / -rf / -d is strictly prohibited: rm deletes single files only")
+        if not set(item[1:]) <= _RM_ALLOWED_FLAGS:
+            raise CommandRejected(f"rm option {item!r} is not allowed (only -f and -v)")
+    if not rm_operands(argv):
+        raise CommandRejected("rm needs at least one file")
+
+
+def rm_operands(argv: Sequence[str]) -> list[str]:
+    """The files an rm argv names: non-option words, and everything after --."""
+
+    files: list[str] = []
+    rest = list(argv[1:])
+    while rest:
+        item = rest.pop(0)
+        if item == "--":
+            files.extend(rest)
+            break
+        if not item.startswith("-") or item == "-":
+            files.append(item)
+    return files
+
+
+def _shell_script(argv: Sequence[str]) -> str | None:
+    """The script of ``bash -c SCRIPT`` (also -lc, -ec, ...); None when the shell runs a file."""
+
+    for index, item in enumerate(argv[1:], 1):
+        if item.startswith("-") and not item.startswith("--") and "c" in item[1:]:
+            return argv[index + 1] if index + 1 < len(argv) else ""
+        if not item.startswith("-"):
+            return None
+    return None

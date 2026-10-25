@@ -198,6 +198,16 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   allowlisted) or `sh narrate.sh` (forbidden). The user wants one configuration: the root `models.toml`
   runs commands locally with `"*"` and no `sh` in the forbidden set, and `[project] settings = false`
   so no folder's `.agent-harness/settings*.toml` is merged (`tests/test_full_config.py` pins both).
+- **Command environment (2026-10-24).** Commands get PATH, LANG and `PASSED_ENVIRONMENT` (HOME, USER, LOGNAME, SHELL,
+  TMPDIR) via `command_environment()`; nothing else, so credentials in the harness's environment stay out. Before, only
+  PATH and LANG: scripts using `~`/`$HOME` broke. `run_command`/`run_tests` descriptions name where commands run
+  (runtime `location`: "on this machine (local execution, no sandbox)" or "in a Docker sandbox").
+- **rm for the run's own files (2026-10-24).** The root config allows `rm` (not in `forbidden_commands`, no deny rule;
+  the live audit hook still refuses recursive rm). The guardrails refuse every option but `-f`/`-v` (`-r`/`-rf`/`-R`/`-d`
+  are "strictly prohibited", also after a file name), rm behind `xargs`/`env`/... and rm inside `bash -c` scripts.
+  `coding/removal.py` then checks each file: inside the workspace, not a folder, not under `.git`/`.venv`/`node_modules`,
+  and created (st_birthtime) after the run started (`CURRENT_RUN_STARTED`, set by `_run`). No creation times
+  (Linux) means no rm. `run_command`'s description says so when rm is allowed, and shows argv and `bash -lc` usage.
 - **Terminal turn budget.** `run` and `chat` use `[orchestrator] turn_max_steps` / `turn_max_wall_seconds`
   (root config: 100 / 3600) unless `--max-steps` / `--max-wall-seconds` are given; before, they fixed 20 / 300.
 - **Absolute paths.** Workspace tools accept an absolute path under the workspace root (made relative,

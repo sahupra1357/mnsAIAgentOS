@@ -18,7 +18,17 @@ from pathlib import Path
 
 AUDIT_FILE = Path(".agent-harness") / "hook-audit.jsonl"
 # argv[0] values a run_command call may never use, whatever the permission mode.
-REFUSED_COMMANDS = {"rm", "rmdir", "mkfs", "dd", "shutdown", "reboot"}
+# rm is not here: the harness lets it delete only files the run created (coding/removal.py).
+# Recursive or folder removal (rm -r, -rf, -R, -d, --recursive, --dir) is still refused here too.
+REFUSED_COMMANDS = {"rmdir", "mkfs", "dd", "shutdown", "reboot"}
+
+
+def _recursive_rm(argv: list) -> bool:
+    if not argv or str(argv[0]).rsplit("/", 1)[-1] != "rm":
+        return False
+    flags = [str(a) for a in argv[1:] if str(a).startswith("-") and str(a) != "-"]
+    return any(f.startswith(("--recursive", "--dir")) or (not f.startswith("--") and set(f[1:]) & set("rRd"))
+               for f in flags)
 
 
 def decide(event: dict) -> dict:
@@ -27,6 +37,8 @@ def decide(event: dict) -> dict:
     argv = (event.get("arguments") or {}).get("argv") or []
     if argv and str(argv[0]).rsplit("/", 1)[-1] in REFUSED_COMMANDS:
         return {"decision": "deny", "reason": f"the audit hook refuses {argv[0]!r}"}
+    if _recursive_rm(argv):
+        return {"decision": "deny", "reason": "the audit hook refuses recursive rm"}
     return {"decision": "allow"}
 
 

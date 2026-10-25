@@ -25,7 +25,7 @@ from agent_harness.orchestration.agents import (
     child_run_id,
     parse_todos,
 )
-from agent_harness.orchestration.runcontext import CURRENT_RUN_ID
+from agent_harness.orchestration.runcontext import CURRENT_RUN_ID, CURRENT_RUN_STARTED
 from agent_harness.server.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
 from agent_harness.orchestration.context import (
     ORCHESTRATOR_NOTE_PREFIXES,
@@ -796,9 +796,11 @@ class AgentOrchestrator:
         """Run or resume a persisted workflow until it reaches a terminal state."""
 
         token = CURRENT_RUN_ID.set(run_id)  # per-run tool resources (warm containers)
+        started = CURRENT_RUN_STARTED.set(None)  # set by _run once the run is loaded
         try:
             return await self._run(run_id)
         finally:
+            CURRENT_RUN_STARTED.reset(started)
             CURRENT_RUN_ID.reset(token)
 
     async def _run(self, run_id: str) -> RunRecord:
@@ -806,6 +808,7 @@ class AgentOrchestrator:
         run = await self._store.get_run(run_id)
         if run is None:
             raise KeyError(f"unknown run: {run_id}")
+        CURRENT_RUN_STARTED.set(run.created_at)  # rm may delete only files created since (coding/removal.py)
         events = list(await self._store.list_events(run_id))
         if run.status.is_terminal or run.status is RunStatus.AWAITING_INPUT:
             return run
