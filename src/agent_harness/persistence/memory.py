@@ -15,6 +15,7 @@ from uuid import uuid4
 from agent_harness.domain import (
     ConcurrencyError,
     RunEvent,
+    RunHandoff,
     RunPage,
     RunQuery,
     RunRecord,
@@ -48,6 +49,7 @@ class InMemoryRunStore:
         self._tool_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._steers: dict[str, list[SteerMessage]] = {}
         self._conversations: dict[tuple[str, str], str] = {}  # (tenant, key) -> run_id
+        self._handoffs: dict[str, RunHandoff] = {}
         self._catalog: dict[str, ToolCatalogEntry] = {}
         # run_id -> (tenant, token ceiling, cost ceiling, reserved at)
         self._reservations: dict[str, tuple[str, int | None, float | None, datetime]] = {}
@@ -65,6 +67,20 @@ class InMemoryRunStore:
             if run_id not in self._runs:
                 raise KeyError(f"unknown run: {run_id}")
             self._conversations[(tenant, key)] = run_id
+
+    async def save_handoff(self, handoff: RunHandoff) -> None:
+        _validate_identifier(handoff.run_id, "run_id")
+        async with self._lock:
+            self._handoffs[handoff.run_id] = handoff
+
+    async def get_handoff(self, run_id: str) -> RunHandoff | None:
+        async with self._lock:
+            return self._handoffs.get(run_id)
+
+    async def recent_handoffs(self, tenant: str, limit: int = 50) -> Sequence[RunHandoff]:
+        async with self._lock:
+            mine = [h for h in self._handoffs.values() if h.tenant == tenant]
+        return tuple(sorted(mine, key=lambda h: h.updated_at, reverse=True)[: max(1, int(limit))])
 
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
         _validate_identifier(run_id, "run_id")
@@ -252,6 +268,7 @@ class InMemoryRunStore:
                         del self._conversations[conversation]
                     self._reservations.pop(run_id, None)
                     self._reservation_users.pop(run_id, None)
+                    self._handoffs.pop(run_id, None)
                     for key in [k for k in self._tool_results if k[1].startswith(f"{run_id}:")]:
                         del self._tool_results[key]
             return ids

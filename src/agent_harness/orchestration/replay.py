@@ -19,7 +19,9 @@ Which event adds which message:
   ``continuation`` reply instead removes the note before it and joins the previous answer;
 * ``guardrail_refused``: the refusal message (assistant);
 * ``tool_responded``: a tool message, except a result that will be retried (``retrying``);
-* ``rewound``: removes the last ``archived_messages`` messages.
+* ``rewound``: removes the last ``archived_messages`` messages;
+* ``reply_discarded``: removes the last ``archived_messages`` messages (an oversized reply)
+  and adds a user message (the note asking again).
 """
 
 from __future__ import annotations
@@ -94,4 +96,9 @@ def derive_message_skeleton(events: Sequence[RunEvent]) -> list[MessageShape]:
             archived = int(payload.get("archived_messages", 0))
             if archived:
                 del shapes[-archived:]
+        elif kind is EventType.REPLY_DISCARDED:
+            archived = int(payload.get("archived_messages", 0))
+            if archived:
+                del shapes[-archived:]
+            shapes.append(user)
     return shapes

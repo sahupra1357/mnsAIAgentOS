@@ -810,6 +810,9 @@ class ProjectConfig:
     ``claude_code`` also reads ``CLAUDE.md``, ``.claude/skills``, and ``~/.claude/skills``;
     ``claude_skills`` (name globs) picks which ``~/.claude/skills`` are offered, since each
     skill's description is in every system prompt.
+    ``link_runs``: a new terminal run (``run``, ``chat``) whose prompt matches what an earlier
+    run of the project worked on starts with that run's handoff, and the read-only
+    ``previous_runs`` tool is offered (orchestration/handoff.py); ``--no-link`` turns it off.
     """
 
     root: str = "config"
@@ -819,6 +822,7 @@ class ProjectConfig:
     instruction_files: tuple[str, ...] = ("AGENTS.md",)
     claude_code: bool = True
     claude_skills: tuple[str, ...] = ("*",)
+    link_runs: bool = False
 
 
 @dataclass(frozen=True, slots=True)

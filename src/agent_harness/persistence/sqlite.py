@@ -30,6 +30,7 @@ from agent_harness.domain import (
     Role,
     RunBudget,
     RunEvent,
+    RunHandoff,
     RunPage,
     RunQuery,
     RunRecord,
@@ -43,6 +44,8 @@ from agent_harness.domain import (
     ToolResultStatus,
     utc_now,
 )
+
+from agent_harness.orchestration.handoff import handoff_from_json, handoff_to_json
 
 from .listing import decode_cursor, encode_cursor, summarize_run
 from .memory import _validate_identifier, _validate_run_event
@@ -232,6 +235,32 @@ class SQLiteRunStore:
                 "DO UPDATE SET run_id = excluded.run_id, updated_at = excluded.updated_at",
                 (tenant, key, run_id, utc_now().isoformat()),
             )
+
+    async def save_handoff(self, handoff: RunHandoff) -> None:
+        _validate_identifier(handoff.run_id, "run_id")
+        async with self._lock:
+            self._connection.execute(
+                "INSERT INTO run_handoffs(run_id, tenant, updated_at, handoff_json) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(run_id) DO UPDATE SET tenant = excluded.tenant, "
+                "updated_at = excluded.updated_at, handoff_json = excluded.handoff_json",
+                (handoff.run_id, handoff.tenant, handoff.updated_at.isoformat(),
+                 _json_dumps(handoff_to_json(handoff))),
+            )
+
+    async def get_handoff(self, run_id: str) -> RunHandoff | None:
+        async with self._lock:
+            row = self._connection.execute(
+                "SELECT handoff_json FROM run_handoffs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return None if row is None else handoff_from_json(json.loads(row["handoff_json"]))
+
+    async def recent_handoffs(self, tenant: str, limit: int = 50) -> Sequence[RunHandoff]:
+        async with self._lock:
+            rows = self._connection.execute(
+                "SELECT handoff_json FROM run_handoffs WHERE tenant = ? ORDER BY updated_at DESC LIMIT ?",
+                (tenant, max(1, int(limit))),
+            ).fetchall()
+        return tuple(handoff_from_json(json.loads(row["handoff_json"])) for row in rows)
 
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
         _validate_identifier(run_id, "run_id")
@@ -524,7 +553,8 @@ class SQLiteRunStore:
                 self._connection.execute("BEGIN IMMEDIATE")
                 self._connection.execute("INSERT INTO purge_guard(holder) VALUES ('gc')")
                 for run_id in ids:
-                    for table in ("run_events", "run_queue", "steer_messages", "chat_conversations"):
+                    for table in ("run_events", "run_queue", "steer_messages", "chat_conversations",
+                                  "run_handoffs"):
                         self._connection.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
                     self._connection.execute(
                         "DELETE FROM tool_results WHERE idempotency_key LIKE ? ESCAPE '\\'",

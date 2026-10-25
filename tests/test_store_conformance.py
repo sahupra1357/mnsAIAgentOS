@@ -236,6 +236,34 @@ class StoreContract:
             self.assertIsNone(await self.store.find_conversation("default", "k2"))  # purged with c1
         asyncio.run(body())
 
+    def test_run_handoffs(self) -> None:
+        from agent_harness.domain import RunHandoff
+
+        async def body() -> None:
+            first, second = run("h1"), run("h2")
+            for record in (first, second):
+                await self.store.create_run(record, created(record))
+            base = utc_now()
+            older = RunHandoff("h1", "default", "completed", base, base, request="make the video",
+                               answer="frames 04 and 06 done", todos=("[completed] narrate",),
+                               files=("videos/x/BRIEF.md",), summary="s", error=None)
+            await self.store.save_handoff(older)
+            await self.store.save_handoff(RunHandoff("h2", "default", "failed", base,
+                                                     base + timedelta(seconds=1), error="quota"))
+            await self.store.save_handoff(RunHandoff("h3", "other", "completed", base, base))
+            self.assertEqual(await self.store.get_handoff("h1"), older)
+            self.assertIsNone(await self.store.get_handoff("missing"))
+            self.assertEqual([h.run_id for h in await self.store.recent_handoffs("default")], ["h2", "h1"])
+            self.assertEqual([h.run_id for h in await self.store.recent_handoffs("default", 1)], ["h2"])
+            newer = RunHandoff("h1", "default", "completed", base, base + timedelta(seconds=2), answer="all done")
+            await self.store.save_handoff(newer)  # upsert
+            self.assertEqual((await self.store.recent_handoffs("default"))[0], newer)
+            first.status = RunStatus.COMPLETED
+            await self.store.save_checkpoint(first, [], expected_version=0)
+            await self.store.purge_runs(utc_now() + timedelta(seconds=5), dry_run=False)
+            self.assertIsNone(await self.store.get_handoff("h1"))  # purged with its run
+        asyncio.run(body())
+
     def test_list_runs(self) -> None:
         async def body() -> None:
             base = utc_now() - timedelta(hours=1)

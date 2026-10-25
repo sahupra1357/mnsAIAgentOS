@@ -149,7 +149,8 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   mix, and HumanEval into `datasets/` (gitignored), and the plan uses them (30/40/20 items).
   A test checks that every `../datasets/` path in the plan comes from that script.
 - **Runaway guards.** A reply with more than `max_tool_calls_per_turn` (32) tool calls is
-  refused whole, and counts toward `max_refused_repeats`. Example profiles cap output with
+  discarded whole (archived, `[Budget]` note, asked again; since 2026-10-25) and counts toward
+  `max_refused_repeats`. Example profiles cap output with
   `parameters.max_tokens = 1024` (Ollama native: `num_predict`); an
   `AGENT_HARNESS_MODEL__X__PARAMETERS` variable replaces that table. Without a cap, vLLM on
   Modal keeps generating after the harness times out, because the proxy does not cancel
@@ -288,6 +289,22 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 
   Approval waits were already left out of the wall clock (`resolve_approval` moves `started_at`); that run
   stopped at the 100-step turn limit, now `turn_max_steps = 200`.
+- **Earlier runs and oversized replies (2026-10-25).** A restarted chat's "Continue the digital-document-docling video..." ran
+  blind: a fresh run that never saw the earlier status report. In the same run, GLM's 693-call loop stayed in the history
+  with 693 refusals, so trimming dropped everything read before it.
+  - **Handoffs:** `RunHandoff` (`orchestration/handoff.py`) is saved in `_on_terminal` for top-level runs. It lives in
+    the optional `HandoffStore` (`run_handoffs`: SQLite migration 9, Postgres 6, memory).
+  - **Linking:** `create_run(link=True)`, passed by `run`/`chat` with `[project] link_runs`, inserts the best match as a
+    system message before the first user message and records `run_linked`.
+    - **Matching:** distinctive prompt terms, no model call.
+    - **Never linked:** runs that left nothing.
+    - **Old runs:** `ensure_handoffs` backfills them.
+  - **Tools and commands:** the `previous_runs` tool (registered when `link_runs` is on, core in the root config);
+    `chat --continue/--resume`, `/resume`, `--no-link`.
+  - **Oversized replies:** more than `max_tool_calls_per_turn` calls are no longer answered call by call. The reply
+    moves to `archived_messages`, a `[Budget]` note asks again, and a `reply_discarded` event keeps the skeleton
+    replayable. The run fails after `max_refused_repeats` such replies.
+  - **Repetition:** the root config adds `repetition_penalty = 1.05` to `modal_shared` (accepted live).
 - **Guard and embedding tokens (2026-10-24).** Each guard check and each embedding made inside a tool call is a
   `usage_recorded` event (`kind` guard/embedding) and a Langfuse generation; embeddings now count toward
   `consumed_tokens`. Clients report embeddings through `model_gateway/usage.py` (`collect_embedding_usage`).

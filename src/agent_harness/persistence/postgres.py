@@ -10,6 +10,7 @@ used. Operations run in a worker thread on one connection per store.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, replace
@@ -20,6 +21,7 @@ from uuid import uuid4
 from agent_harness.domain import (
     ConcurrencyError,
     RunEvent,
+    RunHandoff,
     RunPage,
     RunQuery,
     RunRecord,
@@ -35,6 +37,8 @@ from agent_harness.domain import (
 from .listing import decode_cursor, encode_cursor, summarize_run
 from .memory import _validate_identifier, _validate_run_event
 from .migrations import SchemaVersionError
+from agent_harness.orchestration.handoff import handoff_from_json, handoff_to_json
+
 from .sqlite import _decode_event, _decode_run, _decode_tool_result, _encode_run, _json_dumps, _with_event_id
 
 _TERMINAL = ("completed", "failed", "cancelled", "budget_exhausted")
@@ -154,6 +158,17 @@ MIGRATIONS += (
         PRIMARY KEY (tenant, conversation_key)
     );
     CREATE INDEX IF NOT EXISTS chat_conversations_run ON chat_conversations(run_id);
+    """),
+)
+MIGRATIONS += (
+    (6, """
+    CREATE TABLE IF NOT EXISTS run_handoffs (
+        run_id TEXT PRIMARY KEY,
+        tenant TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        handoff_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS run_handoffs_tenant_updated ON run_handoffs(tenant, updated_at);
     """),
 )
 LATEST = MIGRATIONS[-1][0]
@@ -348,6 +363,25 @@ class PostgresRunStore:
                 (tenant, key, run_id, utc_now()))
 
         await self._run(save)
+
+    async def save_handoff(self, handoff: RunHandoff) -> None:
+        _validate_identifier(handoff.run_id, "run_id")
+        await self._run(lambda: self._connection.execute(
+            "INSERT INTO run_handoffs(run_id, tenant, updated_at, handoff_json) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (run_id) DO UPDATE SET tenant = EXCLUDED.tenant, "
+            "updated_at = EXCLUDED.updated_at, handoff_json = EXCLUDED.handoff_json",
+            (handoff.run_id, handoff.tenant, handoff.updated_at, _json_dumps(handoff_to_json(handoff)))))
+
+    async def get_handoff(self, run_id: str) -> RunHandoff | None:
+        row = await self._run(lambda: self._connection.execute(
+            "SELECT handoff_json FROM run_handoffs WHERE run_id = %s", (run_id,)).fetchone())
+        return None if row is None else handoff_from_json(json.loads(row["handoff_json"]))
+
+    async def recent_handoffs(self, tenant: str, limit: int = 50) -> Sequence[RunHandoff]:
+        rows = await self._run(lambda: self._connection.execute(
+            "SELECT handoff_json FROM run_handoffs WHERE tenant = %s ORDER BY updated_at DESC LIMIT %s",
+            (tenant, max(1, int(limit)))).fetchall())
+        return tuple(handoff_from_json(json.loads(row["handoff_json"])) for row in rows)
 
     async def add_steer(self, run_id: str, content: str) -> SteerMessage:
         _validate_identifier(run_id, "run_id")
@@ -586,7 +620,7 @@ class PostgresRunStore:
             if dry_run or not ids:
                 return ids
             self._connection.execute("SET LOCAL agent_harness.purge = 'on'")
-            for table in ("run_events", "run_queue", "steer_messages", "chat_conversations"):
+            for table in ("run_events", "run_queue", "steer_messages", "chat_conversations", "run_handoffs"):
                 self._connection.execute(f"DELETE FROM {table} WHERE run_id = ANY(%s)", (ids,))
             for run_id in ids:
                 self._connection.execute(

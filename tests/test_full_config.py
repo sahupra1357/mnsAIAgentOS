@@ -315,7 +315,8 @@ class FullConfigTests(unittest.TestCase):
         with mock.patch.dict("os.environ", HERMETIC):
             names = asyncio.run(build())
         for tool in ("read_file", "apply_patch", "run_command", "memory_search", "web_fetch",
-                     "web_search", "word_count", "github_repo", "load_skill", "read_artifact"):
+                     "web_search", "word_count", "github_repo", "load_skill", "read_artifact",
+                     "previous_runs"):
             # json_check and the excalidraw__* tools appear after their first sync (catalog cache).
             self.assertIn(tool, names)
 
