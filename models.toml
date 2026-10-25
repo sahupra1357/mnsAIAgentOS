@@ -171,7 +171,10 @@ guard_profile = "modal.guard"
 
 [models.modal_shared.parameters]
 temperature = 0.2
-max_tokens = 4096                      # output is $1.20/M; long answers are not cut off
+# Thinking counts against it: at 4096 GLM-5.3-Flash spent the whole allowance reasoning while
+# writing a video frame and replied with nothing (2026-10-23). The window (65536) minus this
+# leaves 49152 tokens of input.
+max_tokens = 16384
 
 # Modal dashboard rates for DeepSeek V4.1 Flash (2026-10-10), per million tokens.
 [models.modal_shared.pricing]
@@ -204,6 +207,11 @@ final_answer_reserve_seconds = 120
 # answer. Up to this many extra turns (0 = off); still cut off after that, run_completed says
 # answer_truncated. On 2026-10-10 two answers (Modal, Qwen 3.6) ended mid-sentence at 2048.
 max_answer_continuations = 2
+# A reply cut off at max_tokens with no text and no tool call (all thinking) is asked again,
+# tools still allowed, this many times in a row; then the turn stops as budget_exhausted
+# ("output limit") instead of passing the empty reply off as the answer and a finished plan
+# step. A follow-up message resumes it.
+max_cut_off_retries = 2
 # Read-only calls in one reply run concurrently even with the audit pre_tool hooks below: the
 # hooks run first (concurrently) and their decisions are recorded in call order afterwards.
 # Off, any pre_tool hook makes the calls run one by one.
@@ -214,8 +222,10 @@ prefetch_with_hooks = true
 reserve_tokens_per_run = 200000
 # Per turn: a new run gets this budget, and each follow-up adds it again (/ui, Open WebUI).
 # Exploring a codebase on a local 27B takes minutes; the code default is 20 steps / 300 s.
-turn_max_steps = 40
-turn_max_wall_seconds = 900
+# The terminal (chat, run) uses them too unless --max-steps / --max-wall-seconds are given;
+# before, it fixed 20 steps / 300 s, and a video pipeline stopped every 20 steps.
+turn_max_steps = 100
+turn_max_wall_seconds = 3600
 
 [context]
 chars_per_token = 3.0            # code and JSON use more tokens per character
@@ -533,7 +543,7 @@ environment = "local"
 [[quotas]]
 tenant = "default"
 max_runs_per_day = 500
-max_tokens_per_day = 5000000
+max_tokens_per_day = 10000000
 max_concurrent_runs = 8
 
 [user_quotas]

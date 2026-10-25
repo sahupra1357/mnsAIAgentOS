@@ -182,10 +182,22 @@ class WorkspaceBoundary:
         self._assert_readable_file(path)
         return path.relative_to(self.root).as_posix()
 
+    def _inside(self, raw: Path) -> Path:
+        """An absolute path under the workspace root as a relative one; others unchanged.
+
+        Models often pass the full path they saw in command output; it was refused as
+        "outside the workspace" even when it was inside. The relative result goes through
+        the same checks (``..``, symlinks, protected folders) as any relative path.
+        """
+
+        if raw.is_absolute() and raw.is_relative_to(self.root):
+            return raw.relative_to(self.root)  # the root itself becomes "."
+        return raw
+
     def _resolve(self, relative_path: str, *, must_exist: bool) -> Path:
         if not isinstance(relative_path, str) or not relative_path.strip():
             raise WorkspaceViolation("path must be a non-empty relative string")
-        raw = Path(relative_path)
+        raw = self._inside(Path(relative_path))
         if raw.is_absolute() or ".." in raw.parts:
             raise WorkspaceViolation("path must stay inside the workspace")
         candidate = self.root / raw
@@ -214,7 +226,7 @@ class WorkspaceBoundary:
 
         if not isinstance(relative_path, str) or not relative_path.strip():
             raise WorkspaceViolation("path must be a non-empty relative string")
-        raw = Path(relative_path)
+        raw = self._inside(Path(relative_path))
         if raw.is_absolute() or ".." in raw.parts:
             raise WorkspaceViolation("path must stay inside the workspace")
         existing = self.root / raw.parent

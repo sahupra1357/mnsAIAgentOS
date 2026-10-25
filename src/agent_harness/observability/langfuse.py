@@ -605,6 +605,24 @@ def build_observations(
             child_id = str(payload.get("child_run_id", ""))
             started = subagents.pop(child_id, event)
             out.extend(_subagent(trace, context, started, event, parent, shared, children, depth))
+        elif event.type is EventType.USAGE_RECORDED:
+            # A guard check or an embedding: its own generation, so trace totals include it.
+            usage = {name: payload[field] for name, field in (("input", "input_tokens"), ("output", "output_tokens"))
+                     if isinstance(payload.get(field), int)}
+            if usage:
+                usage["total"] = sum(usage.values())
+            model = payload.get("model_profile")
+            attributes = {**shared, **_observation(
+                "generation", metadata={k: v for k, v in payload.items() if k not in ("input_tokens", "output_tokens")}
+                | {"step": event.step})}
+            if model:
+                attributes["langfuse.observation.model.name"] = context.model_names.get(str(model), str(model))
+            if usage:
+                attributes["langfuse.observation.usage_details"] = _json(usage)
+            if isinstance(payload.get("cost_usd"), (int, float)):
+                attributes["langfuse.observation.cost_details"] = _json({"total": float(payload["cost_usd"])})
+            out.append(Span(trace, span_id(key), f"{payload.get('kind', 'usage')} {model or ''}".strip(),
+                            event.created_at, event.created_at, parent, attributes))
         elif event.type in _EVENT_TYPES:
             kind = _EVENT_TYPES[event.type]
             attributes = {**shared, **_observation(

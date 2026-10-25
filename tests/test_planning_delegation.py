@@ -30,10 +30,13 @@ from agent_harness.domain import (
 from agent_harness.extensions.hooks import CallableHook, HookEvent, HookRunner
 from agent_harness.orchestration.orchestrator import (
     CONTINUE_ANSWER_NOTE,
+    CUT_OFF_RETRY_NOTE,
     FINAL_STEP_NOTE,
     PLAN_FINISHED_NO_TOOLS,
     AgentOrchestrator,
     OrchestratorSettings,
+    resumable_steps,
+    steps_left_note,
 )
 from agent_harness.persistence import InMemoryRunStore, SQLiteRunStore
 from agent_harness.orchestration.planning import PLANNER_INSTRUCTIONS, PlanningPolicy, parse_steps
@@ -762,6 +765,92 @@ class FinalAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.model.requests[-1].tool_choice, "none")
 
 
+class PlanReopenTests(unittest.IsolatedAsyncioTestCase):
+    """A plan the last-step note ended picks up again with the next message.
+
+    Live run 2026-10-23 (video pipeline): the turn ran out of steps during "assemble"; the answer
+    ended the plan, and "render" and "package" (thumbnails, intro, final names) never ran, because
+    follow-up messages worked without the plan.
+    """
+
+    def orchestrator(self, handler: Handler, clock: Clock) -> AgentOrchestrator:
+        self.model = RoutedModel(handler)
+        self.store = InMemoryRunStore()
+        return AgentOrchestrator(models=self.model, tools=create_default_runtime(), store=self.store, clock=clock,
+                                 settings=OrchestratorSettings(final_answer_on_last_step=True))
+
+    async def test_continue_resumes_at_the_unfinished_step(self) -> None:
+        clock = Clock()
+        resumed = False
+
+        async def handler(request: ModelRequest) -> ModelResponse:
+            text = last_user(request)
+            if text == FINAL_STEP_NOTE:
+                return final("what I have so far")
+            if "[Plan] Execute step s1" in text:
+                if not resumed:
+                    clock.now += timedelta(seconds=550)
+                    return call("list_directory", {"path": "."}, "l1")
+                return final("s1 done")
+            if "[Plan] Execute step s2" in text:
+                return final("s2 done")
+            if "All steps are finished" in text:
+                return final("all done")
+            return call("create_plan", {"goal": "g", "steps": [
+                {"id": "s1", "title": "One"}, {"id": "s2", "title": "Two", "depends_on": ["s1"]}]}, "p1")
+
+        orchestrator = self.orchestrator(handler, clock)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")], planning=True,
+                                            budget=RunBudget(max_steps=40, max_wall_seconds=600))
+        stopped = await orchestrator.run(run.id)
+        assert stopped.plan is not None
+        self.assertEqual((stopped.plan.phase, stopped.messages[-1].content), ("done", "what I have so far"))
+        events = await self.store.list_events(run.id)
+        self.assertEqual(resumable_steps(stopped.plan, events), stopped.plan.steps)
+        ended = [e.payload for e in events if e.payload.get("final_step")]
+        self.assertEqual(ended[-1]["left"], ["s1", "s2"])
+        self.assertIn("s1 (One), s2 (Two)", steps_left_note(stopped.plan.steps))
+
+        resumed = True
+        await orchestrator.continue_run(run.id, "continue", budget=RunBudget(max_steps=80, max_wall_seconds=6000))
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual((finished.status, finished.messages[-1].content), (RunStatus.COMPLETED, "all done"))
+        assert finished.plan is not None
+        self.assertEqual([s.status for s in finished.plan.steps], [PlanStepStatus.COMPLETED] * 2)
+        texts = [m.content for m in finished.messages if m.role is Role.USER]
+        after = texts[texts.index("continue") + 1]
+        self.assertIn("[Plan] Execute step s1", after)  # the unfinished step is delivered again
+        reopened = [e.payload for e in await self.store.list_events(run.id) if e.payload.get("resumed")]
+        self.assertEqual(reopened, [{"phase": "executing", "after": "done", "resumed": True, "left": ["s1", "s2"]}])
+        self.assertEqual(resumable_steps(finished.plan, await self.store.list_events(run.id)), ())
+
+    async def test_a_finished_plan_stays_finished(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            text = last_user(request)
+            if "[Plan] Execute step s1" in text:
+                return final("s1 done")
+            if "All steps are finished" in text:
+                return final("answer")
+            if text == "thanks, one more question":
+                return final("plain reply")
+            return call("create_plan", {"goal": "g", "steps": [{"id": "s1", "title": "One"}]}, "p1")
+
+        orchestrator = self.orchestrator(handler, Clock())
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")], planning=True,
+                                            budget=RunBudget(max_steps=40, max_wall_seconds=600))
+        await orchestrator.run(run.id)
+        await orchestrator.continue_run(run.id, "thanks, one more question", budget=RunBudget(max_steps=80))
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.messages[-1].content, "plain reply")
+        assert finished.plan is not None
+        self.assertEqual(finished.plan.phase, "done")
+        events = await self.store.list_events(run.id)
+        self.assertFalse([e for e in events if e.payload.get("resumed")])
+        self.assertEqual(resumable_steps(finished.plan, events), ())
+
+
 def cut(text: str) -> ModelResponse:
     """A final answer that ended at the output limit."""
 
@@ -889,3 +978,108 @@ class AnswerContinuationTests(unittest.IsolatedAsyncioTestCase):
         continuation = self.model.requests[-1]
         self.assertEqual(last_user(continuation), CONTINUE_ANSWER_NOTE)
         self.assertEqual(continuation.messages[-2].content, "Summary: ")
+
+
+class EmptyCutOffTests(unittest.IsolatedAsyncioTestCase):
+    """``max_cut_off_retries``: a reply cut off with no text and no tool call is not an answer.
+
+    Live run 2026-10-23 (Modal, GLM-5.3-Flash, max_tokens 4096): four replies spent all 4096
+    tokens thinking while writing video frames. Each empty reply was taken as the answer, two of
+    them completed plan steps ("by": "final_answer") that had produced nothing, and the chat
+    printed nothing.
+    """
+
+    def orchestrator(self, handler: Handler, *, retries: int = 2, continuations: int = 2) -> AgentOrchestrator:
+        self.model = RoutedModel(handler)
+        self.store = InMemoryRunStore()
+        return AgentOrchestrator(
+            models=self.model, tools=create_default_runtime(), store=self.store,
+            settings=OrchestratorSettings(max_cut_off_retries=retries,
+                                          max_answer_continuations=continuations))
+
+    async def test_empty_cut_off_is_asked_again_with_tools(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            if len(self.model.requests) == 1:
+                return cut("")  # all thinking
+            if len(self.model.requests) == 2:
+                return call("list_directory", {"path": "."})
+            return final("listed")
+
+        orchestrator = self.orchestrator(handler)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "list")])
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(finished.messages[-1].content, "listed")
+        retry = self.model.requests[1]
+        self.assertEqual(last_user(retry), CUT_OFF_RETRY_NOTE)
+        self.assertIsNone(retry.tool_choice)  # tools stay available, unlike a continuation
+        self.assertTrue(retry.tools)
+        events = await self.store.list_events(run.id)
+        notes = [e.payload for e in events if e.payload.get("reminder") == "cut_off_retry"]
+        self.assertEqual([n["retry"] for n in notes], [1])
+
+    async def test_still_empty_after_the_retries_stops_as_output_limit(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            return cut("   ")
+
+        orchestrator = self.orchestrator(handler, retries=2)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "x")])
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.BUDGET_EXHAUSTED)
+        self.assertEqual(len(self.model.requests), 3)  # the reply and two retries
+        self.assertIn("output limit", finished.error or "")
+        self.assertIn("max_tokens", finished.error or "")
+        # A follow-up message resumes the run (the chat adds a turn's budget, as here).
+        resumed = await orchestrator.continue_run(run.id, "go on", budget=RunBudget(max_steps=20))
+        self.assertEqual(resumed.status, RunStatus.RUNNING)
+
+    async def test_off_keeps_the_old_behavior_and_text_is_still_continued(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            return cut("")
+
+        orchestrator = self.orchestrator(handler, retries=0)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "x")])
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertEqual(len(self.model.requests), 1)
+
+        async def text_handler(request: ModelRequest) -> ModelResponse:
+            if last_user(request) == CONTINUE_ANSWER_NOTE:
+                return final("end.")
+            return cut("Start, ")
+
+        orchestrator = self.orchestrator(text_handler)  # retries on: a cut answer with text
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "x")])
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.messages[-1].content, "Start, end.")
+        self.assertNotIn(CUT_OFF_RETRY_NOTE, [m.content for m in finished.messages])
+
+    async def test_an_empty_cut_off_never_completes_a_plan_step(self) -> None:
+        async def handler(request: ModelRequest) -> ModelResponse:
+            text = last_user(request)
+            if text == CUT_OFF_RETRY_NOTE or "[Plan] Execute step s1" in text:
+                return cut("")
+            return call("create_plan", {"goal": "g", "steps": [{"id": "s1", "title": "One"},
+                                                               {"id": "s2", "title": "Two"}]}, "p1")
+
+        orchestrator = self.orchestrator(handler)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")],
+                                            planning=True)
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.BUDGET_EXHAUSTED)
+        steps = {step.id: step.status for step in finished.plan.steps}
+        self.assertNotEqual(steps["s1"], PlanStepStatus.COMPLETED)
+        events = await self.store.list_events(run.id)
+        self.assertFalse([e for e in events if e.payload.get("by") == "final_answer"])
+
+    def test_config_parses_and_validates_the_setting(self) -> None:
+        from agent_harness.application import orchestrator_settings
+        from agent_harness.config.loader import ConfigError, OrchestratorConfig
+
+        self.assertEqual(orchestrator_settings(OrchestratorConfig()).max_cut_off_retries, 0)  # off
+        self.assertEqual(orchestrator_settings(OrchestratorConfig(max_cut_off_retries=2)).max_cut_off_retries, 2)
+        with self.assertRaises(ConfigError):
+            OrchestratorConfig(max_cut_off_retries=-1)

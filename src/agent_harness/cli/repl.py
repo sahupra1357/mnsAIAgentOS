@@ -16,6 +16,7 @@ from typing import Any, Protocol
 
 from ..domain import ContentPart, Message, Role, RunBudget, RunRecord, RunStatus
 from ..extensions.templates import expand_prompt
+from ..orchestration.orchestrator import resumable_steps, steps_left_note
 from .images import split_images
 
 HELP = """commands:
@@ -109,6 +110,10 @@ class ChatSession:
         run = await orchestrator.run(run.id)
         run = await self._settle(run)
         self._show(run)
+        if run.plan is not None:
+            left = resumable_steps(run.plan, await self._app.store.list_events(run.id))
+            if left:
+                self._io.note(f"({steps_left_note(left)})")
         return run
 
     async def _create(self, prompt: str, template: Any, images: Sequence[str] = ()) -> RunRecord:

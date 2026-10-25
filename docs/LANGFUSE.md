@@ -49,6 +49,7 @@ tags = profile, environment, release, metadata `run_id`, `turn`, `status`, `mode
 ```
 agent run / agent turn        (agent, the root: user message in, answer out)
 ├─ model modal_shared         (generation: model, tokens, cost, finish reason, new messages, reply)
+├─ guard modal_shared.guard   (generation: guard check tokens; embedding: memory tool embeddings)
 ├─ tool read_file             (tool: arguments, result, status, risk, permission)
 ├─ guardrail_decided          (guardrail: category, action, detector; never the matched text)
 ├─ approval_requested / ...   (event)
@@ -68,6 +69,8 @@ agent run / agent turn        (agent, the root: user message in, answer out)
   twice. A turn that fails and is then resumed keeps the first export.
 - **Cost.** Generations carry the harness's estimated cost (`cost_details.total`); Langfuse shows
   it as is.
+- **Guard and embeddings.** Each guard check (`guard <profile>`) and each embedding (`embedding`) is a
+  generation with its own tokens, so a trace's total includes them (from `usage_recorded` events).
 
 ## User feedback (`/ui`)
 

@@ -607,6 +607,7 @@ class OrchestratorConfig:
     final_answer_on_last_step: bool = False  # last allowed step: answer without tools
     final_answer_reserve_seconds: float = 120.0  # ...also this close to the time limit (0: off)
     max_answer_continuations: int = 0  # continue an answer cut off at max_tokens (0: off)
+    max_cut_off_retries: int = 0  # ask again after an empty reply cut off at max_tokens (0: off)
     prefetch_with_hooks: bool = False  # run a reply's read-only calls concurrently despite pre_tool hooks
 
     def __post_init__(self) -> None:
@@ -616,6 +617,8 @@ class OrchestratorConfig:
             raise ConfigError("orchestrator.final_answer_reserve_seconds must not be negative")
         if self.max_answer_continuations < 0:
             raise ConfigError("orchestrator.max_answer_continuations must not be negative")
+        if self.max_cut_off_retries < 0:
+            raise ConfigError("orchestrator.max_cut_off_retries must not be negative")
         if self.reserve_tokens_per_run < 0:
             raise ConfigError("orchestrator.reserve_tokens_per_run must not be negative")
         if self.max_model_attempts < 1 or self.max_tool_attempts < 1:

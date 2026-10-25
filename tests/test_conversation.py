@@ -419,6 +419,31 @@ class TurnBudgetTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_run_uses_the_configured_turn_budget_unless_flags_are_given(self) -> None:
+        # 2026-10-23: the terminal fixed 20 steps / 300 s and ignored turn_max_* (only /ui and
+        # the API used them), so a video pipeline stopped every 20 steps.
+        transport = Transport(["one", "two"])
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "models.toml")
+            config.write_text('[models.p]\nadapter = "openai_compatible"\nmodel = "m"\nendpoint = "http://x/v1"\n'
+                              '[orchestrator]\nturn_max_steps = 7\nturn_max_wall_seconds = 120\n')
+            common = ["--config", str(config), "--database", str(Path(directory, "db.sqlite3"))]
+
+            def invoke(*args: str) -> tuple[int, str, str]:
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch("agent_harness.model_gateway.openai_compatible.StdlibHttpTransport",
+                                return_value=transport), redirect_stdout(out), redirect_stderr(err):
+                    code = cli.main([args[0], *common, *args[1:]])
+                return code, out.getvalue(), err.getvalue()
+
+            for flags, steps, seconds in (((), 7, 120), (("--max-steps", "3", "--max-wall-seconds", "60"), 3, 60)):
+                with self.subTest(flags=flags):
+                    _, _, err = invoke("run", *flags, "question")
+                    run_id = err.split("run_id=")[1].split()[0]
+                    _, out, _ = invoke("status", run_id)
+                    self.assertIn(f"steps:  1 / {steps}", out)
+                    self.assertIn(f"/ {seconds}s", out)
+
     def test_run_continue_status_steer_cancel(self) -> None:
         transport = Transport(["first answer", "second answer"])
         with tempfile.TemporaryDirectory() as directory:
