@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import os
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from typing import Any
@@ -101,7 +102,7 @@ class McpToolSource:
                 timeout_seconds=self.config.call_timeout_seconds,
                 risk=ToolRisk.READ_ONLY if read_only else self.config.default_risk,
                 idempotent=read_only,
-                trust=ToolTrust.UNTRUSTED,
+                trust=ToolTrust.TRUSTED if tool.name in self.config.trusted else ToolTrust.UNTRUSTED,
             ))
         return specs
 
@@ -134,6 +135,9 @@ class McpToolSource:
             else:
                 self._server_names.setdefault(spec.name, suffix)
                 handler = self._handler(spec.name)
+                # Trust follows the config, also for specs cached from an earlier sync.
+                trusted = self._server_names[spec.name] in self.config.trusted
+                spec = dataclasses.replace(spec, trust=ToolTrust.TRUSTED if trusted else ToolTrust.UNTRUSTED)
             runtime.register(spec, handler, source=self.config.source, source_kind="mcp", replace=replace)
 
     async def discover(self) -> list[ToolSpec]:

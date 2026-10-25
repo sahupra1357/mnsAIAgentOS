@@ -441,6 +441,56 @@ class ToolGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(paused.status, RunStatus.AWAITING_INPUT)
 
 
+class TaintRestOfTurnTests(unittest.IsolatedAsyncioTestCase):
+    """2026-10-25: one untrusted read made all 32 later commands of a video run ask."""
+
+    async def test_rest_of_turn_stops_taint_prompts_until_the_next_user_message(self) -> None:
+        tools = Tools()
+        model = Scripted([call("web_fetch", {}), call("send_email", {"to": "a"}, "c2"),
+                          call("web_fetch", {}, "c3"), call("send_email", {"to": "b"}, "c4"), text("done"),
+                          call("web_fetch", {}, "c5"), call("send_email", {"to": "c"}, "c6")])
+        with tempfile.TemporaryDirectory() as folder:
+            orch = orchestrator(model, tools=tools, store=SQLiteRunStore(Path(folder) / "runs.db"),
+                                default_mode=PermissionMode.BYPASS)
+            paused = await start(orch, "check the page")
+            self.assertEqual(paused.status, RunStatus.AWAITING_INPUT)
+            await orch.resolve_approval(paused.id, call_id="c2", approved=True, rest_of_turn=True)
+            finished = await orch.resume(paused.id)
+            # The second untrusted read did not ask again, and the acceptance survived the store.
+            self.assertEqual((finished.status, len(tools.sent)), (RunStatus.COMPLETED, 2))
+            self.assertIsNotNone(finished.taint_accepted_at)
+            resolved = [e.payload for e in await orch._store.list_events(paused.id)
+                        if e.type is EventType.APPROVAL_RESOLVED]
+            self.assertEqual(resolved, [{"call_id": "c2", "tool": "send_email", "approved": True,
+                                         "rest_of_turn": True}])
+            # The user's next message ends it: the next untrusted read asks again.
+            await orch.continue_run(paused.id, "and the other page")
+            again = await orch.run(paused.id)
+            self.assertEqual(again.status, RunStatus.AWAITING_INPUT)
+            pending = await orch.pending_approval(paused.id)
+            assert pending is not None
+            self.assertEqual(pending.call_id, "c6")
+
+    async def test_rest_of_turn_needs_an_approved_tool_call(self) -> None:
+        orch = orchestrator(Scripted([call("web_fetch", {}), call("send_email", {"to": "x"}, "c2")]))
+        paused = await start(orch, "check the page")
+        with self.assertRaisesRegex(ValueError, "rest of the turn"):
+            await orch.resolve_approval(paused.id, call_id="c2", approved=False, rest_of_turn=True)
+
+    def test_orchestrator_notes_do_not_end_the_taint(self) -> None:
+        # [Plan]/[Budget] notes and hook context are user messages the user did not write.
+        from agent_harness.orchestration.orchestrator import _tainted
+
+        wrapped = Message(Role.TOOL, '<untrusted-tool-output tool="web_fetch">x</untrusted-tool-output>')
+        turn = [Message(Role.USER, "go"), wrapped]
+        for note in ("[Plan] Before answering, call create_plan.", "[Budget] This is your last step.",
+                     "[Context from hooks]\nok"):
+            self.assertTrue(_tainted([*turn, Message(Role.USER, note)]), note)
+        self.assertFalse(_tainted([*turn, Message(Role.USER, "thanks, continue")]))
+        self.assertFalse(_tainted([*turn, wrapped], accepted_at=1))
+        self.assertTrue(_tainted([*turn, Message(Role.USER, "next"), wrapped], accepted_at=1))
+
+
 class ModelGuardTests(unittest.IsolatedAsyncioTestCase):
     def config(self, **model: Any) -> GuardrailsConfig:
         return GuardrailsConfig(enabled=True, model=ModelGuardConfig(profile="guard", **model))

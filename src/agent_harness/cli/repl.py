@@ -180,13 +180,20 @@ class ChatSession:
                 what = "plan" if pending.kind == "plan" else f"tool {pending.tool_name} ({pending.risk.value})"
                 self._io.note(f"approval needed: {what}")
                 self._io.note(json.dumps(dict(pending.arguments), indent=2, ensure_ascii=False))
-                reply = await self._io.ask("allow? [y/N] ")
-                approved = reply is not None and reply.strip().lower() in {"y", "yes"}
+                if pending.kind == "plan":
+                    reply = await self._io.ask("allow? [y/N] ")
+                else:
+                    reply = await self._io.ask(
+                        "allow? [y/N/a] (a = yes, and no untrusted-output prompts until your next message) ")
+                answer = (reply or "").strip().lower()
+                rest_of_turn = pending.kind != "plan" and answer in {"a", "all"}
+                approved = rest_of_turn or answer in {"y", "yes"}
                 feedback = None
                 if not approved and pending.kind == "plan":
                     feedback = (await self._io.ask("feedback (optional)> ") or "").strip() or None
                 await orchestrator.resolve_approval(
-                    run.id, call_id=pending.call_id, approved=approved, feedback=feedback
+                    run.id, call_id=pending.call_id, approved=approved, feedback=feedback,
+                    rest_of_turn=rest_of_turn,
                 )
             run = await orchestrator.resume(run.id)
         return run

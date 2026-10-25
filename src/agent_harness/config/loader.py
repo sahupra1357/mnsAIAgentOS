@@ -1360,7 +1360,7 @@ def _parse_mcp_servers(raw: Any) -> tuple[McpServerConfig, ...]:
         if unknown:
             raise ConfigError(f"unknown fields in mcp_servers: {', '.join(sorted(unknown))}")
         values = dict(item)
-        for key in ("command", "env", "read_only", "tools"):
+        for key in ("command", "env", "read_only", "trusted", "tools"):
             if key in values:
                 if not isinstance(values[key], list) or not all(isinstance(v, str) for v in values[key]):
                     raise ConfigError(f"mcp_servers.{key} must be a list of strings")

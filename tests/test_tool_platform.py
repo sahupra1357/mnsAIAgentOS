@@ -10,6 +10,7 @@ import tempfile
 import textwrap
 import unittest
 from collections import deque
+from dataclasses import replace
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -329,6 +330,33 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(normalize_input_schema(None), {"type": "object"})
         with self.assertRaises(SchemaNormalizationError):
             normalize_input_schema({"type": "string"})
+
+
+class McpTrustTests(unittest.TestCase):
+    def test_trusted_tools_follow_the_config_also_from_the_catalog(self) -> None:
+        # 2026-10-25: excalidraw__read_me (fixed docs) put the rest of a video run's turn under
+        # taint approvals. `trusted` lists tools whose output is not untrusted data.
+        from agent_harness.mcp.client import McpTool
+        from agent_harness.config.loader import _parse_mcp_servers
+
+        config = McpServerConfig(name="draw", url="https://draw.example/mcp", transport="http",
+                                 read_only=("read_me", "create_view"), trusted=("read_me",))
+        tools = [McpTool("read_me", "docs", {"type": "object"}), McpTool("create_view", "draw", {"type": "object"})]
+        specs = {s.name: s for s in McpToolSource(config).specs_for(tools)}
+        self.assertIs(specs["draw__read_me"].trust, ToolTrust.TRUSTED)
+        self.assertIs(specs["draw__create_view"].trust, ToolTrust.UNTRUSTED)
+        # Specs cached by an earlier sync carry the old trust; registering applies the config's.
+        runtime = ToolRuntime(ToolRegistry())
+        cached = [spec_from_json(spec_to_json(s)) for s in specs.values()]
+        McpToolSource(replace(config, trusted=("create_view",))).register(runtime, cached)
+        trust = {s.name: s.trust for s in runtime.specs()}
+        self.assertEqual(trust, {"draw__read_me": ToolTrust.UNTRUSTED, "draw__create_view": ToolTrust.TRUSTED})
+        parsed = _parse_mcp_servers([{"name": "draw", "transport": "http", "url": "https://draw.example/mcp",
+                                      "trusted": ["read_me"]}])
+        self.assertEqual(parsed[0].trusted, ("read_me",))
+        with self.assertRaises(ConfigError):
+            _parse_mcp_servers([{"name": "draw", "transport": "http", "url": "https://draw.example/mcp",
+                                 "trusted": "read_me"}])
 
 
 class McpStdioTests(unittest.IsolatedAsyncioTestCase):

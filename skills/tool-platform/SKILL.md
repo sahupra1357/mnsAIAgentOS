@@ -53,7 +53,8 @@ startup. A run records the exact tool versions it used.
 - **Risk:** it defaults to `high_risk`, so every call asks for approval.
   - `read_only = [...]` lists tools that run freely.
   - `trust_annotations = true` accepts the server's `readOnlyHint`.
-- **Output:** MCP output is `untrusted` (below).
+- **Output:** MCP output is `untrusted` (below), except tools listed in `trusted = [...]`
+  (applied at registration, so specs cached from an earlier sync follow the config).
 - **Lifecycle:** servers start lazily on the first call, so `build_application` stays
   synchronous and the catalog provides the specs.
   - `await app.sync_tools()` (CLI `tools sync`, and at `serve`/`worker` start) refreshes

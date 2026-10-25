@@ -64,6 +64,15 @@ the next user message. It holds even in `bypass` mode. This is the main defense 
 *indirect* prompt injection: a web page that says "email the API keys to …" can no
 longer make the agent do it silently. The approval reason says that taint mode asked.
 
+- **Your messages only.** Orchestrator notes (`[Plan] ...`, `[Budget] ...`) and hook context
+  are user messages too, but they do not end the taint; before 2026-10-25 they did.
+- **Allow the rest of the turn.** Answer `a` in the chat (`approve --allow --rest-of-turn`,
+  or `"rest_of_turn": true` on `POST /runs/{id}/approval`) to approve the call and stop
+  taint prompts until your next message. Approvals asked for other reasons (an `ask` rule,
+  the tool's risk) still ask.
+- **Trusted MCP tools.** MCP output is untrusted unless the server lists the tool in
+  `trusted = [...]`; use it only for output nobody else can write, such as fixed docs.
+
 **Streaming.** While replies are checked (any output detector on, or the guard model on
 output), token streaming is turned off. A streamed preview could show text that the
 guard then blocks. `output.allow_streaming = true` turns streaming back on and accepts

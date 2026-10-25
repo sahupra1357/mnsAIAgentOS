@@ -224,7 +224,9 @@ reserve_tokens_per_run = 200000
 # Exploring a codebase on a local 27B takes minutes; the code default is 20 steps / 300 s.
 # The terminal (chat, run) uses them too unless --max-steps / --max-wall-seconds are given;
 # before, it fixed 20 steps / 300 s, and a video pipeline stopped every 20 steps.
-turn_max_steps = 100
+# 200 steps: one video takes more than 100 (a run on 2026-10-25 ran out at step 100 with
+# about 17 minutes of active time; time spent waiting on approvals is not counted).
+turn_max_steps = 200
 turn_max_wall_seconds = 3600
 
 [context]
@@ -434,7 +436,8 @@ input_schema = { type = "object", properties = {} }
 
 # Excalidraw MCP server (remote, streamable HTTP). Its host is in [network] allowed_hosts.
 # Tools are named excalidraw__read_me and excalidraw__create_view; the server's widget-only
-# tools are not offered. Output is untrusted data. It is an MCP App: clients with a widget
+# tools are not offered. read_me returns fixed documentation, so it is trusted; create_view's
+# output is untrusted data (taint mode applies after it). It is an MCP App: clients with a widget
 # renderer draw the diagram; here the model gets the text result only. A server that is
 # down keeps the tools from its last sync (`agent-harness tools sync`).
 [[mcp_servers]]
@@ -443,6 +446,7 @@ transport = "http"
 url = "https://mcp.excalidraw.com/mcp"
 tools = ["read_me", "create_view"]
 read_only = ["read_me", "create_view"]
+trusted = ["read_me"]
 sync_on_start = true
 
 [web_fetch]
