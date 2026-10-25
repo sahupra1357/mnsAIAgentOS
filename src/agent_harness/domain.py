@@ -89,6 +89,9 @@ class EventType(StrEnum):
     GUARDRAIL_REFUSED = "guardrail_refused"
     # A run claimed too many times without finishing was failed by a worker (Phase 12c).
     RUN_DEAD_LETTERED = "run_dead_lettered"
+    # Tokens of a model call that is not a chat step: a guard check or an embedding.
+    # Before, guard tokens were only in the run total and embedding tokens nowhere.
+    USAGE_RECORDED = "usage_recorded"
 
 
 class PermissionMode(StrEnum):

@@ -43,6 +43,7 @@ from .errors import (
 )
 from .system_messages import single_system_message
 from .tool_names import recover_tool_names
+from .usage import record_embedding_usage
 from .transport import (
     HttpResponse,
     HttpTransport,
@@ -327,6 +328,9 @@ class OpenAICompatibleClient:
             raise MalformedResponseError(f"malformed embeddings response: {exc}") from exc
         if len(vectors) != len(texts):
             raise MalformedResponseError("embeddings response has the wrong number of vectors")
+        usage = raw.get("usage") if isinstance(raw, dict) else None
+        if isinstance(usage, dict) and isinstance(usage.get("prompt_tokens"), int):
+            record_embedding_usage(Usage(input_tokens=usage["prompt_tokens"], output_tokens=0))
         return vectors
 
     # -- token counting (profile token_counting = "server") ---------------------

@@ -455,6 +455,21 @@ class ModelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.guard_requests[0].messages[-1].content, "hello")
         self.assertEqual(finished.consumed_tokens, 52 + 8)  # guard tokens count against the budget
 
+    async def test_each_guard_check_logs_its_tokens(self) -> None:
+        # 2026-10-24: guard tokens were only inside the run total, so a token report could not split them out.
+        model = Scripted([text("Hi!")], ["safe", "safe"])
+        orch = orchestrator(model, config=self.config())
+        finished = await start(orch, "hello")
+        events = await orch._store.list_events(finished.id)
+        used = [e.payload for e in events if e.type is EventType.USAGE_RECORDED]
+        self.assertEqual([(u["kind"], u["stage"], u["model_profile"]) for u in used],
+                         [("guard", "input", "guard"), ("guard", "output", "guard")])
+        chat = sum(e.payload["input_tokens"] + e.payload["output_tokens"] for e in events
+                   if e.type is EventType.MODEL_RESPONDED)
+        guard = sum(u["input_tokens"] + u["output_tokens"] for u in used)
+        self.assertEqual(finished.consumed_tokens, chat + guard)
+        self.assertNotIn(EventType.GUARDRAIL_DECIDED, kinds(events))  # safe verdicts decide nothing
+
     async def test_unsafe_output_is_replaced(self) -> None:
         model = Scripted([text("Here is how to make it...")], ["safe", "unsafe\nS1"])
         orch = orchestrator(model, config=self.config())

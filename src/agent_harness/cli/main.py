@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..application import HarnessApplication, build_application, default_database, state_directory
 from ..coding import CODING_AGENT_SYSTEM_PROMPT
-from ..config.loader import ConfigError, discover_config_path, load_config
+from ..config.loader import ConfigError, HarnessConfig, discover_config_path, load_config
 from ..config.dotenv import load_dotenv
 from ..application import open_memory_store
 from ..knowledge.memory import SQLiteMemoryStore
@@ -33,6 +33,7 @@ from ..extensions.instructions import resolve_path
 from ..extensions.plugins import install_plugin, installed_plugins
 from ..config.settings import SettingsError, load_layers, render_effective
 from ..extensions.templates import expand_prompt
+from ..orchestration.orchestrator import resumable_steps, steps_left_note
 from .repl import ChatOptions, ChatSession, TerminalIO
 from ..bench.evals import load_scenarios, run_scenario, scenario_application, summarize
 from ..observability.telemetry import JsonLinesTelemetry
@@ -70,8 +71,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--model-profile", help="profile or route name; defaults to the config value"
     )
-    run.add_argument("--max-steps", type=int, default=20)
-    run.add_argument("--max-wall-seconds", type=float, default=300.0)
+    run.add_argument("--max-steps", type=int,
+                     help="steps allowed (default: [orchestrator] turn_max_steps, else 20)")
+    run.add_argument("--max-wall-seconds", type=float,
+                     help="seconds allowed (default: [orchestrator] turn_max_wall_seconds, else 300)")
     run.add_argument("--max-tokens", type=int)
     run.add_argument("--max-cost-usd", type=float)
     run.add_argument(
@@ -106,8 +109,10 @@ def _parser() -> argparse.ArgumentParser:
     _common_runtime_arguments(chat)
     chat.add_argument("--system", help="optional system instruction")
     chat.add_argument("--model-profile", help="profile or route name; defaults to the config value")
-    chat.add_argument("--max-steps", type=int, default=20, help="steps allowed per message")
-    chat.add_argument("--max-wall-seconds", type=float, default=300.0, help="seconds allowed per message")
+    chat.add_argument("--max-steps", type=int,
+                      help="steps allowed per message (default: [orchestrator] turn_max_steps, else 20)")
+    chat.add_argument("--max-wall-seconds", type=float,
+                      help="seconds allowed per message (default: [orchestrator] turn_max_wall_seconds, else 300)")
     chat.add_argument("--max-tokens", type=int, help="token budget for the whole conversation")
     chat.add_argument("--max-cost-usd", type=float, help="cost budget for the whole conversation")
     chat.add_argument("--no-stream", dest="stream", action="store_false",
@@ -402,18 +407,31 @@ async def _run_command(args: argparse.Namespace) -> int:
             planning=args.planning,
             output_schema=_load_schema(args.output_schema),
             messages=messages,
-            budget=RunBudget(
-                max_steps=args.max_steps,
-                max_wall_seconds=args.max_wall_seconds,
-                max_tokens=args.max_tokens,
-                max_cost_usd=args.max_cost_usd,
-            ),
+            budget=_turn_budget(args, app.config),
         )
         completed = await app.orchestrator.run(run.id)
         return await _print_result(
             app, completed, streamed=stream is not None and stream.printed,
             show_reasoning=args.show_reasoning and stream is None,
         )
+
+
+def _turn_budget(args: argparse.Namespace, config: HarnessConfig) -> RunBudget:
+    """One run's or chat message's budget: the flags, else ``[orchestrator] turn_max_*``.
+
+    Before, the flags defaulted to 20 steps / 300 s, so the terminal ignored the configured
+    turn budget (only /ui and the API used it) and long pipelines stopped every 20 steps.
+    """
+
+    section = config.orchestrator
+    defaults = RunBudget()
+    return RunBudget(
+        max_steps=args.max_steps or section.turn_max_steps or defaults.max_steps,
+        max_wall_seconds=(args.max_wall_seconds or section.turn_max_wall_seconds
+                          or defaults.max_wall_seconds),
+        max_tokens=args.max_tokens,
+        max_cost_usd=args.max_cost_usd,
+    )
 
 
 async def _chat_command(args: argparse.Namespace) -> int:
@@ -434,12 +452,7 @@ async def _chat_command(args: argparse.Namespace) -> int:
             system=system,
             mode=args.mode,
             planning=args.planning,
-            budget=RunBudget(
-                max_steps=args.max_steps,
-                max_wall_seconds=args.max_wall_seconds,
-                max_tokens=args.max_tokens,
-                max_cost_usd=args.max_cost_usd,
-            ),
+            budget=_turn_budget(args, app.config),
         )
         return await ChatSession(app, options, TerminalIO(), stream=stream).loop()
 
@@ -499,6 +512,9 @@ async def _print_result(
     print(f"run_id={run.id} status={run.status.value}", file=sys.stderr)
     if run.error:
         print(f"error={run.error}", file=sys.stderr)
+    left = resumable_steps(run.plan, await app.store.list_events(run.id)) if run.plan is not None else ()
+    if left:
+        print(steps_left_note(left), file=sys.stderr)
     if run.status.value == "awaiting_input":
         pending = await app.orchestrator.pending_approval(run.id)
         if pending is not None and pending.kind == "question":

@@ -232,6 +232,40 @@ PAUSE_SPEC = ToolSpec(name="pause_tool", description="Pause for a person.", inpu
                       risk=ToolRisk.READ_ONLY)
 
 
+class EmbeddingUsageTests(unittest.IsolatedAsyncioTestCase):
+    """Embedding tokens made inside a tool call (memory tools) are logged and charged (2026-10-24)."""
+
+    async def run_reads(self, reply: ModelResponse) -> tuple[RunRecord, list[RunEvent]]:
+        from agent_harness.domain import Usage
+        from agent_harness.model_gateway.usage import record_embedding_usage
+
+        runtime = ToolRuntime(ToolRegistry())
+        for name, tokens in (("recall_a", 5), ("recall_b", 9)):
+            async def handler(arguments: Mapping[str, Any], tokens: int = tokens) -> dict[str, Any]:
+                await asyncio.sleep(0.01)
+                record_embedding_usage(Usage(input_tokens=tokens, output_tokens=0))
+                return {"found": []}
+            runtime.register(ToolSpec(name=name, description="Recall.", input_schema={"type": "object"}), handler)
+        store = InMemoryRunStore()
+        orchestrator = AgentOrchestrator(models=Model([reply, answer()]), tools=runtime, store=store)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "recall")])
+        return await orchestrator.run(run.id), list(await store.list_events(run.id))
+
+    async def test_one_call_and_two_prefetched_calls(self) -> None:
+        for reply, expected in ((calls(("recall_a", {}, "c1")), [("c1", 5)]),
+                                (calls(("recall_a", {}, "c1"), ("recall_b", {}, "c2")), [("c1", 5), ("c2", 9)])):
+            with self.subTest(calls=len(expected)):
+                finished, events = await self.run_reads(reply)
+                used = [(e.payload["call_id"], e.payload["input_tokens"]) for e in of_type(events, EventType.USAGE_RECORDED)]
+                self.assertEqual(used, expected)
+                self.assertTrue(all(e.payload["kind"] == "embedding" for e in of_type(events, EventType.USAGE_RECORDED)))
+                self.assertEqual(finished.consumed_tokens, sum(tokens for _, tokens in expected))  # Model reports no usage
+                # logged just before the call's result, which stays the latest state event
+                for event in of_type(events, EventType.USAGE_RECORDED):
+                    after = events[events.index(event) + 1]
+                    self.assertIn(after.type, (EventType.USAGE_RECORDED, EventType.TOOL_RESPONDED))
+
+
 class HandlerRegistryTests(unittest.IsolatedAsyncioTestCase):
     def test_builtin_handlers_cover_the_orchestrator_tools(self) -> None:
         orchestrator = AgentOrchestrator(models=Model([]), tools=ToolRuntime(ToolRegistry()),

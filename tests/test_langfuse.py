@@ -182,6 +182,23 @@ class TraceBuildingTests(unittest.TestCase):
         self.assertEqual(json.loads(attr(tool, "langfuse.observation.input")), {"query": "token=[REDACTED]"})
         self.assertEqual(attr(tool, "langfuse.observation.output"), "value is 42; ask [REDACTED:email]")
 
+    def test_guard_and_embedding_usage_are_generations(self) -> None:
+        # 2026-10-24: usage_recorded events, so trace totals include the guard model and embeddings.
+        first = next(i for i, e in enumerate(self.events) if e.type is EventType.MODEL_RESPONDED)
+        extra = [RunEvent(run_id="run-1", type=EventType.USAGE_RECORDED, step=1, created_at=self.events[first].created_at,
+                          payload={"kind": "guard", "stage": "input", "model_profile": "p",
+                                   "input_tokens": 40, "output_tokens": 2}),
+                 RunEvent(run_id="run-1", type=EventType.USAGE_RECORDED, step=1, created_at=self.events[first].created_at,
+                          payload={"kind": "embedding", "call_id": "call-1", "input_tokens": 6, "output_tokens": 0})]
+        events = [*self.events[:first], *extra, *self.events[first:]]
+        spans = build_turn(self.run, events, 0, CONTEXT)
+        named = {s.name: s for s in spans_of(spans, "generation")}
+        self.assertEqual(json.loads(attr(named["guard p"], "langfuse.observation.usage_details")),
+                         {"input": 40, "output": 2, "total": 42})
+        self.assertEqual(attr(named["guard p"], "langfuse.observation.model.name"), "real/model")
+        self.assertEqual(json.loads(attr(named["embedding"], "langfuse.observation.usage_details")),
+                         {"input": 6, "output": 0, "total": 6})
+
     def test_trace_wide_attributes_are_on_every_span(self) -> None:
         spans = build_turn(self.run, self.events, 0, CONTEXT)
         for span in spans:

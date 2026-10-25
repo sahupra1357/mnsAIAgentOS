@@ -198,6 +198,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   allowlisted) or `sh narrate.sh` (forbidden). The user wants one configuration: the root `models.toml`
   runs commands locally with `"*"` and no `sh` in the forbidden set, and `[project] settings = false`
   so no folder's `.agent-harness/settings*.toml` is merged (`tests/test_full_config.py` pins both).
+- **Terminal turn budget.** `run` and `chat` use `[orchestrator] turn_max_steps` / `turn_max_wall_seconds`
+  (root config: 100 / 3600) unless `--max-steps` / `--max-wall-seconds` are given; before, they fixed 20 / 300.
+- **Absolute paths.** Workspace tools accept an absolute path under the workspace root (made relative,
+  then the usual checks); paths elsewhere are still refused.
 - **Workspace errors.** A wrong path is reported as "no such file or directory: X; search_files
   can find the right path" (`WorkspacePathNotFound`), not "Tool execution failed."; unreadable and
   binary files get their own messages, and `search_files` skips unreadable files.
@@ -256,6 +260,17 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   message, so stored history has one answer message; the joined `MODEL_RESPONDED` says
   `continuation`, and rewind's step mapping skips it. 0 in code, 2 in the root config; still cut off
   afterwards, `run_completed` has `answer_truncated`.
+  A cut-off reply with **no text and no tool call** (all thinking) is not an answer
+  (`max_cut_off_retries`, 0 in code, 2 in the root config): `CUT_OFF_RETRY_NOTE` asks again with tools
+  allowed, then the run stops as `budget_exhausted` ("output limit"); it never completes a plan step.
+  GLM-5.3-Flash on `modal_shared` did this four times at `max_tokens = 4096` (now 16384) on 2026-10-23.
+- **Plans cut short resume (2026-10-24).** When the last-step note ends a plan with steps left, the `final_step`
+  event lists them (`left`), `run`/`chat` print "plan stopped with N step(s) left", and the next `continue_run`
+  reopens the plan (`resumed` event; a step left in progress starts again). A finished or abandoned plan stays done
+  (`resumable_steps`). The video pipeline's "render" and "package" steps never ran because follow-ups dropped the plan.
+- **Guard and embedding tokens (2026-10-24).** Each guard check and each embedding made inside a tool call is a
+  `usage_recorded` event (`kind` guard/embedding) and a Langfuse generation; embeddings now count toward
+  `consumed_tokens`. Clients report embeddings through `model_gateway/usage.py` (`collect_embedding_usage`).
 - **Unreadable tool arguments.** Arguments that are not a JSON object come back marked
   (`INVALID_ARGUMENTS_KEY` in `domain.py`) and get a validation-error tool result; the run goes
   on. Before, `MalformedResponseError` failed the run.

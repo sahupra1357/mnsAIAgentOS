@@ -93,6 +93,7 @@ from agent_harness.orchestration.compaction import (
 )
 from agent_harness.orchestration.handlers import ToolCallContext, ToolHandler, ToolHandlerRegistry
 from agent_harness.guardrails import GuardDecision, Guardrails
+from agent_harness.model_gateway.usage import collect_embedding_usage
 from agent_harness.domain import (
     INVALID_ARGUMENTS_ERROR_KEY,
     INVALID_ARGUMENTS_KEY,
@@ -143,6 +144,7 @@ from agent_harness.domain import (
     ToolRisk,
     ToolSpec,
     ToolTrust,
+    Usage,
     utc_now,
 )
 
@@ -206,6 +208,12 @@ class OrchestratorSettings:
     # tool_choice="none" whose text is joined to the cut answer. 0 = off (the cut answer is
     # accepted as it is, and run_completed records answer_truncated).
     max_answer_continuations: int = 0
+    # A reply cut off at the output limit with neither text nor a tool call (the model spent
+    # max_tokens thinking) is not an answer: CUT_OFF_RETRY_NOTE asks again, tools still
+    # allowed, up to this many times in a row. Then the run stops as budget_exhausted
+    # ("output limit"), which a follow-up message resumes; a plan step is never completed by
+    # such a reply. 0 = off (the empty reply is accepted as the answer).
+    max_cut_off_retries: int = 0
     # Run the read-only calls of one reply concurrently even when pre_tool hooks exist: the
     # hooks run up front (concurrently) and their decisions are recorded later, in call order,
     # by the serial loop, so events are unchanged. Hooks then see calls out of order, which
@@ -221,6 +229,8 @@ class OrchestratorSettings:
             raise ValueError("final_answer_reserve_seconds must not be negative")
         if self.max_answer_continuations < 0:
             raise ValueError("max_answer_continuations must not be negative")
+        if self.max_cut_off_retries < 0:
+            raise ValueError("max_cut_off_retries must not be negative")
         if self.reserve_tokens_per_run is not None and self.reserve_tokens_per_run < 1:
             raise ValueError("reserve_tokens_per_run must be at least 1")
         if self.max_model_attempts < 1:
@@ -273,6 +283,12 @@ CONTINUE_ANSWER_NOTE = (
     "stopped: do not repeat what you already wrote, and do not start over."
 )
 
+CUT_OFF_RETRY_NOTE = (
+    "[Budget] Your last reply hit the output limit before it contained any text or tool call: "
+    "the thinking used all of it. Think briefly and act now: make the next tool call (write a "
+    "large file in smaller parts), or answer."
+)
+
 
 def _continuing_answer(messages: Sequence[Message]) -> bool:
     """The latest message asks the model to continue its cut-off answer."""
@@ -298,6 +314,28 @@ def _final_note_since_reply(messages: Sequence[Message]) -> bool:
         if message.role is Role.USER and message.content == FINAL_STEP_NOTE:
             return True
     return False
+
+
+def resumable_steps(plan: Plan | None, events: Sequence[RunEvent]) -> tuple[PlanStep, ...]:
+    """Unfinished steps of a plan the last-step note ended; a follow-up message resumes them.
+
+    Empty for a plan that is still running, finished, or was given up (replanning).
+    """
+
+    if plan is None or plan.phase != "done":
+        return ()
+    ended = next((e for e in reversed(events) if e.type is EventType.PLAN_STEP_UPDATED
+                  and e.payload.get("phase") == "done" and e.payload.get("after") != "done"), None)
+    if ended is None or not ended.payload.get("final_step"):
+        return ()
+    return tuple(s for s in plan.steps if not s.status.is_terminal)
+
+
+def steps_left_note(steps: Sequence[PlanStep]) -> str:
+    """What the CLI and chat print after a turn that ended a plan with ``steps`` unfinished."""
+
+    names = ", ".join(f"{s.id} ({s.title})" if s.title else s.id for s in steps)
+    return f"plan stopped with {len(steps)} step(s) left: {names}; send a follow-up message to resume them"
 
 
 def _answered_final_note(messages: Sequence[Message]) -> bool:
@@ -933,6 +971,9 @@ class AgentOrchestrator:
             if _refused(events):
                 await self._complete(run, events)  # a guardrail refusal ends the turn as it is
                 return True
+            retried = await self._retry_empty_cut_off(run, events)
+            if retried is not None:
+                return retried
             if await self._continue_cut_answer(run, events):
                 return False
             if run.output_schema is not None and run.output is None:
@@ -1364,6 +1405,7 @@ class AgentOrchestrator:
         run.error = None
         run.output = None  # a continued structured run must produce a new result
         run.messages.extend(added)
+        reopened = self._reopen_cut_plan(run, events)
         payload: dict[str, Any] = {"chars": len(added[0].content)}
         if prompt_hook is not None:
             payload["user_prompt_hook"] = prompt_hook.as_payload()
@@ -1384,8 +1426,28 @@ class AgentOrchestrator:
                 step=run.step_count,
                 created_at=now,
             ),
+            *reopened,
         )
         return run
+
+    def _reopen_cut_plan(self, run: RunRecord, events: Sequence[RunEvent]) -> tuple[RunEvent, ...]:
+        """A plan that ran out of steps or time picks up again with the next message.
+
+        Live run 2026-10-23 (video pipeline): the turn hit its step limit during "assemble",
+        the last-step answer ended the plan, and "render" and "package" (thumbnails, intro,
+        final names) never ran; follow-up messages worked without the plan. Only a plan ended by
+        the last-step note reopens; one that finished or was given up stays done. A step left in
+        progress starts again, so its instructions are delivered after the new message.
+        """
+
+        left = resumable_steps(run.plan, events)
+        if run.plan is None or not left:
+            return ()
+        run.plan = replace(run.plan, phase="executing", steps=tuple(
+            replace(s, status=PlanStepStatus.PENDING, child_run_id=None)
+            if s.status is PlanStepStatus.IN_PROGRESS else s for s in run.plan.steps))
+        return (self._plan_event(run, EventType.PLAN_STEP_UPDATED, {
+            "phase": "executing", "after": "done", "resumed": True, "left": [s.id for s in left]}),)
 
     async def steer(self, run_id: str, content: str) -> SteerMessage:
         """Queue a user message for a run that is still in progress."""
@@ -2469,12 +2531,15 @@ class AgentOrchestrator:
                 # Run concurrently by the prefetch pass with this key and these arguments.
                 result = prefetched.result
                 tool_started -= prefetched.duration_seconds
+                self._record_embeddings(run, call.id, prefetched.embeddings)
             else:
-                result = await self._tools.execute(
-                    call,
-                    idempotency_key=idempotency_key,
-                    approved=approved,
-                )
+                with collect_embedding_usage() as embeddings:
+                    result = await self._tools.execute(
+                        call,
+                        idempotency_key=idempotency_key,
+                        approved=approved,
+                    )
+                self._record_embeddings(run, call.id, embeddings)
             _validate_tool_result(result, call)
         except TimeoutError as exc:
             result = ToolResult(
@@ -2786,6 +2851,14 @@ class AgentOrchestrator:
             ),
         )
 
+    def _record_embeddings(self, run: RunRecord, call_id: str, embeddings: Sequence[Usage]) -> None:
+        """Charge a tool call's embedding tokens and log them with its result (``usage_recorded``)."""
+
+        for usage in embeddings:
+            run.consumed_tokens += usage.total_tokens or 0
+            self._tool_guard_events.setdefault((run.id, call_id), []).append(
+                self._usage_event(run, usage, kind="embedding", call_id=call_id))
+
     async def _record_tool_result(
         self,
         run: RunRecord,
@@ -3074,12 +3147,13 @@ class AgentOrchestrator:
                 continue
             reads.append((final, permission.action == "allow"))
         if len(reads) >= 2:
-            async def timed(call: ToolCall, approved: bool) -> tuple[ToolResult, float]:
+            async def timed(call: ToolCall, approved: bool) -> tuple[ToolResult, float, tuple[Usage, ...]]:
                 started = self._monotonic()
-                result = await self._tools.execute(
-                    call, idempotency_key=f"{run.id}:{run.step_count}:{call.id}", approved=approved
-                )
-                return result, self._monotonic() - started
+                with collect_embedding_usage() as embeddings:
+                    result = await self._tools.execute(
+                        call, idempotency_key=f"{run.id}:{run.step_count}:{call.id}", approved=approved
+                    )
+                return result, self._monotonic() - started, tuple(embeddings)
 
             done = await asyncio.gather(*(timed(call, approved) for call, approved in reads),
                                         return_exceptions=True)
@@ -3088,7 +3162,7 @@ class AgentOrchestrator:
                     continue  # the sequential loop runs it again and reports the error
                 entry = prefetched.get(call.id) or _Prefetched(call=call)
                 prefetched[call.id] = replace(entry, call=call, result=ran[0],
-                                              duration_seconds=ran[1])
+                                              duration_seconds=ran[1], embeddings=ran[2])
         if len(agents) >= 2:
             children: list[str] = []
             for call in agents:
@@ -3192,8 +3266,10 @@ class AgentOrchestrator:
         if plan is not None and plan.phase != "done" and _answered_final_note(run.messages):
             # Out of steps or time: this answer ends the run, whatever steps are left.
             run.plan = replace(plan, phase="done")
+            left = [s.id for s in plan.steps if not s.status.is_terminal]
             await self._checkpoint(run, events, self._plan_event(
-                run, EventType.PLAN_STEP_UPDATED, {"phase": "done", "after": plan.phase, "final_step": True}))
+                run, EventType.PLAN_STEP_UPDATED, {"phase": "done", "after": plan.phase, "final_step": True,
+                                                   **({"left": left} if left else {})}))
             return False
         if plan is None:
             reminder = "[Plan] Before answering, call create_plan with your plan for this task."
@@ -3341,6 +3417,33 @@ class AgentOrchestrator:
             return False
         await self._plan_inject(run, events, CONTINUE_ANSWER_NOTE,
                                 {"reminder": "continue_answer", "continuation": done + 1})
+        return True
+
+    async def _retry_empty_cut_off(self, run: RunRecord, events: list[RunEvent]) -> bool | None:
+        """Handle a reply cut off at the output limit with no text and no tool call.
+
+        None: not such a reply (or ``max_cut_off_retries`` is off). False: the model is asked
+        again with CUT_OFF_RETRY_NOTE. True: the run stopped (budget_exhausted, "output
+        limit") after that many retries in a row, or with no budget left for another turn.
+        """
+
+        limit = self._settings.max_cut_off_retries
+        if not limit or not _answer_cut_off(events) or run.messages[-1].content.strip():
+            return None
+        done = 0
+        if len(run.messages) >= 2 and run.messages[-2].content == CUT_OFF_RETRY_NOTE:
+            note = next((e for e in reversed(events) if e.type is EventType.PLAN_STEP_UPDATED
+                         and e.payload.get("reminder") == "cut_off_retry"), None)
+            done = int(note.payload.get("retry", 1)) if note is not None else 1
+        if done < limit and self._budget_reason(run) is None:
+            await self._plan_inject(run, events, CUT_OFF_RETRY_NOTE,
+                                    {"reminder": "cut_off_retry", "retry": done + 1})
+            return False
+        await self._exhaust_budget(
+            run, events,
+            "output limit: the model's reply was cut off at max_tokens with no text or tool call "
+            f"({done + 1} in a row); raise the profile's max_tokens, then send a follow-up message",
+        )
         return True
 
     def _join_continuation(
@@ -3696,10 +3799,13 @@ class AgentOrchestrator:
         assert guard is not None
         verdict = await guard.classify(user_text, assistant_text)
         tokens = verdict.usage.total_tokens
+        recorded: list[RunEvent] = []
         if tokens:
             run.consumed_tokens += tokens  # the guard model counts against the budget
+            recorded.append(self._usage_event(run, verdict.usage, kind="guard", stage=stage,
+                                              model_profile=guard.model_profile))
         if verdict.error is None and verdict.safe:
-            return [], False
+            return recorded, False
         # An unsafe verdict blocks unless [guardrails.model] action = "flag".
         blocked = not verdict.safe and (verdict.error is not None or guard.config.model.action == "block")
         payload: dict[str, Any] = {
@@ -3708,7 +3814,17 @@ class AgentOrchestrator:
         }
         if verdict.error is not None:
             payload["error"] = verdict.error[:200]
-        return [self._guard_event(run, payload)], blocked
+        return [*recorded, self._guard_event(run, payload)], blocked
+
+    def _usage_event(self, run: RunRecord, usage: Usage, **payload: Any) -> RunEvent:
+        """A ``usage_recorded`` annotation: tokens spent outside a chat step (guard, embeddings)."""
+
+        tokens = {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
+                  "cached_input_tokens": usage.cached_input_tokens, "cost_usd": usage.cost_usd}
+        return RunEvent(run_id=run.id, type=EventType.USAGE_RECORDED,
+                        payload={**{k: v for k, v in payload.items() if v is not None},
+                                 **{k: v for k, v in tokens.items() if v is not None}},
+                        step=run.step_count, created_at=self._clock())
 
     async def _refuse(
         self, run: RunRecord, events: list[RunEvent], stage: str, annotations: Sequence[RunEvent]
@@ -3892,7 +4008,7 @@ class AgentOrchestrator:
                 content = decision.text
                 guard_events = self._guard_events(run, decision, extra={"tool": result.name})
                 if guard_events:
-                    self._tool_guard_events[(run.id, result.call_id)] = guard_events
+                    self._tool_guard_events.setdefault((run.id, result.call_id), []).extend(guard_events)
             content = _wrap_untrusted(result.name, content)
         if suffix:
             content += "\n\n[Context from hooks]\n" + suffix
@@ -4232,6 +4348,7 @@ _ANNOTATION_EVENTS = frozenset(
         EventType.PLAN_REVISED,
         EventType.GUARDRAIL_DECIDED,
         EventType.RUN_DEAD_LETTERED,
+        EventType.USAGE_RECORDED,
     }
 )
 
@@ -4394,7 +4511,8 @@ class _Prefetched:
     """What the prefetch pass did for one call of a reply (Phase 23a).
 
     ``hooked``: its pre_tool hooks ran (``hook`` is their result, None if none applied);
-    ``call`` has the arguments the hook left; ``result`` is the tool's result when it ran.
+    ``call`` has the arguments the hook left; ``result`` is the tool's result when it ran;
+    ``embeddings`` is the usage of the embedding calls it made (memory tools).
     """
 
     call: ToolCall
@@ -4402,6 +4520,7 @@ class _Prefetched:
     hooked: bool = False
     result: ToolResult | None = None
     duration_seconds: float = 0.0
+    embeddings: tuple[Usage, ...] = ()
 
 
 # The built-in orchestrator-owned tools; the handler registry is authoritative (a test

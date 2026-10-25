@@ -224,6 +224,29 @@ class CodingToolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GuardrailTests(unittest.TestCase):
+    def test_absolute_paths_inside_the_workspace_are_accepted(self) -> None:
+        # 2026-10-23: apply_patch refused ".../VideoPipeline/videos/.../BRIEF.md" as "outside the
+        # workspace" although it was inside, and the model wrote files through shell commands.
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory).resolve()
+            (root / "notes.txt").write_text("x = 1\n", encoding="utf-8")
+            (root / ".git").mkdir()
+            (root / ".git" / "config").write_text("secret", encoding="utf-8")
+            boundary = WorkspaceBoundary(root)
+            self.assertEqual(boundary.read_file(str(root / "notes.txt"))["path"], "notes.txt")
+            created = boundary.apply_patch(str(root / "videos" / "a" / "BRIEF.md"),
+                                           old_text="", new_text="brief\n", create=True)
+            self.assertEqual(created["path"], "videos/a/BRIEF.md")
+            self.assertEqual(boundary.resolve_directory(str(root)), root)
+            # The relative result gets the usual checks; paths elsewhere are still refused.
+            for bad in (str(Path(outside) / "x.txt"), str(root / ".git" / "config"),
+                        str(root / "videos" / ".." / ".." / "escape.txt")):
+                with self.subTest(path=bad), self.assertRaises(WorkspaceViolation):
+                    boundary.read_file(bad)
+            with self.assertRaises(WorkspaceViolation):
+                boundary.apply_patch(str(Path(outside) / "new.txt"), old_text="", new_text="x", create=True)
+            self.assertEqual(list(Path(outside).iterdir()), [])
+
     def test_workspace_rejects_traversal_and_ambiguous_patches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

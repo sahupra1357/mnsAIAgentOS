@@ -372,6 +372,18 @@ class SemanticMemoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await client.embed(["a", "b"]), [[1.0, 0.0], [0.0, 1.0]])
         self.assertEqual(transport.calls[0][0], "http://x/v1/embeddings")
 
+    async def test_client_embed_records_the_reported_tokens(self) -> None:
+        # 2026-10-24: embedding tokens were counted nowhere; the orchestrator now logs them per tool call.
+        from agent_harness.model_gateway.usage import collect_embedding_usage
+
+        transport = RouteTransport({"/embeddings": json_response(
+            {"data": [{"index": 0, "embedding": [1, 0]}], "usage": {"prompt_tokens": 7, "total_tokens": 7}})})
+        client = OpenAICompatibleClient(profile(), transport=transport, environ={})
+        await client.embed(["outside a collection"])  # nothing to record into: fine
+        with collect_embedding_usage() as used:
+            await client.embed(["a"])
+        self.assertEqual([(u.input_tokens, u.output_tokens) for u in used], [(7, 0)])
+
     def test_semantic_search_needs_an_embedding_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "models.toml"
