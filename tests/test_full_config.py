@@ -238,7 +238,8 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(constants("vllm_embed_server.py")["MODEL_NAME"], modal.embedding_model)
         self.assertEqual(constants("vllm_guard_server.py")["MODEL_NAME"], modal.guard_model)
         self.assertEqual(modal.guard_model, "meta-llama/Llama-Guard-3-8B")  # the 1B misreads code
-        self.assertIn("deploy/modal/scripts/vllm_server.py", FULL.read_text())
+        # models.toml has no comments (2026-11-07), so the deploy script is checked on disk.
+        self.assertTrue((ROOT / "deploy" / "modal" / "scripts" / "vllm_server.py").is_file())
         self.assertNotIn("examples/modal", FULL.read_text())
         for name in ("vllm_server.py", "vllm_embed_server.py", "vllm_guard_server.py", "sglang_server.py"):
             self.assertTrue((ROOT / "examples" / "modal" / name).is_file())  # reference copy kept

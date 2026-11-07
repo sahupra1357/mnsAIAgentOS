@@ -1,82 +1,32 @@
-# Agent harness: every feature turned on (Phase 15b).
-#
-# `agent-harness` with no --config finds this file when run from the repository
-# root (see README "Quick Start"). Relative paths below resolve against this file's
-# directory. Live files (agents, hooks, skills, templates, tools) are in .agent-harness/;
-# nothing here is loaded from examples/, which is reference only (Phase 17).
-# Features that need something outside the harness are listed at the end, with what
-# they need; they stay off until you provide it.
-#
-#   agent-harness                      # interactive chat on the default profile
-#   agent-harness "Explain src/agent_harness/cli/repl.py"
-#   agent-harness profiles             # which profiles are on
-#   agent-harness config show          # every value below and where it came from
-#   scripts/validate.sh                # validate every feature (offline + live)
-#
-# The code defaults are deliberately off (opt-in); this file is how you opt in.
-
-# AGENT_HARNESS_MODEL_PROFILE (in .env or the shell) overrides this: llamacpp | ollama | modal.
 default_model_profile = "llamacpp"
 
-# Capability routes: use a route name anywhere a profile name is accepted. A route to a
-# disabled profile is dropped (here `strong` disappears while modal is disabled).
 [routes]
 fast = "llamacpp"
 strong = "modal"
-local = "ollama"                 # routes are aliases, not dependencies
+local = "ollama"
 
-# --- Model profiles -------------------------------------------------------------
-# Each profile is self-contained: one provider serves chat, embeddings (embedding_model,
-# used by [memory]) and, optionally, the guard model (guard_model, used by
-# [guardrails.model]). Switching default_model_profile switches all of them; nothing
-# here depends on another provider. Switch a profile on or off with `enabled` (or
-# AGENT_HARNESS_MODEL__NAME__ENABLED). `agent-harness profiles` shows what each serves.
-
-# llama.cpp router (`llama serve --models-preset ... --port 9931 --jinja`, models-max >= 2):
-# the router loads the chat and embedding models side by side and routes by model name.
-# Preset (e.g. ~/.config/llama/models.user.ini for the Llama app):
-#   [ggml-org/Qwen3.8-27B-GGUF:Q4_K_M]
-#   ctx-size = 16384
-#   [nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0]
-#   embedding = true
-# Plain single-model server instead: `llama-server -m model.gguf --jinja -c 16384 --port 8080`
-# plus `llama-server -m embed.gguf --embedding --port 8081` and embedding_endpoint below.
 [models.llamacpp]
 enabled = true
 adapter = "llama_cpp"
-#model = "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
 model = "ggml-org/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
 endpoint = "http://127.0.0.1:9931/v1"
-context_window = 16384           # per run; see the server note below
-# The llama.cpp server's ctx-size is ONE KV cache shared by all concurrent requests
-# (kv_unified), not per request: set it to context_window x the number of runs that can
-# overlap (serve --workers), e.g. 32768 for 2. Too small, and llama.cpp aborts a stream
-# with "Context size has been exceeded" (the harness retries it).
+context_window = 16384
 token_counting = "server"
 timeout_seconds = 600
 max_retries = 1
-embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"   # same router
-# embedding_endpoint = "http://127.0.0.1:8081/v1"            # only for a separate server
-# Llama Guard 1B in the same router: the 8B does not fit next to the 27B chat model on a 36 GB
-# Mac (about 23 + 5.5 GB), so this profile keeps the 1B with [guardrails.model] action = "flag".
-# Its preset section needs `no-prefill-assistant = true`, or the output check echoes the reply.
+embedding_model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0"
 guard_model = "QuantFactory/Llama-Guard-3-1B-GGUF:Q4_K_M"
-# fallback = ["ollama"]          # opt-in only: crossing providers breaks "one profile"
 
 [models.llamacpp.parameters]
 temperature = 0.2
 max_tokens = 2048
 
-# Ollama: `ollama serve`, then `ollama pull gpt-oss:20b`, `ollama pull nomic-embed-text`, and
-# `ollama pull llama-guard3:8b`. One server, three model names: chat, embeddings, guard.
-# Memory: about 13 + 5.5 + 0.3 GB, which fits a 36 GB Mac (the 8B guard is far more accurate
-# than the 1B; see [guardrails.model]).
 [models.ollama]
 enabled = true
 adapter = "ollama"
 model = "gpt-oss:20b"
 endpoint = "http://127.0.0.1:11434/v1"
-api_mode = "native"              # sends context_window as num_ctx
+api_mode = "native"
 context_window = 8192
 timeout_seconds = 180
 max_retries = 1
@@ -87,36 +37,20 @@ guard_model = "llama-guard3:8b"
 temperature = 0.2
 num_predict = 1024
 
-# Modal (vLLM or SGLang): needs MODAL_LLM_API_KEY, MODAL_PROXY_TOKEN_ID and
-# MODAL_PROXY_TOKEN_SECRET, and your workspace in the endpoints. Then enable it.
-# One deployment serves one model, so the profile names three deployments, all with the
-# same Modal auth (one profile, one set of credentials):
-#   modal deploy deploy/modal/scripts/vllm_server.py         # chat        -> endpoint
-#   modal deploy deploy/modal/scripts/vllm_embed_server.py   # embeddings  -> embedding_endpoint
-#   modal deploy deploy/modal/scripts/vllm_guard_server.py   # Llama Guard -> guard_endpoint
 [models.modal]
 enabled = false
 adapter = "modal"
 server = "vllm"
-# Qwen 3.6 35B-A3B (the model llamacpp runs), BF16 on one H200; must equal
-# MODEL_NAME in deploy/modal/scripts/vllm_server.py (a test checks it). It thinks: vLLM's qwen3
-# reasoning parser returns the thinking as reasoning_content, and summaries turn it off
-# ([summarization] parameters). Thinking counts against max_tokens below.
 model = "Qwen/Qwen3.6-35B-A3B"
 endpoint = "https://WORKSPACE--agent-harness-vllm-serve.modal.run/v1"
 api_key_env = "MODAL_LLM_API_KEY"
 timeout_seconds = 180
-# The first start downloads 71.9 GB of weights into the hf-cache volume and loads them; the
-# deploy script allows 20 minutes (startup_timeout), so the first request may wait as long.
 cold_start_timeout_seconds = 1200
 max_retries = 1
 context_window = 32768
 token_counting = "server"
 embedding_model = "nomic-ai/nomic-embed-text-v1.5"
 embedding_endpoint = "https://WORKSPACE--agent-harness-vllm-embed-serve.modal.run/v1"
-# Llama Guard 3 8B on an L4 (deploy/modal/scripts/vllm_guard_server.py): no false flags on coding prompts,
-# unlike the 1B, so with the modal profiles you can block instead of flag:
-#   AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block   (in .env; llamacpp keeps the 1B and "flag")
 guard_model = "meta-llama/Llama-Guard-3-8B"
 guard_endpoint = "https://WORKSPACE--agent-harness-vllm-guard-serve.modal.run/v1"
 
@@ -126,66 +60,34 @@ Modal-Secret = "MODAL_PROXY_TOKEN_SECRET"
 
 [models.modal.parameters]
 temperature = 0.2
-# Also the output reserve: input budget = context_window (32768) - max_tokens, so 2048 leaves
-# about 30K for input, more than llama.cpp's whole 16K window (1024 cut long answers off; 4096
-# would still leave 28K). Keep it set: Modal's proxy does not cancel abandoned vLLM requests,
-# so an uncapped reply keeps the GPU busy.
 max_tokens = 2048
 
-# Estimated cost: request latency x the GPU's rate, so `cost_usd` is reported and
-# max_cost_usd / cost quotas can stop a run. H200 (GPU in deploy/modal/scripts/vllm_server.py) is
-# $0.001261/s on modal.com/pricing (checked 2026-10-10; A100 80 GB $0.000694, L40S $0.000542);
-# change it with the GPU. Latency includes cold starts and retries, and
-# concurrent requests share one GPU, so this is an upper bound. Container CPU and memory, and
-# the embed and guard deployments (an L4 each), are billed separately and not included.
 [models.modal.pricing]
 gpu_usd_per_second = 0.001261
 
-# Modal Shared Endpoint: a Modal-managed pool, billed per token, always warm (no cold start,
-# no idle tail), with a per-model concurrency limit (HTTP 429, retried). Create it in the Modal
-# dashboard (Endpoints -> Shared), then in .env: the endpoint URL, the proxy token as
-# MODAL_SHARED_TOKEN=wk-<id>.ws-<secret> (ID and secret joined with "."), and
-# AGENT_HARNESS_MODEL__MODAL_SHARED__ENABLED=true. Switch with AGENT_HARNESS_MODEL_PROFILE=modal_shared.
-# Checked live 2026-10-10: tool calls are structured, reasoning arrives as reasoning_content,
-# chat_template_kwargs are accepted, and the same affinity key gave cache hits (512 of 732).
 [models.modal_shared]
 enabled = false
-adapter = "openai_compatible"          # one bearer token; the modal adapter wants Modal-Key/Secret
-# No model or endpoint here: .env must set AGENT_HARNESS_MODEL__MODAL_SHARED__MODEL and
-# __ENDPOINT, so a missing or stale value fails at load instead of running a hard-coded default.
+adapter = "openai_compatible"
 api_key_env = "MODAL_SHARED_TOKEN"
-# One routing key per conversation (run id + summary point), so its requests reach the container
-# that has its prefix cached; cached prompt tokens cost a tenth (pricing below).
 affinity_header = "Modal-Routing-Affinity-Key"
 timeout_seconds = 180
-max_retries = 3                        # 429s above the concurrency limit (Retry-After honoured)
+max_retries = 3
 retry_jitter = 0.2
-# The model takes 1M tokens (64K natively); 65536 means far fewer summaries and re-reads than 32K,
-# and resent history is mostly cached input ($0.03/M).
 context_window = 65536
-token_counting = "estimate"            # no /tokenize on shared endpoints
-# No embedding or guard model of its own here: borrow the modal profile's deployments (both
-# scale to zero on L4s). Needs [models.modal] enabled with its embed and guard endpoints.
+token_counting = "estimate"
 embedding_profile = "modal.embed"
 guard_profile = "modal.guard"
 
 [models.modal_shared.parameters]
 temperature = 0.2
-# Thinking counts against it: at 4096 GLM-5.3-Flash spent the whole allowance reasoning while
-# writing a video frame and replied with nothing (2026-10-23). The window (65536) minus this
-# leaves 49152 tokens of input.
 max_tokens = 16384
-# On 2026-10-25 GLM looped: one reply repeated 25 read_file calls until max_tokens (693 calls).
-# A mild penalty makes such loops less likely (checked live: the endpoint accepts it).
 repetition_penalty = 1.05
 
-# Modal dashboard rates for DeepSeek V4.1 Flash (2026-10-10), per million tokens.
 [models.modal_shared.pricing]
 input_usd_per_million_tokens = 0.30
 cached_input_usd_per_million_tokens = 0.03
 output_usd_per_million_tokens = 1.20
 
-# --- Orchestrator and context ---------------------------------------------------
 [orchestrator]
 max_model_attempts = 3
 max_tool_attempts = 3
@@ -194,133 +96,57 @@ max_refused_repeats = 2
 max_tool_calls_per_turn = 32
 context_overflow_retries = 2
 context_overflow_shrink = 0.5
-# Append "[Current date: Tuesday, 2026-10-06]" to the user message that starts a run (and
-# to a continuation on a later day). Models don't know the date; the system prompt stays
-# unchanged, so the prompt cache is unaffected.
 current_date_note = true
-# On a run's last allowed step (a subagent's max_steps, or the turn's), the model is told to
-# answer with what it found, and the request has tool_choice = "none". Without it a
-# researcher spent its 12 steps reading and returned nothing to its parent.
-# The same happens once a plan is finished (its answer step) and when less than
-# final_answer_reserve_seconds of the run's time is left (at most a quarter of it).
 final_answer_on_last_step = true
 final_answer_reserve_seconds = 120
-# A final answer cut off at max_tokens (finish_reason "length") is continued: the model is
-# asked to go on where it stopped, with tool_choice = "none", and the parts are joined into one
-# answer. Up to this many extra turns (0 = off); still cut off after that, run_completed says
-# answer_truncated. On 2026-10-10 two answers (Modal, Qwen 3.6) ended mid-sentence at 2048.
 max_answer_continuations = 2
-# A reply cut off at max_tokens with no text and no tool call (all thinking) is asked again,
-# tools still allowed, this many times in a row; then the turn stops as budget_exhausted
-# ("output limit") instead of passing the empty reply off as the answer and a finished plan
-# step. A follow-up message resumes it.
 max_cut_off_retries = 2
-# Read-only calls in one reply run concurrently even with the audit pre_tool hooks below: the
-# hooks run first (concurrently) and their decisions are recorded in call order afterwards.
-# Off, any pre_tool hook makes the calls run one by one.
 prefetch_with_hooks = true
-# A run without its own token limit reserves this many tokens of the daily quota per turn,
-# instead of everything left (which refused every other run with HTTP 429 while it was
-# active). Its budget stays open; [[quotas]] is still enforced at each step.
 reserve_tokens_per_run = 200000
-# Per turn: a new run gets this budget, and each follow-up adds it again (/ui, Open WebUI).
-# Exploring a codebase on a local 27B takes minutes; the code default is 20 steps / 300 s.
-# The terminal (chat, run) uses them too unless --max-steps / --max-wall-seconds are given;
-# before, it fixed 20 steps / 300 s, and a video pipeline stopped every 20 steps.
-# 200 steps: one video takes more than 100 (a run on 2026-10-25 ran out at step 100 with
-# about 17 minutes of active time; time spent waiting on approvals is not counted).
 turn_max_steps = 200
 turn_max_wall_seconds = 3600
 
 [context]
-chars_per_token = 3.0            # code and JSON use more tokens per character
+chars_per_token = 3.0
 high_water_ratio = 0.85
-# Trim to 45% once the 85% mark is crossed: fewer, bigger trims, so fewer summary calls and
-# fewer full re-reads of the conversation (each trim changes the cached prefix).
 low_water_ratio = 0.45
 max_tool_output_chars = 16000
 
-# Summarize older turns instead of only dropping them (profiles with context_window).
 [summarization]
 enabled = true
 max_output_tokens = 1536
-# Summary calls only: write the summary without thinking. Qwen 3.x otherwise spent the whole
-# allowance thinking and returned an empty summary (~95 s wasted per attempt). Chats keep thinking.
 parameters = { chat_template_kwargs = { enable_thinking = false } }
 
-# --- Run from any folder (like Claude Code) -------------------------------------
-# Started in another folder (after `agent-harness init --global`), the project around that
-# folder is the workspace; its runs live in ~/.agent-harness/projects/<path>/, and its
-# AGENTS.md, CLAUDE.md, and skills are added. Started here, nothing changes.
-# docs/RUN_ANYWHERE.md.
 [project]
 root = "cwd"
-settings = false                 # this file is the only config; folder settings.toml files are ignored
-claude_code = true               # also CLAUDE.md, .claude/skills, ~/.claude/skills
-# Every ~/.claude/skills description is in each system prompt (68 skills ≈ 3.5K tokens of a
-# 16K window); narrow them by name, e.g. claude_skills = ["aisystems-video", "hyperframes*"].
+settings = false
+claude_code = true
 claude_skills = ["*"]
-# A new `run`/`chat` whose prompt matches an earlier run of this project (a slug, a path) starts
-# with that run's handoff: its request, final answer, task list, files written, last summary.
-# The previous_runs tool reads more; `chat --continue` / `--resume` / /resume reopen a whole run.
 link_runs = true
 
-
-# --- Coding tools (local) ----------------------------------------------
 [coding]
 enabled = true
 workspace = "."
 execution_runtime = "local"
 allow_local_execution = true
-approval_mode = "side_effects"   # pause before writes and commands
+approval_mode = "side_effects"
 command_timeout_seconds = 1800
 enable_git_commit = true
 enable_pull_requests = false
 allowed_commands = ["*"]
-# rm is allowed for files this run created only: each file must be inside the workspace and
-# created after the run started; -r/-rf, folders, and rm inside bash -c are refused
-# (coding/removal.py, coding/guardrails.py).
 forbidden_commands = ["chmod", "chown", "dd", "docker", "doas", "fdisk", "kill", "killall", "mkfs",
                       "mount", "nc", "netcat", "powershell", "pwsh", "reboot", "shutdown",
                       "sudo", "su", "umount", "wget", "zsh"]
 
-# --- Coding tools (Docker sandbox) ----------------------------------------------
-# Needs a running Docker daemon. python:3.12 (not -slim) includes git.
-#[coding]
-#enabled = true
-#workspace = "."
-#execution_runtime = "docker"
-#approval_mode = "side_effects"   # pause before writes and commands
-#command_timeout_seconds = 120
-#enable_git_commit = true
-#enable_pull_requests = false
-# The default commands plus read-only listing tools (ls, cat, head, wc, find). The guardrails
-# refuse find's -delete/-exec/-execdir/-ok/-okdir/-fprint*/-fls, since the workspace mount is
-# read-write. This list replaces the default one, so the defaults are repeated (git is needed
-# for enable_git_commit).
-#allowed_commands = ["cargo", "git", "go", "make", "npm", "npx", "pnpm", "py.test", "pytest",
-#                    "python", "python3", "uv", "yarn", "ls", "cat", "head", "wc", "find","bash","curl",]
-
-#[coding.docker]
-#image = "python:3.12"
-#mode = "per_run"                 # one warm container per run, removed when it ends
-#network_enabled = false
-#cpus = 2.0
-#memory = "2g"
-
-# --- Permissions, hooks, interaction --------------------------------------------
 [permissions]
-#mode = "default"                 # default | accept_edits | plan | bypass
-mode = "bypass"                 # default | accept_edits | plan | bypass
+mode = "bypass"
 allow = ["read_file", "search_files", "git_status", "git_diff", "run_tests",
          "run_command(argv.0=pytest)",
-         # read-only listing commands run without an approval pause
          "run_command(argv.0=ls)", "run_command(argv.0=cat)", "run_command(argv.0=head)",
          "run_command(argv.0=wc)", "run_command(argv.0=find)"]
-# Ask beats allow: cat/head on a .env file still pauses, like read_file does.
 ask = ["read_file(path=*.env)", "run_command(argv.1=*.env)", "run_command(argv.2=*.env)",
        "run_command(argv.3=*.env)", "run_command(argv.4=*.env)"]
-deny = ["run_command(argv.0=sudo)", "git_*(force=true)"]  # rm: only files the run created (see [coding])
+deny = ["run_command(argv.0=sudo)", "git_*(force=true)"]
 edit_tools = ["apply_patch"]
 
 [[hooks]]
@@ -338,20 +164,17 @@ command = ["python3", ".agent-harness/hooks/audit_hook.py"]
 timeout_seconds = 10
 
 [interaction]
-ask_user = true                  # the model may ask you a clarifying question
-approval_timeout_seconds = 3600  # unanswered approvals and questions are resolved
-question_timeout_seconds = 3600  #   after an hour by workers / `agent-harness expire`
+ask_user = true
+approval_timeout_seconds = 3600
+question_timeout_seconds = 3600
 on_timeout = "deny"
 
 [tasks]
-enabled = true                   # todo_write task list, shown by `status`
+enabled = true
 
-# --- Subagents and planning -----------------------------------------------------
 [subagents]
 max_depth = 2
 max_per_run = 6
-# Children of one parent running at once; the rest wait. llama.cpp shares one KV cache
-# (ctx-size) across concurrent requests: five 16K children overflowed a 32K cache.
 max_parallel = 2
 
 [[agents]]
@@ -375,22 +198,12 @@ prompt_file = ".agent-harness/agents/test-runner.md"
 tools = ["run_tests", "read_file", "search_files"]
 max_steps = 8
 
-# Plan-and-execute. mode = "auto": the model is offered create_plan and calls it only for
-# multi-step work; that run then plans and the orchestrator drives it step by step.
-# Questions and one-step tasks answer directly (no extra model call). `--plan` still
-# forces planning for one run; "always" plans every run, "off" only `--plan` runs.
 [planning]
 mode = "auto"
-# After 6 tool-calling steps in one turn (or a context summary) without a plan, remind the
-# model once that it can plan and delegate the reading to a subagent. 0 = never.
 auto_reminder_after_steps = 6
 max_plan_steps = 20
 max_replans = 2
 
-# --- Instructions, skills, templates, plugins -----------------------------------
-# Short chat-oriented instructions, sent with every run (~170 tokens). The repo's AGENTS.md
-# (a ~1,860-token developer guide) is not sent: it slowed every uncached first turn by ~12 s.
-# For coding sessions on this repo, add "AGENTS.md" back to the list.
 [instructions]
 enabled = true
 files = ["~/.agent-harness/AGENTS.md", ".agent-harness/instructions/CHAT.md"]
@@ -401,28 +214,18 @@ enabled = true
 paths = [".agent-harness/skills"]
 
 [templates]
-paths = [".agent-harness/templates"]   # /review FILE, /explain TOPIC
+paths = [".agent-harness/templates"]
 
-# Plugins bundle templates, skills, subagents, and hooks. security-review adds the
-# security-auditor subagent, the secrets-scan skill, /audit, and a hook that refuses
-# network commands (curl, wget, ssh, ...) in run_command. More: `agent-harness plugin
-# install DIR`, then list the plugin here.
 [plugins]
 directory = ".agent-harness/plugins"
 enabled = ["security-review"]
 
-# --- Tools: sources, web, memory, artifacts, dynamic loading --------------------
-# In-process Python tools (word_count).
 [[tools]]
 name = "text-tools"
 kind = "python"
 module = "text_tools:register"
 path = ".agent-harness/tools"
 
-# Sandboxed Python tools (json_check): run in a warm per-run container with no network,
-# a read-only mount of the module, and resource limits. Meant for internal tools only:
-# keep network = false (inside the container [network] allowed_hosts does not apply).
-# Discovered at startup (sync_on_start); needs Docker, like [coding].
 [[tools]]
 name = "json-tools"
 kind = "python"
@@ -432,7 +235,6 @@ sandbox = "container"
 image = "python:3.12-slim"
 network = false
 
-# Declarative HTTP tool; its output is untrusted data (guardrails taint mode applies).
 [[tools]]
 name = "github_repo"
 kind = "http"
@@ -441,12 +243,6 @@ url = "https://api.github.com/repos/octocat/hello-world"
 description = "Fetch public metadata of the example GitHub repository."
 input_schema = { type = "object", properties = {} }
 
-# Excalidraw MCP server (remote, streamable HTTP). Its host is in [network] allowed_hosts.
-# Tools are named excalidraw__read_me and excalidraw__create_view; the server's widget-only
-# tools are not offered. read_me returns fixed documentation, so it is trusted; create_view's
-# output is untrusted data (taint mode applies after it). It is an MCP App: clients with a widget
-# renderer draw the diagram; here the model gets the text result only. A server that is
-# down keeps the tools from its last sync (`agent-harness tools sync`).
 [[mcp_servers]]
 name = "excalidraw"
 transport = "http"
@@ -460,28 +256,22 @@ sync_on_start = true
 enabled = true
 max_chars = 6000
 
-# Tavily web search, called from the harness process (egress allowlist applies; results
-# are untrusted, so guardrails scan them and taint mode applies). The key is read from
-# TAVILY_API_KEY (.env) at call time; without it the tool returns an error to the model. `agent-harness tools disable web_search` hides it.
 [web_search]
 enabled = true
 api_key_env = "TAVILY_API_KEY"
 max_results = 3
-max_chars_per_result = 800       # snippet length per result: ~3 x 230 tokens to read, not ~3 x 550
+max_chars_per_result = 800
 
 [memory]
 enabled = true
 namespace = "default"
-search = "hybrid"                # keyword + embeddings from the default profile's embedding_model
-# embedding_profile = ""         # empty: the default profile's own embedding model
+search = "hybrid"
 
 [artifacts]
-enabled = true                   # large tool outputs are stored outside the history
+enabled = true
 directory = ".agent-harness/artifacts"
 threshold_bytes = 16384
 
-# Offer a core set plus search_tools / load_tools; the rest are loaded on demand.
-# Orchestrator tools (agent, ask_user, todo_write, plan tools) are always offered.
 [tool_loading]
 mode = "dynamic"
 core = ["read_file", "search_files", "search_documentation", "apply_patch", "run_tests",
@@ -490,7 +280,6 @@ core = ["read_file", "search_files", "search_documentation", "apply_patch", "run
 max_loaded = 30
 search_limit = 8
 
-# --- Guardrails -----------------------------------------------------------------
 [guardrails]
 enabled = true
 refusal_message = "I can't help with that request."
@@ -509,45 +298,22 @@ pii = "redact"
 
 [guardrails.tools]
 injection = "redact"
-taint = true                     # side-effect tools need approval after untrusted output
+taint = true
 
-# Llama Guard (the default profile's guard_model) checks input and output. "flag" records an
-# unsafe verdict as a guardrail_decided event and lets the turn go on; "block" refuses.
-# Measured 2026-10-04 on 30 coding prompts: Llama Guard 3 1B wrongly flags 8-10 of them
-# (e.g. "Explain src/agent_harness/cli/repl.py" as violent_crimes); 8B flags none and caught
-# 12/12 harmful prompts. Keep "flag" with the 1B; use "block" with the 8B (the ollama profile):
-#   AGENT_HARNESS_SET__GUARDRAILS__MODEL__ACTION=block
 [guardrails.model]
 action = "flag"
-# Check new input alongside the main model call instead of before it. The guard and the chat
-# model then start together, so on Modal a cold start waits for the slower of the two, not
-# both: on 2026-10-10 the guard's L4 took 176 s before the H200 even started (511 s in all).
-# An unsafe verdict with "block" still discards the answer before anything is recorded.
-# Trade-off: a step that checks new input (a turn's first step, and steps after a [Plan] or
-# [Budget] note) is not streamed, so /ui shows that step's text when it is complete.
 parallel = true
 
-# --- Network, redaction, quotas, API --------------------------------------------
-# Egress allowlist for HTTP tools, web search, web_fetch, and MCP over HTTP (not for
-# model endpoints). Add the hosts you want web_fetch to reach.
 [network]
 restrict_egress = true
 allowed_hosts = ["api.tavily.com", "api.github.com", "github.com", "raw.githubusercontent.com",
                  "docs.python.org", "pypi.org", "en.wikipedia.org", "mcp.excalidraw.com",
-                 # Weather and time (web_fetch after a search; "*." also matches the bare domain)
                  "wttr.in", "*.open-meteo.com", "*.weather.gov", "*.weatherapi.com",
                  "*.timeanddate.com", "mausam.imd.gov.in"]
 
 [redaction]
 enabled = true
 
-# Langfuse (cloud or self-hosted): one trace per turn (session = the run) with generations, tool
-# spans, subagents, and guard/approval/plan events; /ui 👍/👎 become user_feedback scores, and
-# `agent-harness-bench run ... --langfuse` sends benchmark scores, datasets, and dataset runs.
-# Keys and URL in .env: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL
-# (e.g. https://us.cloud.langfuse.com). Without them nothing is sent (one warning at start).
-# content: "redacted" masks secrets and PII before text leaves the machine; "none" sends only
-# timings, tokens, and cost; "full" sends text as is.
 [langfuse]
 enabled = true
 content = "redacted"
@@ -569,32 +335,11 @@ cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localh
 rate_limit_per_minute = 240
 rate_limit_burst = 40
 
-# API keys for `agent-harness serve` (REST API, /v1 chat, /ui). Only the variable's NAME
-# is here; each user puts their own value (at least 16 characters) in .env. Add one
-# entry per person or client to give each a tenant and role (viewer | operator | admin);
-# the CLI does not use keys.
 [[api.keys]]
 name = "me"
 tenant = "default"
 role = "admin"
 key_env = "AGENT_HARNESS_API_KEY"
 
-# Webhooks when runs pause or finish (sent by workers). Dormant while the URL is empty;
-# set it in .env: AGENT_HARNESS_SET__NOTIFICATIONS__WEBHOOK_URL="https://..."
 [notifications]
 webhook_url = ""
-# secret_env = "AGENT_HARNESS_WEBHOOK_SECRET"  # signs each POST; once named, it must be set
-
-# --- Needs something outside the harness (off until you provide it) ------------
-#
-# Another MCP server over stdio (needs Node.js / npx). A stdio server is a host
-# subprocess with your permissions and network; [network] does not restrict it:
-# [[mcp_servers]]
-# name = "filesystem"
-# command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "./docs"]
-# read_only = ["read_file", "read_text_file", "list_directory", "search_files", "get_file_info"]
-# sync_on_start = true
-#
-# Postgres storage (needs the [postgres] extra and a server):
-# [storage]
-# url_env = "AGENT_HARNESS_DATABASE_URL"
