@@ -298,7 +298,7 @@ class FullConfigTests(unittest.TestCase):
         for host in ("www.weatherapi.com", "api.open-meteo.com", "wttr.in", "forecast.weather.gov"):
             self.assertTrue(allowed(host), host)
         self.assertFalse(allowed("evil.example"))
-        self.assertEqual(c.orchestrator.reserve_tokens_per_run, 200_000)
+        self.assertEqual(c.orchestrator.reserve_tokens_per_run, 5_000_000)
         self.assertEqual((c.orchestrator.turn_max_steps, c.orchestrator.turn_max_wall_seconds), (200, 3600))
         self.assertEqual(c.orchestrator.max_cut_off_retries, 2)
         self.assertEqual(dict(c.summarization.parameters),
