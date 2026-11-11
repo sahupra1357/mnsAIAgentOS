@@ -3134,11 +3134,11 @@ class AgentOrchestrator:
             )
             contexts = [c for c in (hook_context, post.context if post else "") if c]
             artifact = await self._append_tool_result(run, result, suffix="\n\n".join(contexts))
-        recorded: dict[str, Any] = {"retrying": True} if should_retry else {}
+        result_extra: dict[str, Any] = {"retrying": True} if should_retry else {}
         if ran_ahead is not None:
-            recorded["prefetch"] = ran_ahead
+            result_extra["prefetch"] = ran_ahead
         await self._record_tool_result(run, events, result, attempt=attempt, artifact=artifact,
-                                       extra=recorded or None)
+                                       extra=result_extra or None)
 
         if should_retry:
             await self._execute_tool(run, events, call)
