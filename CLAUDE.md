@@ -174,6 +174,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   The model's view keeps the newest request too: when a summary or omission covers it, its
   text follows the summary as `[Latest user message - answer this one]`. Before, only the
   first user message survived verbatim, and a chat's second question was answered as the first.
+- **Working context (Phase 26).** The root config uses `[context] layout = "anchored"`: the summary, omission
+  note and tool-call ledger are one message after the first user message (never glued onto it), and the latest
+  request is carried as its own message. `[summarization] trigger = "threshold"` compacts before anything is
+  omitted. A new code path that reads `view.messages[1]` for the summary is wrong in this layout. The estimate
+  scale (`estimate_ratio` in `model_responded`) and overflow caps are passed to `build`; do not wrap an anchored
+  view in `fit_to_tokens`. Details: `skills/context-management/SKILL.md`.
 - `ModelResolver.resolve` is synchronous (no `await`). `Execution.md` was brought up to date
   with the Phase 1–6 flow and now shows it correctly.
 - **Subagent nesting (6c).** Subagents exist only when `[[agents]]` are defined; the

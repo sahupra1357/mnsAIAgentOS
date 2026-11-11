@@ -142,7 +142,6 @@ class SymptomCase(unittest.TestCase):
 
 
 class LatestRequestTests(SymptomCase):
-    @unittest.expectedFailure  # fixed in a later phase (see the module docstring)
     def test_the_latest_question_stays_its_own_message_after_a_trim(self) -> None:
         files = [self.big_file(f"notes{i}.txt", f"marker{i}") for i in range(8)]
         model = SymptomModel(
@@ -174,7 +173,6 @@ class LatestRequestTests(SymptomCase):
 
 
 class ForgottenFileTests(SymptomCase):
-    @unittest.expectedFailure  # fixed in a later phase (see the module docstring)
     def test_a_file_read_earlier_is_still_named_after_its_turn_was_dropped(self) -> None:
         files = [self.big_file(f"module{i}.py", f"marker{i}") for i in range(5)]
         model = SymptomModel([read(i, name) for i, name in enumerate(files)] + [say("Reviewed.")])
@@ -197,7 +195,6 @@ class ForgottenFileTests(SymptomCase):
 
 
 class RepeatedCallTests(SymptomCase):
-    @unittest.expectedFailure  # fixed in a later phase (see the module docstring)
     def test_a_repeated_read_is_answered_from_the_earlier_result_not_refused(self) -> None:
         (self.workspace / "small.txt").write_text("the answer is 42\n", encoding="utf-8")
         model = SymptomModel([read(i, "small.txt") for i in range(7)] + [say("It is 42.")])

@@ -431,6 +431,9 @@ class ContextView:
     # omitted_through) of indices into the stored messages that was left out.
     omitted_from: int | None = None
     omitted_through: int | None = None
+    # The input budget the view was fitted to (window less output reserve and tools),
+    # when the builder had one; a compaction policy compares estimated_tokens with it.
+    budget_tokens: int | None = None
 
     @property
     def modified(self) -> bool:

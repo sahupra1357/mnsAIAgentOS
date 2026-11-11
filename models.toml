@@ -102,6 +102,7 @@ final_answer_reserve_seconds = 120
 max_answer_continuations = 2
 max_cut_off_retries = 2
 prefetch_with_hooks = true
+resurface_repeated_results = true
 reserve_tokens_per_run = 5000000
 turn_max_steps = 200
 turn_max_wall_seconds = 3600
@@ -109,12 +110,26 @@ turn_max_wall_seconds = 3600
 [context]
 chars_per_token = 3.0
 high_water_ratio = 0.85
-low_water_ratio = 0.45
+low_water_ratio = 0.60
 max_tool_output_chars = 16000
+default_window = 32768
+layout = "anchored"
+stale_tool_output_chars = 1500
+keep_recent_units = 4
+min_fitted_output_chars = 2000
+recovery_hints = true
+ledger = true
+calibrate = true
 
 [summarization]
 enabled = true
 max_output_tokens = 1536
+trigger = "threshold"
+trigger_ratio = 0.70
+keep_ratio = 0.35
+chunked = true
+style = "structured"
+max_message_chars = 6000
 parameters = { chat_template_kwargs = { enable_thinking = false } }
 
 [project]
