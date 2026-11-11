@@ -160,6 +160,7 @@ class FullConfigTests(unittest.TestCase):
         o = c.orchestrator  # Phase 28
         self.assertTrue(all((o.phase_dispatch, o.close_orphan_tool_calls, o.mid_phase_checks, o.state_block)))
         self.assertEqual(o.cancel_poll_seconds, 2.0)
+        self.assertTrue(c.storage.message_table and c.storage.off_loop)  # Phase 29
         # Phase 27: one note store for every project, scoped, recalled and saved by the harness.
         self.assertEqual(c.memory.database, "~/.agent-harness/memory.sqlite3")
         self.assertTrue(all((c.memory.scopes, c.memory.recall, c.memory.auto_save, c.memory.guidance)))
