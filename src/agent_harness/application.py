@@ -44,7 +44,9 @@ from .orchestration.context import (
     ContextSummarizer,
     limits_from_profiles,
     summary_input_chars,
+    SUMMARY_STYLES,
 )
+from .orchestration.compaction import ThresholdCompactionPolicy
 from .domain import ArtifactStore, ModelResolver, PermissionMode, StreamListener, TelemetrySink
 from .guardrails import Guardrails
 from .extensions.hooks import CommandHook, HookEvent, HookRunner
@@ -199,7 +201,8 @@ def build_application(
     workspace_base = project_root or base_path
     context_policy = context_policy or context_policy_from_config(config)
     # Validated before any store or file is opened.
-    context_limits = limits_from_profiles(config.models)
+    context_limits = limits_from_profiles(
+        config.models, default_window=config.context.default_window or None)
     summarizer = _summarizer(config, context_limits, context_policy)
     plugins = enabled_plugins(resolve_path(config.plugins.directory, base_path), config.plugins.enabled)
     templates = discover_templates(
@@ -338,6 +341,13 @@ def build_application(
                 else None
             ),
             summarizer=summarizer,
+            compaction=(
+                ThresholdCompactionPolicy(context_policy,
+                                          trigger_ratio=config.summarization.trigger_ratio,
+                                          keep_ratio=config.summarization.keep_ratio)
+                if config.summarization.trigger == "threshold" else None
+            ),
+            calibrate_estimate=config.context.calibrate,
             tool_loading=_tool_loading(config, tool_runtime),
         planning=_planning(config),
         quotas=quotas_from_config(config),
@@ -437,6 +447,7 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         max_answer_continuations=section.max_answer_continuations,
         max_cut_off_retries=section.max_cut_off_retries,
         prefetch_with_hooks=section.prefetch_with_hooks,
+        resurface_repeated_results=section.resurface_repeated_results,
     )
 
 
@@ -730,6 +741,9 @@ def _summarizer(
             parameters=section.parameters,
             max_input_chars=section.max_input_chars or 48_000,
             input_chars=None if section.max_input_chars else summary_input_chars(limits, policy),
+            max_message_chars=section.max_message_chars,
+            instructions=SUMMARY_STYLES[section.style],
+            chunked=section.chunked,
         )
     except ValueError as exc:
         raise ConfigError(f"summarization: {exc}") from exc

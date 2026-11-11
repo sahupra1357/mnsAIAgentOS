@@ -159,3 +159,32 @@ window fails cleanly, and resume produces the same view.
   recoveries, and the view is rebuilt once.
 - `_fitting_cap` raises any new cap until the minimum view fits; when no smaller cap fits,
   no cap is recorded.
+
+## Phase 26: context as working memory (implemented, opt-in)
+
+All of it is off in code and on in the root `models.toml`.
+
+- **Anchored layout** (`[context] layout = "anchored"`): the first user message is sent as stored.
+  The summary, the omission note and the ledger are one user message after it
+  (`STATE_HEADER`), and the user's latest request follows as its own message when the summary or
+  a trim covers it. The legacy layout (glued onto the first message) is unchanged.
+- **Staged trimming**: over the high-water mark, tool outputs of turns older than
+  `keep_recent_units` are first shortened to `stale_tool_output_chars`; whole turns are dropped
+  only if that is not enough. The newest turn's outputs keep at least `min_fitted_output_chars`.
+- **Ledger** (`ledger = true`, `tool_ledger`): one line per tool call that is no longer shown,
+  written without a model. A summary may forget a path; the ledger cannot.
+- **Early compaction** (`[summarization] trigger = "threshold"`, `ThresholdCompactionPolicy`):
+  summarizes at `trigger_ratio` of the input budget and keeps about `keep_ratio`, so no request
+  is sent with a hole. `chunked = true` summarizes a long range in parts (`covers` advances per
+  part); `style = "structured"` uses fixed sections. After a failed summary an early policy waits
+  `_SUMMARY_RETRY_STEPS` steps.
+- **Calibration** (`calibrate = true`): `model_responded` records `estimate_ratio` when the
+  provider counted clearly more input tokens than estimated; later views scale the estimate. It
+  only rises, and is read from events, so resume builds the same views.
+- **Caps**: a builder with `native_caps` (anchored) takes `max_input_tokens` and `scale` in
+  `build`; `fit_to_tokens` is only used for the legacy layout (it would treat the state message
+  as an ordinary turn).
+- **Repeated reads** (`[orchestrator] resurface_repeated_results`): past
+  `max_identical_tool_calls`, a read-only call gets the earlier result with a note;
+  `max_refused_repeats` still ends a loop.
+- `ContextView.budget_tokens` is new (default `None`). Tests: `tests/test_working_context.py`.

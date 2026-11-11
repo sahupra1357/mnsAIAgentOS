@@ -281,7 +281,8 @@ benchmarks = ["bfcl"]
 [[feature]]
 name = "context"
 description = "Context window: trimming, summarization, server token counts, overflow recovery, limits"
-tests = ["test_context", "test_summarization", "test_phase13_limits", "test_phase14", "test_symptoms"]
+tests = ["test_context", "test_summarization", "test_phase13_limits", "test_phase14", "test_symptoms",
+         "test_working_context"]
 scenarios = ["context_overflow_recovery"]
 benchmarks = ["context"]
 

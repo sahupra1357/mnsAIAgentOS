@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -70,8 +71,35 @@ class ContextPolicy:
     chars_per_token: float = 3.5
     message_overhead_tokens: int = 8
     max_tool_output_chars: int | None = 16_000
+    # Phase 26. "legacy": the summary and the omission note are appended to the first user
+    # message. "anchored": that message is never changed; the summary, the note and the
+    # ledger are one message of their own after it, and the user's latest request, when
+    # the summary or a trim covers it, follows as a message of its own.
+    layout: str = "legacy"
+    # Before whole turns are dropped, tool outputs of turns older than the newest
+    # ``keep_recent_units`` are shortened to this many characters (None: off).
+    stale_tool_output_chars: int | None = None
+    keep_recent_units: int = 4
+    # The newest turn's tool outputs are never shortened below this.
+    min_fitted_output_chars: int = 200
+    # Say in a truncation marker how to get the rest (the artifact, or calling again).
+    recovery_hints: bool = False
+    # A harness-written list of the tool calls that are no longer shown (anchored layout).
+    ledger: bool = False
+    ledger_max_entries: int = 40
+    ledger_max_chars: int = 4_000
 
     def __post_init__(self) -> None:
+        if self.layout not in {"legacy", "anchored"}:
+            raise ValueError("layout must be 'legacy' or 'anchored'")
+        if self.stale_tool_output_chars is not None and self.stale_tool_output_chars < 200:
+            raise ValueError("stale_tool_output_chars must be at least 200")
+        if self.keep_recent_units < 1:
+            raise ValueError("keep_recent_units must be at least 1")
+        if self.min_fitted_output_chars < 200:
+            raise ValueError("min_fitted_output_chars must be at least 200")
+        if self.ledger_max_entries < 1 or self.ledger_max_chars < 200:
+            raise ValueError("ledger_max_entries must be at least 1 and ledger_max_chars at least 200")
         if not 0 < self.low_water_ratio < self.high_water_ratio <= 1:
             raise ValueError("require 0 < low_water_ratio < high_water_ratio <= 1")
         if self.chars_per_token <= 0:
@@ -129,11 +157,24 @@ class BudgetedContextBuilder:
         *,
         model_profile: str,
         summary: ContextSummary | None = None,
+        max_input_tokens: int | None = None,
+        scale: float = 1.0,
     ) -> ContextView:
+        """``max_input_tokens`` (a cap a provider overflow set) and ``scale`` (how far the
+        estimate is under the provider's count) are passed by the orchestrator to builders
+        with ``native_caps`` (the anchored layout); the legacy layout is capped afterwards
+        with :func:`fit_to_tokens`, as before."""
+
         limits = self._lookup(model_profile)
         if limits is None:
             # Without a window the full history fits by definition; no summary needed.
             return ContextView(messages=tuple(messages))
+        if scale > 1.0:
+            # Count every character as more tokens; the rest of the logic is unchanged.
+            scaled = replace(self._policy, chars_per_token=self._policy.chars_per_token / scale)
+            return BudgetedContextBuilder(self._lookup, policy=scaled).build(
+                messages, tools, model_profile=model_profile, summary=summary,
+                max_input_tokens=max_input_tokens)
 
         prepared: list[Message] = []
         trimmed_outputs = 0
@@ -141,6 +182,10 @@ class BudgetedContextBuilder:
             shortened = self._trim_tool_output(message)
             trimmed_outputs += shortened is not message
             prepared.append(shortened)
+
+        if self._policy.layout == "anchored":
+            return self._build_anchored(prepared, tools, limits, summary, trimmed_outputs,
+                                        model_profile, max_input_tokens)
 
         head_end = _pinned_head_end(prepared)
         head = prepared[:head_end]
@@ -220,11 +265,161 @@ class BudgetedContextBuilder:
             omitted_through=rest_start + omitted if omitted else None,
         )
 
+    @property
+    def native_caps(self) -> bool:
+        """Whether ``build`` takes ``max_input_tokens`` and ``scale`` itself (anchored layout)."""
+
+        return self._policy.layout == "anchored"
+
+    @property
+    def policy(self) -> ContextPolicy:
+        return self._policy
+
+    def _build_anchored(
+        self,
+        prepared: list[Message],
+        tools: Sequence[ToolSpec],
+        limits: ContextLimits,
+        summary: ContextSummary | None,
+        trimmed_outputs: int,
+        model_profile: str,
+        max_input_tokens: int | None,
+    ) -> ContextView:
+        """The Phase 26 layout: pinned head, one state message, the latest request, kept turns.
+
+        The first user message is sent exactly as stored. What stands in for older turns
+        (the summary, how many messages were omitted, and the ledger of their tool calls)
+        is one message after the head. When the user's latest request lies in that older
+        part, it follows as a message of its own, so the model answers it and not the
+        first one. Trimming is the same replay with hysteresis; before whole turns are
+        dropped, the tool outputs of older turns are shortened.
+        """
+
+        policy = self._policy
+        head_end = _pinned_head_end(prepared)
+        head = prepared[:head_end]
+        if summary is not None and (not head or not _summary_applies(summary, prepared, head_end)):
+            summary = None  # e.g. the history was rewound behind it
+        rest_start = summary.covers if summary is not None else head_end
+        units = _group_units(prepared[rest_start:])
+        latest = latest_request_index(prepared, start=head_end)
+        reasoning = limits.counts_reasoning
+
+        tools_tokens = self._tools_tokens(tools)
+        budget = limits.context_window - limits.output_reserve_tokens - tools_tokens
+        if max_input_tokens is not None:
+            budget = min(budget, max_input_tokens - tools_tokens)
+        head_tokens = sum(self._message_tokens(message, reasoning) for message in head)
+        if budget <= 0 or head_tokens > budget:
+            raise ContextWindowExceededError(
+                f"context window {limits.context_window} cannot hold the output reserve, "
+                f"tool definitions, and pinned instructions for profile {model_profile!r}"
+            )
+        high_water = math.floor(budget * policy.high_water_ratio)
+        low_water = math.floor(budget * policy.low_water_ratio)
+        summary_text = ""
+        if summary is not None:
+            summary_text = (f"[Summary of {rest_start - head_end} earlier messages]\n"
+                            f"{summary.content.strip()}")
+        fixed = head_tokens + (self._text_tokens(summary_text) if summary_text else 0)
+
+        unit_tokens = [sum(self._message_tokens(m, reasoning) for m in unit) for unit in units]
+        total = fixed
+        cut = 0
+        shrunk = 0  # units[:shrunk] were considered for shortening
+        stale = policy.stale_tool_output_chars
+        for index, tokens in enumerate(unit_tokens):
+            total += tokens
+            if total <= high_water:
+                continue
+            if stale is not None:
+                # First shorten what older turns printed; their calls stay visible.
+                while shrunk <= index - policy.keep_recent_units and total > low_water:
+                    if shrunk >= cut:
+                        shorter = [self._trim_tool_output(m, stale) for m in units[shrunk]]
+                        changed = sum(new is not old for new, old in zip(shorter, units[shrunk]))
+                        if changed:
+                            saved = unit_tokens[shrunk] - sum(
+                                self._message_tokens(m, reasoning) for m in shorter)
+                            units[shrunk] = shorter
+                            unit_tokens[shrunk] -= saved
+                            total -= saved
+                            trimmed_outputs += changed
+                    shrunk += 1
+            # Never omit the newest unit: the model must see the latest turn.
+            while cut < index and total > low_water:
+                total -= unit_tokens[cut]
+                cut += 1
+
+        def state(cut: int) -> tuple[list[Message], int]:
+            """The state message and the carried request for this cut, and their tokens."""
+
+            kept_from = rest_start + sum(len(unit) for unit in units[:cut])
+            parts = [summary_text] if summary_text else []
+            omitted = kept_from - rest_start
+            if omitted:
+                parts.append(f"[Context note: {omitted} earlier messages were omitted "
+                             "to fit the model's context window.]")
+            if policy.ledger and kept_from > head_end:
+                room = min(policy.ledger_max_chars,
+                           max(200, math.floor(budget * 0.1 * policy.chars_per_token)))
+                ledger = tool_ledger(prepared[head_end:kept_from],
+                                     max_entries=policy.ledger_max_entries, max_chars=room)
+                if ledger:
+                    parts.append(ledger)
+            extra: list[Message] = []
+            if parts:
+                extra.append(Message(role=Role.USER, content=STATE_HEADER + "\n\n" + "\n\n".join(parts)))
+            if latest is not None and latest < kept_from:
+                extra.append(prepared[latest])  # the request being worked on, in the user's words
+            return extra, sum(self._message_tokens(m, reasoning) for m in extra)
+
+        kept_tokens = sum(unit_tokens[cut:])
+        extra, extra_tokens = state(cut)
+        while fixed - (self._text_tokens(summary_text) if summary_text else 0) + extra_tokens \
+                + kept_tokens > budget and cut < len(units) - 1:
+            kept_tokens -= unit_tokens[cut]
+            cut += 1
+            extra, extra_tokens = state(cut)
+        total = head_tokens + extra_tokens + kept_tokens
+        if total > budget and units:
+            newest, fitted_outputs = self._fit_newest_unit(units[-1], total - budget, reasoning)
+            if fitted_outputs:
+                units[-1] = newest
+                trimmed_outputs += fitted_outputs
+                kept_tokens = sum(unit_tokens[cut:-1]) + sum(
+                    self._message_tokens(m, reasoning) for m in newest)
+                total = head_tokens + extra_tokens + kept_tokens
+        if total > budget:
+            raise ContextWindowExceededError(
+                f"estimated {total} tokens exceed the {budget}-token input budget for "
+                f"profile {model_profile!r} even after omitting older turns"
+            )
+
+        omitted = sum(len(unit) for unit in units[:cut])
+        kept = [message for unit in units[cut:] for message in unit]
+        return ContextView(
+            messages=tuple(head + extra + kept),
+            estimated_tokens=total,
+            omitted_messages=omitted,
+            trimmed_tool_outputs=trimmed_outputs,
+            summarized_messages=rest_start - head_end,
+            omitted_from=rest_start if omitted else None,
+            omitted_through=rest_start + omitted if omitted else None,
+            budget_tokens=budget,
+        )
+
+    def unit_tokens(self, unit: Sequence[Message], reasoning: bool = False) -> int:
+        """The estimate for one unit as the view would show it (tool outputs capped)."""
+
+        return sum(self._message_tokens(self._trim_tool_output(m), reasoning) for m in unit)
+
     def _fit_newest_unit(
         self, unit: list[Message], excess_tokens: int, reasoning: bool
     ) -> tuple[list[Message], int]:
         """Shorten the unit's tool outputs by about ``excess_tokens``; returns (unit, count)."""
 
+        _MIN_FITTED_OUTPUT = self._policy.min_fitted_output_chars
         sizes = [len(m.content) if m.role is Role.TOOL else 0 for m in unit]
         available = sum(size - _MIN_FITTED_OUTPUT for size in sizes if size > _MIN_FITTED_OUTPUT)
         if available <= 0:
@@ -256,7 +451,13 @@ class BudgetedContextBuilder:
         if limit is None or message.role is not Role.TOOL or len(message.content) <= limit:
             return message
         removed = len(message.content) - limit
-        marker = f"\n[... {removed} characters truncated ...]\n"
+        hint = ""
+        if self._policy.recovery_hints:
+            stored = _ARTIFACT_ID.search(message.content)
+            hint = (f"; the full output is artifact {stored.group(1)}, read the part you need "
+                    "with read_artifact" if stored else
+                    "; call the tool again (a narrower range or query) if you need the rest")
+        marker = f"\n[... {removed} characters truncated{hint} ...]\n"
         keep_head = limit // 2
         keep_tail = limit - keep_head
         content = message.content[:keep_head] + marker + message.content[-keep_tail:]
@@ -287,6 +488,71 @@ class BudgetedContextBuilder:
             sort_keys=True,
         )
         return self._text_tokens(serialized)
+
+
+STATE_HEADER = "[Working state - written by the harness, not by the user]"
+"""First line of the anchored layout's state message (summary, omission note, ledger)."""
+
+_ARTIFACT_ID = re.compile(r"stored as artifact ([0-9a-f]{16,64})")
+
+
+def tool_ledger(messages: Sequence[Message], *, max_entries: int = 40, max_chars: int = 4_000) -> str:
+    """One line per tool call in ``messages``: the tool, its arguments, and how it ended.
+
+    Written without a model, so it is exact: a summary may leave out which files were read
+    or which commands ran, and this cannot. Identical calls are listed once with a count;
+    when there are too many, the oldest are left out and counted.
+    """
+
+    calls: dict[str, tuple[str, str]] = {}
+    lines: dict[str, int] = {}
+    for message in messages:
+        for call in message.tool_calls:
+            arguments = json.dumps(call.arguments, separators=(",", ":"), sort_keys=True)
+            calls[call.id] = (call.name, _shorten_line(arguments, 160))
+        if message.role is Role.TOOL and message.tool_call_id in calls:
+            name, arguments = calls.pop(message.tool_call_id)
+            line = f"- {name} {arguments} -> {_result_status(message.content)}"
+            lines[line] = lines.pop(line, 0) + 1  # re-inserted: the latest occurrence orders it
+    for name, arguments in calls.values():
+        line = f"- {name} {arguments} -> no result"
+        lines[line] = lines.pop(line, 0) + 1
+    if not lines:
+        return ""
+    entries = [line + (f" (x{count})" if count > 1 else "") for line, count in lines.items()]
+    header = ("[Earlier tool calls - their output is no longer shown; call a tool again if "
+              "you need its output]")
+    kept = entries[-max_entries:]
+    while len(kept) > 1 and sum(len(entry) + 1 for entry in kept) > max_chars:
+        kept = kept[1:]
+    left_out = len(entries) - len(kept)
+    if left_out:
+        kept.insert(0, f"- ({left_out} older calls not listed)")
+    return header + "\n" + "\n".join(kept)
+
+
+def _shorten_line(text: str, limit: int) -> str:
+    text = text.replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _result_status(content: str) -> str:
+    """How a tool message says it ended: its ``status`` field, or what its text shows."""
+
+    text = content.lstrip()
+    if text.startswith("{"):
+        try:
+            status = json.loads(text).get("status")
+        except (ValueError, AttributeError):
+            status = None
+        if isinstance(status, str) and status:
+            return status
+        found = re.search(r'"status"\s*:\s*"([a-z_]+)"', text[-200:])
+        if found:
+            return found.group(1)
+    if text.startswith("Refused") or text.startswith("Denied"):
+        return "refused"
+    return "returned"
 
 
 def estimate_tokens(
@@ -401,6 +667,14 @@ def context_policy_from_config(config: object) -> ContextPolicy:
         chars_per_token=section.chars_per_token,
         message_overhead_tokens=section.message_overhead_tokens,
         max_tool_output_chars=section.max_tool_output_chars or None,
+        layout=getattr(section, "layout", "legacy"),
+        stale_tool_output_chars=getattr(section, "stale_tool_output_chars", 0) or None,
+        keep_recent_units=getattr(section, "keep_recent_units", 4),
+        min_fitted_output_chars=getattr(section, "min_fitted_output_chars", 200),
+        recovery_hints=getattr(section, "recovery_hints", False),
+        ledger=getattr(section, "ledger", False),
+        ledger_max_entries=getattr(section, "ledger_max_entries", 40),
+        ledger_max_chars=getattr(section, "ledger_max_chars", 4_000),
     )
 
 
@@ -408,15 +682,20 @@ def limits_from_profiles(
     profiles: Mapping[str, object],
     *,
     default_output_reserve_tokens: int = 1024,
+    default_window: int | None = None,
 ) -> dict[str, ContextLimits]:
     """Derive limits from model profiles that declare ``context_window``.
 
     The output reserve is the profile's ``parameters.max_tokens`` when set.
+    ``default_window`` (``[context] default_window``) bounds the profiles that declare
+    none; without it they are sent the full history.
     """
 
     limits: dict[str, ContextLimits] = {}
     for name, profile in profiles.items():
         window = getattr(profile, "context_window", None)
+        if window is None:
+            window = default_window
         if window is None:
             continue
         parameters = getattr(profile, "parameters", {}) or {}
@@ -442,6 +721,25 @@ SUMMARY_INSTRUCTIONS = (
 )
 
 
+STRUCTURED_SUMMARY_INSTRUCTIONS = (
+    "You compress the earlier part of an agent's conversation so the agent can keep "
+    "working with a smaller context. Reply with these sections, in this order, and "
+    "nothing else. Write 'none' under a section that has nothing.\n"
+    "## Goal\nWhat the user wants, including the latest request.\n"
+    "## Constraints\nRules, preferences and limits the user or the instructions set.\n"
+    "## Decisions\nChoices made so far and why.\n"
+    "## Files and commands\nPaths read or changed and commands run, with what each showed.\n"
+    "## Facts\nExact identifiers, numbers, names and error messages learned from tools.\n"
+    "## Done\nWork that is finished.\n"
+    "## Next\nWhat remains, in order, and any open question.\n"
+    "Merge the previous summary, if given, with the new messages into one summary. Copy "
+    "identifiers, paths, numbers and error text exactly. Do not invent anything, do not "
+    "address the user, and do not call tools."
+)
+
+SUMMARY_STYLES = {"prose": SUMMARY_INSTRUCTIONS, "structured": STRUCTURED_SUMMARY_INSTRUCTIONS}
+
+
 class ContextSummarizer:
     """Build the model request that summarizes omitted history.
 
@@ -461,6 +759,7 @@ class ContextSummarizer:
         input_chars: Callable[[str], int | None] | None = None,
         instructions: str = SUMMARY_INSTRUCTIONS,
         parameters: Mapping[str, Any] | None = None,
+        chunked: bool = False,
     ) -> None:
         if max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be greater than zero")
@@ -475,12 +774,39 @@ class ContextSummarizer:
         self._max_message_chars = max_message_chars
         self._input_chars = input_chars
         self._instructions = instructions
+        # Phase 26: a range too long for one request is summarized in several, each
+        # continuing the last, instead of dropping the middle of the transcript.
+        self.chunked = chunked
 
     def input_limit(self, profile: str) -> int:
         derived = self._input_chars(profile) if self._input_chars is not None else None
         if derived is None:
             return self._max_input_chars
         return max(1_000, min(self._max_input_chars, derived))
+
+    def chunks(
+        self, messages: Sequence[Message], start: int, end: int, *, profile: str
+    ) -> list[tuple[int, int]]:
+        """Split ``[start, end)`` at unit boundaries so each part's transcript fits one request.
+
+        Room is left for the user's request, the previous summary and the labels. A single
+        unit longer than the room is still one part (its messages are capped as before).
+        """
+
+        room = max(1_000, self.input_limit(profile) - self._max_message_chars
+                   - self.max_output_tokens * 4 - 200)
+        parts: list[tuple[int, int]] = []
+        part_start, size, index = start, 0, start
+        for unit in _group_units(messages[start:end]):
+            length = sum(len(self._render(message)) + 2 for message in unit)
+            if size and size + length > room:
+                parts.append((part_start, index))
+                part_start, size = index, 0
+            size += length
+            index += len(unit)
+        if index > part_start:
+            parts.append((part_start, index))
+        return parts
 
     def request(
         self,

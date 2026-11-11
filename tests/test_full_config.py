@@ -148,7 +148,15 @@ class FullConfigTests(unittest.TestCase):
         self.assertNotIn("Agent Harness Collaboration Guide", context.text)
         self.assertLess(len(context.text), 1500)
         self.assertEqual(c.web_search.max_results, 3)
-        self.assertEqual((c.context.high_water_ratio, c.context.low_water_ratio), (0.85, 0.45))
+        self.assertEqual((c.context.high_water_ratio, c.context.low_water_ratio), (0.85, 0.60))
+        # Phase 26: context as working memory.
+        self.assertEqual((c.context.layout, c.context.ledger, c.context.recovery_hints, c.context.calibrate),
+                         ("anchored", True, True, True))
+        self.assertEqual((c.context.stale_tool_output_chars, c.context.min_fitted_output_chars), (1500, 2000))
+        self.assertEqual(c.context.default_window, 32768)
+        self.assertEqual((c.summarization.trigger, c.summarization.chunked, c.summarization.style),
+                         ("threshold", True, "structured"))
+        self.assertTrue(c.orchestrator.resurface_repeated_results)
         self.assertEqual(c.web_search.max_chars_per_result, 800)
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date
         self.assertTrue(c.orchestrator.final_answer_on_last_step)  # the last step answers

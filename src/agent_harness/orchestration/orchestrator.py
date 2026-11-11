@@ -227,6 +227,10 @@ class OrchestratorSettings:
     # by the serial loop, so events are unchanged. Hooks then see calls out of order, which
     # is why it is opt-in. Off: any pre_tool hook turns prefetching off (Phase 8 behavior).
     prefetch_with_hooks: bool = False
+    # Phase 26: a read-only call repeated past max_identical_tool_calls is answered with the
+    # earlier result and a note instead of a refusal (the model often repeats a call because
+    # the result was trimmed from its view). max_refused_repeats still ends a real loop.
+    resurface_repeated_results: bool = False
 
     def __post_init__(self) -> None:
         if self.turn_max_steps is not None and self.turn_max_steps < 1:
@@ -276,6 +280,7 @@ class RewindPlan:
     notes: list[str] = field(default_factory=list)
 
 _MAX_CHECKPOINT_CONFLICTS = 5
+_SUMMARY_RETRY_STEPS = 3
 MAX_USER_MESSAGE_CHARS = 100_000
 
 
@@ -418,8 +423,12 @@ class AgentOrchestrator:
         user_quotas: Callable[[str], Quota | None] | None = None,
         context_policy: ContextPolicy | None = None,
         compaction: CompactionPolicy | None = None,
+        calibrate_estimate: bool = False,
     ) -> None:
         self._models = models
+        # Phase 26: when the provider reports more input tokens than estimated, later views
+        # of the run count characters as that many more tokens (recorded in model_responded).
+        self._calibrate_estimate = calibrate_estimate
         self._tools = tools
         self._store = store
         self._settings = settings or OrchestratorSettings()
@@ -1829,6 +1838,8 @@ class AgentOrchestrator:
     def _build_view(
         self, run: RunRecord, specs: Sequence[ToolSpec], events: Sequence[RunEvent] = ()
     ) -> ContextView:
+        if getattr(self._context, "native_caps", False):
+            return self._native_view(run, specs, events, _overflow_cap(events, run.model_profile))
         if run.context_summary is None:
             # Builders without summary support never see the keyword.
             view = self._context.build(run.messages, specs, model_profile=run.model_profile)
@@ -1843,6 +1854,18 @@ class AgentOrchestrator:
             view = fit_to_tokens(view, specs, max_input_tokens=cap, model_profile=run.model_profile,
                                  policy=self._context_policy)
         return view
+
+    def _native_view(
+        self, run: RunRecord, specs: Sequence[ToolSpec], events: Sequence[RunEvent],
+        cap: int | None,
+    ) -> ContextView:
+        """A view from a builder that applies the cap and the estimate scale itself."""
+
+        build: Any = self._context.build
+        return build(
+            run.messages, specs, model_profile=run.model_profile, summary=run.context_summary,
+            max_input_tokens=cap, scale=_estimate_scale(events, run.model_profile),
+        )
 
     async def _cap_by_server_count(
         self,
@@ -1869,7 +1892,8 @@ class AgentOrchestrator:
         if not isinstance(counted, int) or counted <= limit:
             return False
         cap = self._fitting_cap(view, specs, run.model_profile,
-                                max(1, math.floor(estimated * limit / counted * 0.95)), estimated)
+                                max(1, math.floor(estimated * limit / counted * 0.95)), estimated,
+                                run, events)
         if cap is None:
             return False  # cannot shrink further; the server decides
         await self._checkpoint(
@@ -1892,15 +1916,21 @@ class AgentOrchestrator:
         return True
 
     def _fitting_cap(
-        self, view: ContextView, specs: Sequence[ToolSpec], profile: str, cap: int, estimated: int
+        self, view: ContextView, specs: Sequence[ToolSpec], profile: str, cap: int, estimated: int,
+        run: RunRecord | None = None, events: Sequence[RunEvent] = (),
     ) -> int | None:
         """The smallest cap from ``cap`` up that still holds the pinned messages, tools, and
         newest turn; None when no cap below the current size fits (nothing can be removed)."""
 
+        native = run is not None and getattr(self._context, "native_caps", False)
         while cap < estimated:
             try:
-                fit_to_tokens(view, specs, max_input_tokens=cap, model_profile=profile,
-                              policy=self._context_policy)
+                if native:
+                    assert run is not None
+                    self._native_view(run, specs, events, cap)
+                else:
+                    fit_to_tokens(view, specs, max_input_tokens=cap, model_profile=profile,
+                                  policy=self._context_policy)
                 return cap
             except ContextWindowExceededError:
                 cap = max(cap + 1, math.ceil(cap * 1.25))
@@ -1945,7 +1975,8 @@ class AgentOrchestrator:
         if isinstance(limit, int) and isinstance(requested, int) and 0 < limit < requested:
             # The server said by how much: shrink by that ratio, with a 10% margin.
             factor = min(0.95, max(0.1, limit / requested * 0.9))
-        cap = self._fitting_cap(view, specs, run.model_profile, max(1, math.floor(estimated * factor)), estimated)
+        cap = self._fitting_cap(view, specs, run.model_profile, max(1, math.floor(estimated * factor)),
+                                estimated, run, events)
         if cap is None:
             return False  # nothing left to remove: the same request would fail again
         payload: dict[str, Any] = {
@@ -2008,11 +2039,33 @@ class AgentOrchestrator:
         start, target = span if span is not None else (view.omitted_from, view.omitted_through)
         if start is None or target is None or target <= start:
             return False
+        early = not isinstance(self._compaction, DefaultCompactionPolicy)
         for event in reversed(events):
             if event.type is EventType.CONTEXT_SUMMARIZED:
-                if event.payload.get("ok") is False and event.payload.get("covers") == target:
+                if event.payload.get("ok") is False and (
+                        event.payload.get("covers") == target
+                        # A policy that compacts early has a new target at every step: after
+                        # a failure it waits a few steps instead of calling the model each time.
+                        or (early and run.step_count - event.step < _SUMMARY_RETRY_STEPS)):
                     return False
                 break
+        if getattr(self._summarizer, "chunked", False):
+            profile = self._summarizer.profile or run.model_profile
+            written = False
+            for part_start, part_end in self._summarizer.chunks(
+                    run.messages, start, target, profile=profile):
+                if not await self._summarize_range(run, events, part_start, part_end):
+                    break  # ``covers`` stays at what was really summarized
+                written = True
+            return written
+        return await self._summarize_range(run, events, start, target)
+
+    async def _summarize_range(
+        self, run: RunRecord, events: list[RunEvent], start: int, target: int
+    ) -> bool:
+        """One summary request for ``[start, target)``, continuing the stored summary."""
+
+        assert self._summarizer is not None
         previous = run.context_summary
         profile = self._summarizer.profile or run.model_profile
         payload: dict[str, Any] = {
@@ -2194,6 +2247,10 @@ class AgentOrchestrator:
                 payload["context"]["summarized_messages"] = view.summarized_messages
         if response.metadata.get("guardrail"):
             payload["guardrail"] = response.metadata["guardrail"]
+        ratio = self._calibrated_ratio(run, events, view, response)
+        if ratio is not None:
+            payload["estimate_ratio"] = ratio
+            payload["estimate_profile"] = run.model_profile
         await self._checkpoint(
             run,
             events,
@@ -2206,6 +2263,29 @@ class AgentOrchestrator:
                 created_at=self._clock(),
             ),
         )
+
+    def _calibrated_ratio(
+        self, run: RunRecord, events: Sequence[RunEvent], view: ContextView | None,
+        response: ModelResponse,
+    ) -> float | None:
+        """A larger estimate scale when the provider counted clearly more tokens than estimated.
+
+        The character estimate undercounts code, JSON and file contents. The scale only
+        rises (in steps of 0.05, by at least 0.1 at a time, to at most 3), and it is read
+        back from the events, so a resumed run builds the same views.
+        """
+
+        counted = response.usage.input_tokens
+        if (not self._calibrate_estimate or view is None or not view.estimated_tokens
+                or not view.budget_tokens or not isinstance(counted, int) or counted <= 0):
+            return None
+        current = _estimate_scale(events, run.model_profile)
+        specs = self._specs_for(run)
+        policy = replace(self._context_policy,
+                         chars_per_token=self._context_policy.chars_per_token / current)
+        estimated = view.estimated_tokens + estimate_tokens((), specs, policy)
+        ratio = min(3.0, math.ceil(counted / estimated * current * 20) / 20)
+        return ratio if ratio >= current + 0.1 else None
 
     async def _record_model_request(
         self, run: RunRecord, events: list[RunEvent], attempt: int
@@ -2398,6 +2478,22 @@ class AgentOrchestrator:
                 "with identical arguments",
             )
             return True
+        earlier = self._earlier_result(run, call, specs)
+        if earlier is not None:
+            result = ToolResult(
+                call_id=call.id,
+                name=call.name,
+                status=ToolResultStatus.SUCCESS,
+                output={"repeated_call": True, "identical_calls": prior + 1},
+                model_message=(
+                    f"[Not run again: {call.name} was already called {prior} times with these "
+                    "arguments and nothing has changed since. This is the earlier result; use it "
+                    f"instead of calling again.]\n{earlier}"
+                ),
+            )
+            self._append_tool_message(run, result)
+            await self._record_tool_result(run, events, result, attempt=0)
+            return True
         result = ToolResult(
             call_id=call.id,
             name=call.name,
@@ -2412,6 +2508,28 @@ class AgentOrchestrator:
         self._append_tool_message(run, result)
         await self._record_tool_result(run, events, result, attempt=0)
         return True
+
+    def _earlier_result(self, run: RunRecord, call: ToolCall, specs: dict[str, ToolSpec]) -> str | None:
+        """The stored result of the first identical read-only call, when repeats are answered with it."""
+
+        spec = specs.get(call.name)
+        if (not self._settings.resurface_repeated_results or spec is None
+                or spec.risk is not ToolRisk.READ_ONLY):
+            return None
+        # By position, not by id: some providers reuse call ids such as "call-1" on every step.
+        current = next((i for i in range(len(run.messages) - 1, -1, -1)
+                        if any(offered.id == call.id for offered in run.messages[i].tool_calls)),
+                       len(run.messages))
+        for index in range(current - 1, -1, -1):
+            for earlier in run.messages[index].tool_calls:
+                if earlier.name != call.name or earlier.arguments != call.arguments:
+                    continue
+                for later in run.messages[index + 1:current]:
+                    if later.role is not Role.TOOL:
+                        break
+                    if later.tool_call_id == earlier.id and not later.content.startswith("[Not run again"):
+                        return later.content
+        return None
 
     def _unknown_tool_message(self, run: RunRecord, call: ToolCall, specs: dict[str, ToolSpec]) -> str:
         """Say what exists, so the model can correct the call instead of giving up."""
@@ -4318,6 +4436,19 @@ class AgentOrchestrator:
         if final is None:
             raise ValueError("model stream ended without a final response")
         return final
+
+
+def _estimate_scale(events: Sequence[RunEvent], profile: str) -> float:
+    """How far the token estimate is scaled up on ``profile`` (1.0: not at all)."""
+
+    scales = [
+        float(event.payload["estimate_ratio"])
+        for event in events
+        if event.type is EventType.MODEL_RESPONDED
+        and event.payload.get("estimate_profile") == profile
+        and isinstance(event.payload.get("estimate_ratio"), (int, float))
+    ]
+    return max([1.0, *scales])
 
 
 def _overflow_cap(events: Sequence[RunEvent], profile: str) -> int | None:
