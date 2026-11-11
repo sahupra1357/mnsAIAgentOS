@@ -165,6 +165,17 @@ CREATE TABLE IF NOT EXISTS run_handoffs (
 );
 CREATE INDEX IF NOT EXISTS run_handoffs_tenant_updated ON run_handoffs(tenant, updated_at);
 """
+# Phase 29: a run's messages, one row each, so a checkpoint writes only the rows that changed
+# instead of the whole conversation. ``archived``: 0 for messages, 1 for archived_messages.
+RUN_MESSAGES = """
+CREATE TABLE IF NOT EXISTS run_messages (
+    run_id TEXT NOT NULL,
+    archived INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    body_json TEXT NOT NULL,
+    PRIMARY KEY (run_id, archived, seq)
+) WITHOUT ROWID;
+"""
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline tables", BASELINE),
     (2, "tool catalog", TOOL_CATALOG),
@@ -175,6 +186,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (7, "per-user quotas", USER_QUOTAS),
     (8, "chat conversations", CONVERSATIONS),
     (9, "run handoffs", HANDOFFS),
+    (10, "run messages", RUN_MESSAGES),
 )
 LATEST = MIGRATIONS[-1][0]
 

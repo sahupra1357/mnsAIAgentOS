@@ -144,3 +144,26 @@ Everything above stays network-free:
 - **Migration:** both stores support `export_items` / `import_items` (ids and timestamps
   preserved), which back `agent-harness memory migrate`.
 
+## Phase 29: storage (implemented, opt-in)
+
+`[storage] message_table` and `off_loop`, off in code, on in the root `models.toml`. SQLite only.
+
+- **Message table.** `SQLiteRunStore(message_table=True)` keeps `messages` and
+  `archived_messages` as rows of `run_messages` (migration 10); the snapshot holds the rest and
+  `messages_in_table`. A checkpoint compares the run's messages with what this store last read or
+  wrote *for the version being replaced* and rewrites rows from the first difference on: a step
+  appends one or two rows. A run object from another store (cache miss or version mismatch) is
+  written in full. Runs stored either way are read either way; a store without the option
+  writes the snapshot form again and removes the rows.
+- **Cheap boundaries.** `run_state(run_id) -> (version, status)` and
+  `list_events_since(run_id, known)` are optional store methods. `_refresh`, `is_cancelled` and
+  the between-tool-calls check use them, so a boundary where nothing changed reads one row
+  instead of the run. `get_run` reuses the decoded messages of an unchanged version.
+- **Off the event loop.** `persistence/offloop.py` (`OffLoop`) runs a store's calls on one
+  background thread with its own event loop; the run store, the note store (`wraps=("scoped",)`)
+  and the vector index are wrapped. Non-coroutine methods also run there and block the caller, so
+  they cannot land inside another call's transaction. `app.store` is then an `OffLoop`; reach the
+  SQLite store with `.inner`.
+- **Not done:** the Postgres store still writes the whole snapshot (it already works in a
+  thread); the in-memory store has neither method.
+- Tests: `tests/test_storage.py`, and the store contract runs against both new modes.

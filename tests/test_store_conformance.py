@@ -383,6 +383,28 @@ class SQLiteStoreContract(StoreContract, unittest.TestCase):
             self.store._connection.execute("UPDATE run_events SET step = 3")
 
 
+class SQLiteMessageTableContract(StoreContract, unittest.TestCase):
+    """Phase 29: the same contract with messages in their own table."""
+
+    def make_store(self, clock: Clock) -> Any:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        return SQLiteRunStore(Path(self.directory.name) / "runs.sqlite3", lease_clock=clock,
+                              message_table=True)
+
+
+class SQLiteOffLoopContract(StoreContract, unittest.TestCase):
+    """Phase 29: the same contract with the store's work on a thread of its own."""
+
+    def make_store(self, clock: Clock) -> Any:
+        from agent_harness.persistence.offloop import OffLoop
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        return OffLoop(SQLiteRunStore(Path(self.directory.name) / "runs.sqlite3", lease_clock=clock,
+                                      message_table=True))
+
+
 @unittest.skipUnless(POSTGRES_DSN, "set AGENT_HARNESS_TEST_POSTGRES_DSN to test the Postgres store")
 class PostgresStoreContract(StoreContract, unittest.TestCase):
     def make_store(self, clock: Clock) -> Any:

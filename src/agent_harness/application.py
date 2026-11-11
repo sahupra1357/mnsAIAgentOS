@@ -53,6 +53,7 @@ from .extensions.hooks import CommandHook, HookEvent, HookRunner
 from .knowledge.memory import MEMORY_SEARCH_SPEC, MEMORY_WRITE_SPEC, SQLiteMemoryStore, memory_tool_handlers
 from .knowledge.scoped_memory import MEMORY_GUIDANCE, MemoryService, MemorySettings, scoped_memory_tools
 from .config.project import project_slug
+from .persistence.offloop import OffLoop
 from .extensions.permissions import PermissionPolicy
 from .model_gateway import ModelGateway
 from .orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
@@ -488,7 +489,8 @@ def open_run_store(database: str | PathLike[str], config: HarnessConfig) -> Any:
             return PostgresRunStore(target)
         except RuntimeError as exc:
             raise ConfigError(str(exc)) from exc
-    return SQLiteRunStore(Path(target))
+    store = SQLiteRunStore(Path(target), message_table=config.storage.message_table)
+    return OffLoop(store, name="agent-harness-runs") if config.storage.off_loop else store
 
 
 def memory_postgres_url(config: HarnessConfig, database: str | PathLike[str]) -> str:
@@ -524,6 +526,8 @@ def open_memory_store(
     else:
         notes = _memory_path(config, base_path, database)
         store = SQLiteMemoryStore(notes, namespace=config.memory.namespace)
+        if config.storage.off_loop:
+            store = OffLoop(store, wraps=("scoped",), name="agent-harness-memory")
         vectors = base_path / config.memory.vectors if config.memory.vectors else notes
     if config.memory.search == "keyword":
         return store
@@ -535,7 +539,10 @@ def open_memory_store(
         embed = getattr(client, "embed", None)
         if embed is None:
             raise ConfigError(f"memory.embedding_profile {profile!r}: its adapter has no embeddings endpoint")
-        return SemanticMemoryStore(store, embed, VectorIndex(vectors), model=config.models[profile].model,
+        index: Any = VectorIndex(vectors)
+        if config.storage.off_loop and config.memory.backend == "sqlite":
+            index = OffLoop(index, name="agent-harness-vectors")  # the cosine scan is the slow part
+        return SemanticMemoryStore(store, embed, index, model=config.models[profile].model,
                                    mode=config.memory.search)
     except BaseException:
         store.close_now()

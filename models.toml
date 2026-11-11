@@ -282,6 +282,10 @@ api_key_env = "TAVILY_API_KEY"
 max_results = 3
 max_chars_per_result = 800
 
+[storage]
+message_table = true
+off_loop = true
+
 [memory]
 enabled = true
 namespace = "default"

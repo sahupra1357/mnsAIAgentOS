@@ -1206,9 +1206,20 @@ class AgentOrchestrator:
     async def _refresh(
         self, run: RunRecord, events: list[RunEvent]
     ) -> tuple[RunRecord, list[RunEvent]]:
+        # Phase 29: a store that can say the version alone is asked that first, so a boundary
+        # at which nothing changed (nearly all) does not read and decode the whole run.
+        state_of = getattr(self._store, "run_state", None)
+        if state_of is not None:
+            state = await state_of(run.id)
+            if state is None or state[0] == run.version:
+                return run, events
         stored = await self._store.get_run(run.id)
         if stored is None or stored.version == run.version:
             return run, events
+        since = getattr(self._store, "list_events_since", None)
+        if since is not None:
+            # Events are append-only and ours are a prefix of the stored ones.
+            return stored, [*events, *await since(run.id, len(events))]
         return stored, list(await self._store.list_events(run.id))
 
     async def _advance(self, run: RunRecord, events: list[RunEvent]) -> bool:
@@ -1324,8 +1335,14 @@ class AgentOrchestrator:
         """
 
         if not first:
-            stored = await self._store.get_run(run.id)
-            if stored is not None and stored.version != run.version:
+            state_of = getattr(self._store, "run_state", None)
+            if state_of is not None:
+                state = await state_of(run.id)
+                version = state[0] if state is not None else run.version
+            else:
+                stored = await self._store.get_run(run.id)
+                version = stored.version if stored is not None else run.version
+            if version != run.version:
                 return False  # cancelled, or changed by another writer: the loop reloads it
         reason = self._budget_reason(run)
         if reason is None or reason in ("step limit", "wall-clock limit"):
@@ -1962,6 +1979,10 @@ class AgentOrchestrator:
     async def is_cancelled(self, run_id: str) -> bool:
         """Whether the stored run was cancelled (polled by workers to stop in-flight calls)."""
 
+        state_of = getattr(self._store, "run_state", None)
+        if state_of is not None:
+            state = await state_of(run_id)
+            return state is not None and state[1] is RunStatus.CANCELLED
         run = await self._store.get_run(run_id)
         return run is not None and run.status is RunStatus.CANCELLED
 
@@ -3113,11 +3134,11 @@ class AgentOrchestrator:
             )
             contexts = [c for c in (hook_context, post.context if post else "") if c]
             artifact = await self._append_tool_result(run, result, suffix="\n\n".join(contexts))
-        extra: dict[str, Any] = {"retrying": True} if should_retry else {}
+        recorded: dict[str, Any] = {"retrying": True} if should_retry else {}
         if ran_ahead is not None:
-            extra["prefetch"] = ran_ahead
+            recorded["prefetch"] = ran_ahead
         await self._record_tool_result(run, events, result, attempt=attempt, artifact=artifact,
-                                       extra=extra or None)
+                                       extra=recorded or None)
 
         if should_retry:
             await self._execute_tool(run, events, call)

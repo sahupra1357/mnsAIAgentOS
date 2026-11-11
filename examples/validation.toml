@@ -357,7 +357,7 @@ tests = ["test_api_workers", "test_chat_api", "test_openai_chat", "test_web_ui",
 [[feature]]
 name = "production"
 description = "Migrations, Postgres, tenancy, quotas, secrets, egress, redaction, retention"
-tests = ["test_production_hardening", "test_quota_enforcement", "test_store_conformance"]
+tests = ["test_production_hardening", "test_quota_enforcement", "test_store_conformance", "test_storage"]
 
 [[feature]]
 name = "validation"

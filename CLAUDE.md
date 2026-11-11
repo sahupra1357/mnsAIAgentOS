@@ -193,6 +193,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   `tests/test_symptoms.py`) raises on that. New event types go into `ANNOTATION_EVENTS` or `STATE_EVENTS`
   (`domain.py`). The run-state helpers moved to `orchestration/state.py` and are imported back by name.
   Details: `skills/durable-agent-orchestration/SKILL.md`.
+- **Storage (Phase 29).** With the root config, `app.store` is an `OffLoop` around the SQLite store (`.inner`
+  is the store itself), messages are rows of `run_messages` (migration 10), and the snapshot has
+  `messages_in_table`. Code that reads `snapshot_json` directly gets no messages: go through `get_run`. The delta
+  write trusts its cache only for the version being replaced, so a run object must be saved through the store it
+  was read from to get a delta (anything else is a full rewrite, still correct). Postgres is unchanged. Details:
+  `skills/production-hardening/SKILL.md`.
 - `ModelResolver.resolve` is synchronous (no `await`). `Execution.md` was brought up to date
   with the Phase 1–6 flow and now shows it correctly.
 - **Subagent nesting (6c).** Subagents exist only when `[[agents]]` are defined; the
@@ -916,6 +922,11 @@ additive: off in code, on in the root `models.toml`; old runs keep resuming.
   orchestrator split (FIX-22).
 - **29 Storage** (`phase-29-storage`): messages in an append-only table (delta checkpoints), incremental event
   reads, SQLite off the event loop.
+
+All five phases are implemented (2026-11-10 to 11). Left open, on purpose: the phase is computed by one function
+at each checkpoint, not set at each transition; `[Plan]`/`[Budget]` notes are still stored messages (a status
+block is sent beside them); only the state helpers left `orchestrator.py`; tools are still filtered on mode
+changes; Postgres keeps whole-snapshot checkpoints, and its memory methods are untested without a server.
 
 ## Validation
 

@@ -6,6 +6,7 @@ import asyncio
 import json
 import sqlite3
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
@@ -60,12 +61,21 @@ class SQLiteRunStore:
     advance a given snapshot from a particular version.
     """
 
-    def __init__(self, path: str | Path, *, lease_clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, path: str | Path, *, lease_clock: Callable[[], float] = time.time,
+                 message_table: bool = False) -> None:
         self._lease_clock = lease_clock
         self.path = str(path)
         if not self.path:
             raise ValueError("SQLite path must not be empty")
-        self._connection = sqlite3.connect(self.path, isolation_level=None)
+        # Phase 29. message_table: messages go to the run_messages table, one row each, and a
+        # checkpoint writes only the rows that changed (the snapshot keeps everything else).
+        # Runs stored either way are read either way. The cache holds, per run, the messages
+        # as last read or written here and the version they belong to.
+        self._message_table = message_table
+        self._message_cache: OrderedDict[tuple[str, int], tuple[int, list[Message]]] = OrderedDict()
+        self._table_runs: set[str] = set()  # runs read here whose messages were in the table
+        # check_same_thread off: an OffLoopStore runs every call on its own thread.
+        self._connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute("PRAGMA journal_mode = WAL")
@@ -105,7 +115,7 @@ class SQLiteRunStore:
         if run.version != 0:
             raise ValueError("a new run must have version 0")
         stored_event = _with_event_id(event)
-        snapshot_json = _encode_run(run)
+        snapshot_json = self._snapshot(run)
         async with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
@@ -119,6 +129,7 @@ class SQLiteRunStore:
                      run.created_at.isoformat(), run.updated_at.isoformat(),
                      run.consumed_tokens, run.consumed_cost_usd, run.parent_run_id),
                 )
+                self._write_messages(run, expected_version=None, new_version=run.version)
                 self._insert_event(stored_event)
                 if _enqueue:
                     self._connection.execute(
@@ -142,7 +153,109 @@ class SQLiteRunStore:
             row = self._connection.execute(
                 "SELECT snapshot_json FROM runs WHERE id = ?", (run_id,)
             ).fetchone()
-        return _decode_run(row["snapshot_json"]) if row is not None else None
+            return self._load(row["snapshot_json"]) if row is not None else None
+
+    async def run_state(self, run_id: str) -> tuple[int, RunStatus] | None:
+        """The stored version and status without reading the conversation (Phase 29): what the
+        loop needs to notice a cancel or another writer at each boundary."""
+
+        async with self._lock:
+            row = self._connection.execute(
+                "SELECT version, status FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return (int(row["version"]), RunStatus(row["status"])) if row is not None else None
+
+    async def list_events_since(self, run_id: str, known: int) -> Sequence[RunEvent]:
+        """The run's events after the first ``known`` ones (events are append-only)."""
+
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT event_id, run_id, type, payload_json, step, created_at
+                FROM run_events WHERE run_id = ? ORDER BY sequence LIMIT -1 OFFSET ?
+                """,
+                (run_id, max(0, known)),
+            ).fetchall()
+        return tuple(_decode_event(row) for row in rows)
+
+    # -- messages in their own table (Phase 29) ----------------------------------------
+
+    def _snapshot(self, run: RunRecord) -> str:
+        if not self._message_table:
+            return _encode_run(run)
+        data = asdict(replace(run, messages=[], archived_messages=[]))
+        data["messages_in_table"] = True
+        return _json_dumps(data)
+
+    def _write_messages(self, run: RunRecord, *, expected_version: int | None, new_version: int) -> None:
+        """Inside the caller's transaction: bring run_messages to ``run``'s messages.
+
+        Rows are compared with what this store last read or wrote for the version being
+        replaced; only rows from the first difference on are rewritten (a normal step appends
+        one or two). Without that knowledge (another store wrote the version) all are.
+        """
+
+        for archived, messages in ((0, run.messages), (1, run.archived_messages)):
+            key = (run.id, archived)
+            cached = self._message_cache.pop(key, None)
+            if not self._message_table:
+                # The snapshot holds the messages again; rows of a run that was stored in the
+                # table (seen when it was read) would be stale.
+                if run.id in self._table_runs:
+                    self._connection.execute(
+                        "DELETE FROM run_messages WHERE run_id = ? AND archived = ?", key)
+                    if archived:
+                        self._table_runs.discard(run.id)
+                continue
+            start = 0
+            if cached is not None and cached[0] == expected_version:
+                known = cached[1]
+                limit = min(len(known), len(messages))
+                while start < limit and (known[start] is messages[start] or known[start] == messages[start]):
+                    start += 1
+                if start < len(known):
+                    self._connection.execute(
+                        "DELETE FROM run_messages WHERE run_id = ? AND archived = ? AND seq >= ?",
+                        (run.id, archived, start))
+            elif expected_version is not None:
+                self._connection.execute(
+                    "DELETE FROM run_messages WHERE run_id = ? AND archived = ?", key)
+            self._connection.executemany(
+                "INSERT INTO run_messages(run_id, archived, seq, body_json) VALUES (?, ?, ?, ?)",
+                [(run.id, archived, index, _json_dumps(asdict(messages[index])))
+                 for index in range(start, len(messages))])
+            self._remember(key, new_version, messages)
+
+    def _remember(self, key: tuple[str, int], version: int, messages: Sequence[Message]) -> None:
+        self._message_cache[key] = (version, list(messages))
+        while len(self._message_cache) > _MESSAGE_CACHE_RUNS * 2:
+            self._message_cache.popitem(last=False)
+
+    def _forget(self, run_id: str) -> None:
+        self._message_cache.pop((run_id, 0), None)
+        self._message_cache.pop((run_id, 1), None)
+
+    def _load(self, snapshot_json: str) -> RunRecord:
+        """A run from its snapshot, with its messages from the table when they are there
+        (the lock is held). Messages already decoded for this version are reused."""
+
+        data = json.loads(snapshot_json)
+        if data.get("messages_in_table"):
+            self._table_runs.add(data["id"])
+            version = int(data.get("version", 0))
+            for archived, field_name in ((0, "messages"), (1, "archived_messages")):
+                key = (data["id"], archived)
+                cached = self._message_cache.get(key)
+                if cached is not None and cached[0] == version:
+                    self._message_cache.move_to_end(key)
+                    data[field_name] = list(cached[1])
+                    continue
+                rows = self._connection.execute(
+                    "SELECT body_json FROM run_messages WHERE run_id = ? AND archived = ? ORDER BY seq",
+                    key).fetchall()
+                decoded = _decode_messages([json.loads(row["body_json"]) for row in rows])
+                self._remember(key, version, decoded)
+                data[field_name] = list(decoded)
+        return _decode_run_data(data)
 
     async def save_checkpoint(
         self,
@@ -161,7 +274,7 @@ class SQLiteRunStore:
         new_version = expected_version + 1
         updated_at = utc_now()
         snapshot = replace(run, version=new_version, updated_at=updated_at)
-        snapshot_json = _encode_run(snapshot)
+        snapshot_json = self._snapshot(snapshot)
 
         async with self._lock:
             try:
@@ -181,12 +294,14 @@ class SQLiteRunStore:
                         "SELECT version FROM runs WHERE id = ?", (run.id,)
                     ).fetchone()
                     self._connection.execute("ROLLBACK")
+                    self._forget(run.id)  # another writer changed the run: reread its messages
                     if row is None:
                         raise KeyError(f"unknown run: {run.id}")
                     raise ConcurrencyError(
                         f"run {run.id!r} is version {row['version']}, "
                         f"expected {expected_version}"
                     )
+                self._write_messages(run, expected_version=expected_version, new_version=new_version)
                 for event in stored_events:
                     self._insert_event(event)
                 self._connection.execute("COMMIT")
@@ -194,9 +309,11 @@ class SQLiteRunStore:
                 raise
             except sqlite3.IntegrityError as exc:
                 self._rollback()
+                self._forget(run.id)
                 raise ValueError("event already exists") from exc
             except BaseException:
                 self._rollback()
+                self._forget(run.id)
                 raise
 
         run.version = new_version
@@ -523,7 +640,7 @@ class SQLiteRunStore:
                 f"SELECT snapshot_json FROM runs {where} ORDER BY created_at DESC, id DESC LIMIT ?",
                 (*params, query.limit + 1),
             ).fetchall()
-        page = [summarize_run(_decode_run(row["snapshot_json"])) for row in rows]
+            page = [summarize_run(self._load(row["snapshot_json"])) for row in rows]
         more = len(page) > query.limit
         page = page[: query.limit]
         cursor = encode_cursor(page[-1].created_at, page[-1].id) if more else None
@@ -553,8 +670,9 @@ class SQLiteRunStore:
                 self._connection.execute("BEGIN IMMEDIATE")
                 self._connection.execute("INSERT INTO purge_guard(holder) VALUES ('gc')")
                 for run_id in ids:
+                    self._forget(run_id)
                     for table in ("run_events", "run_queue", "steer_messages", "chat_conversations",
-                                  "run_handoffs"):
+                                  "run_handoffs", "run_messages"):
                         self._connection.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
                     self._connection.execute(
                         "DELETE FROM tool_results WHERE idempotency_key LIKE ? ESCAPE '\\'",
@@ -692,9 +810,18 @@ def _encode_run(run: RunRecord) -> str:
     return _json_dumps(asdict(run))
 
 
+_MESSAGE_CACHE_RUNS = 64
+
+
 def _decode_run(value: str) -> RunRecord:
-    data = json.loads(value)
-    messages = _decode_messages(data["messages"])
+    return _decode_run_data(json.loads(value))
+
+
+def _decode_run_data(data: dict[str, Any]) -> RunRecord:
+    """A run from its decoded snapshot; ``messages`` may already be Message objects (from the
+    run_messages table) instead of their JSON form."""
+
+    messages = _messages(data["messages"])
     budget_data = data.get("budget", {})
     return RunRecord(
         id=data["id"],
@@ -728,7 +855,7 @@ def _decode_run(value: str) -> RunRecord:
             TodoItem(item["id"], item["content"], TodoStatus(item["status"]))
             for item in data.get("todos", ())
         ),
-        archived_messages=_decode_messages(data.get("archived_messages", ())),
+        archived_messages=_messages(data.get("archived_messages", ())),
         loaded_tools=tuple(data.get("loaded_tools", ())),
         planning=bool(data.get("planning", False)),
         tenant=str(data.get("tenant", "default")),
@@ -804,6 +931,11 @@ def _catalog_entry(row: sqlite3.Row) -> ToolCatalogEntry:
         first_seen=datetime.fromisoformat(row["first_seen"]),
         last_seen=datetime.fromisoformat(row["last_seen"]),
     )
+
+
+def _messages(items: Any) -> list[Message]:
+    items = list(items)
+    return items if items and isinstance(items[0], Message) else _decode_messages(items)
 
 
 def _decode_messages(items: Any) -> list[Message]:

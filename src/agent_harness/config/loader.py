@@ -754,6 +754,13 @@ class StorageConfig:
     """Where runs are stored. ``url_env`` names an env var holding a postgresql:// URL."""
 
     url_env: str = ""
+    # Phase 29 (SQLite; both off in code, on in the root models.toml).
+    # message_table: a run's messages are rows of run_messages and a checkpoint writes only
+    # the rows that changed, instead of rewriting the whole conversation in the snapshot.
+    message_table: bool = False
+    # off_loop: the run store, the note store and the vector index do their database work on
+    # a thread of their own, so a checkpoint or a search does not stop every other run.
+    off_loop: bool = False
 
 
 @dataclass(frozen=True, slots=True)
