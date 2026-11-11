@@ -876,6 +876,28 @@ Tests: `tests/test_orchestrator_seams.py`. Also fixed ruff/mypy errors that were
 3. `agent-harness init` (project settings template) and `init --global` (home config link).
 Tests: `tests/test_run_anywhere.py`.
 
+**Phases 25–29 – Loop, context and memory repair** [durable-agent-orchestration, context-management, harness-operations] — approved 2026-11-10; stacked branches, one per phase.
+From a static review (`Analysys.md`, `docs/audit/`): the loop derives its state from message shapes, context is
+dropped before it is summarized, and memory is never recalled or saved unless the model thinks of it. Every fix is
+additive: off in code, on in the root `models.toml`; old runs keep resuming.
+- **25 Symptom tests** (`phase-25-symptom-scenarios`): `tests/test_symptoms.py` runs the root config with a scripted
+  model, one test per symptom (latest question re-answered as the first, forgotten file, repeated call refused,
+  amnesiac new chat, orphan tool calls after budget exhaustion). Each starts as an expected failure and loses the
+  marker in the phase that fixes it.
+- **26 Context as working memory** (`phase-26-working-context`): every profile bounded (`[context] default_window`),
+  an estimate calibrated from reported usage, the `anchored` layout (summary as its own block, latest request
+  pinned in place), age-based shrinking of old tool output, compaction before omission
+  (`ThresholdCompactionPolicy`), a harness-written ledger, repeated reads answered from the earlier result.
+- **27 Memory** (`phase-27-memory`): one global store with `user` and `project:<slug>` scopes (plus tenant and end
+  user), note lifecycle (update, forget, list, provenance; FIX-10), automatic recall at run start and on each new
+  message, automatic save at run end, notes returned as stored data with taint carried over.
+- **28 Run state machine** (`phase-28-run-phase`): a persisted `RunRecord.phase`, events classified in one table,
+  one guard pass per transition, orphan tool calls closed, steer and cancel observed mid-phase, even budget
+  checks, a faithful prefetch record, one state block instead of stored `[Plan]`/`[Budget]` notes, then the
+  orchestrator split (FIX-22).
+- **29 Storage** (`phase-29-storage`): messages in an append-only table (delta checkpoints), incremental event
+  reads, SQLite off the event loop.
+
 ## Validation
 
 `docs/VALIDATION.md` describes six stages: static, unit, scenarios, smoke, benchmarks,
