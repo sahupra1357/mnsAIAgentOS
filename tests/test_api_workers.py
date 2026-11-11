@@ -273,7 +273,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         await store.enqueue(run.id)
 
         class Broken:
-            async def run(self, run_id: str):
+            async def run(self, run_id: str, **_: object):
                 raise RuntimeError("store unavailable")
 
         worker = Worker(Broken(), store, worker_id="w", max_unexpected_failures=3)  # type: ignore[arg-type]

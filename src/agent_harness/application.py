@@ -274,7 +274,7 @@ def build_application(
                 tool_runtime.register(PREVIOUS_RUNS_SPEC, previous_runs_tool(store))
         catalog, mcp_sources, sandbox_sources = _load_tool_sources(config, tool_runtime, store, base_path)
         system_context = None
-        memory_sections = (MEMORY_GUIDANCE,) if memory_service is not None and config.memory.guidance else ()
+        memory_sections = (MEMORY_GUIDANCE,) if memory_service is not None else ()
         if config.instructions.enabled or skills or memory_sections:
             subdirectory_filenames: tuple[str, ...] = ()
             if config.instructions.enabled and config.instructions.subdirectories:
@@ -351,13 +351,9 @@ def build_application(
                 else None
             ),
             summarizer=summarizer,
-            compaction=(
-                ThresholdCompactionPolicy(context_policy,
-                                          trigger_ratio=config.summarization.trigger_ratio,
-                                          keep_ratio=config.summarization.keep_ratio)
-                if config.summarization.trigger == "threshold" else None
-            ),
-            calibrate_estimate=config.context.calibrate,
+            compaction=ThresholdCompactionPolicy(context_policy,
+                                                 trigger_ratio=config.summarization.trigger_ratio,
+                                                 keep_ratio=config.summarization.keep_ratio),
             memory=memory_service,
             tool_loading=_tool_loading(config, tool_runtime),
         planning=_planning(config),
@@ -459,11 +455,7 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         max_answer_continuations=section.max_answer_continuations,
         max_cut_off_retries=section.max_cut_off_retries,
         prefetch_with_hooks=section.prefetch_with_hooks,
-        resurface_repeated_results=section.resurface_repeated_results,
-        phase_dispatch=section.phase_dispatch,
         verify_phase=section.verify_phase,
-        close_orphan_tool_calls=section.close_orphan_tool_calls,
-        mid_phase_checks=section.mid_phase_checks,
         max_tool_calls_per_run=section.max_tool_calls_per_run or None,
         cancel_poll_seconds=section.cancel_poll_seconds or None,
         state_block=section.state_block,
@@ -489,8 +481,8 @@ def open_run_store(database: str | PathLike[str], config: HarnessConfig) -> Any:
             return PostgresRunStore(target)
         except RuntimeError as exc:
             raise ConfigError(str(exc)) from exc
-    store = SQLiteRunStore(Path(target), message_table=config.storage.message_table)
-    return OffLoop(store, name="agent-harness-runs") if config.storage.off_loop else store
+    # Off the event loop: a checkpoint or a search must not stop every other run.
+    return OffLoop(SQLiteRunStore(Path(target)), name="agent-harness-runs")
 
 
 def memory_postgres_url(config: HarnessConfig, database: str | PathLike[str]) -> str:
@@ -525,9 +517,8 @@ def open_memory_store(
         vectors = base_path / (config.memory.vectors or "memory-vectors.sqlite3")
     else:
         notes = _memory_path(config, base_path, database)
-        store = SQLiteMemoryStore(notes, namespace=config.memory.namespace)
-        if config.storage.off_loop:
-            store = OffLoop(store, wraps=("scoped",), name="agent-harness-memory")
+        store = OffLoop(SQLiteMemoryStore(notes, namespace=config.memory.namespace),
+                        wraps=("scoped",), name="agent-harness-memory")
         vectors = base_path / config.memory.vectors if config.memory.vectors else notes
     if config.memory.search == "keyword":
         return store
@@ -540,7 +531,7 @@ def open_memory_store(
         if embed is None:
             raise ConfigError(f"memory.embedding_profile {profile!r}: its adapter has no embeddings endpoint")
         index: Any = VectorIndex(vectors)
-        if config.storage.off_loop and config.memory.backend == "sqlite":
+        if config.memory.backend == "sqlite":
             index = OffLoop(index, name="agent-harness-vectors")  # the cosine scan is the slow part
         return SemanticMemoryStore(store, embed, index, model=config.models[profile].model,
                                    mode=config.memory.search)
@@ -616,7 +607,7 @@ def memory_service_from_config(config: HarnessConfig, store: Any, project: Path 
     """The scoped memory service for ``[memory] scopes = true`` (None otherwise)."""
 
     section = config.memory
-    if store is None or not section.scopes:
+    if store is None:
         return None
     profile = None
     if section.auto_save_profile:
@@ -795,7 +786,6 @@ def _summarizer(
             input_chars=None if section.max_input_chars else summary_input_chars(limits, policy),
             max_message_chars=section.max_message_chars,
             instructions=SUMMARY_STYLES[section.style],
-            chunked=section.chunked,
         )
     except ValueError as exc:
         raise ConfigError(f"summarization: {exc}") from exc

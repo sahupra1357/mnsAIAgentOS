@@ -83,22 +83,23 @@ refusals are per reply. Side-effect tools are never merged.
 
 ## Phase 28: run phase and loop guards (implemented, opt-in)
 
-Since Phase 30 the fixes are on in code: `phase_dispatch`, `close_orphan_tool_calls`, `mid_phase_checks`
-(and `resurface_repeated_results` from Phase 26); `False` is an opt-out. The features stay off in code and on
-in the root `models.toml`: `state_block`, `cancel_poll_seconds`, `max_tool_calls_per_run`; `verify_phase` is
-for tests. CLAUDE.md, "Fix or feature", says how to classify a new option.
+Since Phase 31 the fixes have no switch: the loop always uses the stored phase, closes unrun tool calls on a
+budget stop, checks cancel, steer and budgets between tool calls, and answers a repeated read with the earlier
+result. `run()` watches for a cancel itself (`cancel_poll_seconds`, 2.0; workers pass `watch_cancel=False`).
+Options that remain: `state_block` (root config), `max_tool_calls_per_run`, and `verify_phase` for tests.
+CLAUDE.md, "Fix or feature", says when something may be an option at all.
 
 - **Phase.** `RunRecord.phase` is written by `_checkpoint` from `derive_phase(run, events)`
   (`orchestration/state.py`): `queued`, `model`, `model_request`, `tools`, `answer`,
-  `awaiting_input`, `done`. With `phase_dispatch`, `_advance` picks its branch from the stored
+  `awaiting_input`, `done`. `_advance` picks its branch from the stored
   phase; an empty phase (older runs) falls back to the predicates. `verify_phase` raises when the
   stored and derived phase differ: it catches a code path that changes `run.messages` without a
   checkpoint. Scenario runs check the final phase.
 - **Events.** `ANNOTATION_EVENTS` and `STATE_EVENTS` in `domain.py` list every `EventType`; a new
   type must be added to one (a test fails otherwise).
-- **Orphans.** `close_orphan_tool_calls`: a budget stop answers each unrun call ("Not run: ...",
+- **Orphans.** A budget stop answers each unrun call ("Not run: ...",
   `tool_responded` with `not_run`), and `continue_run` does the same for calls an older run left.
-- **Between tool calls.** `mid_phase_checks`: reload when the stored version changed (cancel),
+- **Between tool calls.** Reload when the stored version changed (cancel),
   stop for the token, cost or `max_tool_calls_per_run` budget, and when a steer is queued answer
   the remaining calls "not run" so the model reads the steer next.
 - **Cancel.** `cancel_poll_seconds`: `run()` polls the stored status and cancels the task in

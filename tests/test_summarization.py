@@ -14,6 +14,7 @@ from unittest import mock
 from agent_harness.application import build_application
 from agent_harness.config.loader import ConfigError, load_config
 from agent_harness.orchestration.context import (
+    STATE_HEADER,
     BudgetedContextBuilder,
     ContextLimits,
     ContextPolicy,
@@ -71,9 +72,7 @@ def history(turns: int) -> list[Message]:
 def builder(window: int = 2000, reserve: int = 200) -> BudgetedContextBuilder:
     return BudgetedContextBuilder(
         {"small": ContextLimits(context_window=window, output_reserve_tokens=reserve)},
-        # The "legacy" layout (an opt-out since Phase 30; "anchored" is tested in
-        # tests/test_working_context.py).
-        policy=ContextPolicy(layout="legacy", recovery_hints=False, ledger=False),
+        policy=ContextPolicy(),
     )
 
 
@@ -144,12 +143,15 @@ def scripted_run(turns: int) -> list[ModelResponse]:
 
 class BuilderWithSummaryTests(unittest.TestCase):
     def test_summary_replaces_covered_range_in_first_user_message(self) -> None:
+        # (The name is from the old layout: the summary is now its own message after the
+        # first user message, which is sent as stored.)
         messages = history(3)
         summary = ContextSummary(covers=4, content="Looked up q0 and q1.")
         view = builder(window=20_000).build(messages, (LOOKUP,), model_profile="small", summary=summary)
-        self.assertEqual(view.messages[0], SYSTEM)
-        self.assertIn("[Summary of 2 earlier messages]\nLooked up q0 and q1.", view.messages[1].content)
-        self.assertEqual(view.messages[2:], tuple(messages[4:]))
+        self.assertEqual(view.messages[:2], (SYSTEM, TASK))
+        self.assertTrue(view.messages[2].content.startswith(STATE_HEADER))
+        self.assertIn("[Summary of 2 earlier messages]\nLooked up q0 and q1.", view.messages[2].content)
+        self.assertEqual(view.messages[3:], tuple(messages[4:]))
         self.assertEqual(view.summarized_messages, 2)
         self.assertEqual(view.omitted_messages, 0)
         self.assertIsNone(view.omitted_through)
@@ -167,7 +169,7 @@ class BuilderWithSummaryTests(unittest.TestCase):
         summary = ContextSummary(covers=view.omitted_through, content="Earlier lookups.")
         with_summary = builder().build(messages, (LOOKUP,), model_profile="small", summary=summary)
         self.assertEqual(with_summary.summarized_messages, view.omitted_messages)
-        self.assertEqual(with_summary.messages[2:], view.messages[2:])
+        self.assertEqual(with_summary.messages[3:], view.messages[3:])
 
     def test_unusable_summaries_are_ignored(self) -> None:
         messages = history(3)
@@ -198,7 +200,6 @@ class BuilderWithSummaryTests(unittest.TestCase):
             ContextSummary(covers=2, content="  ")
 
 
-LATEST = "[Latest user message - answer this one]\n"
 QUESTION = Message(role=Role.USER, content="agent-harness approve RUN_ID --allow")
 NOTE = Message(role=Role.USER, content="[Plan] This task is taking many steps.")
 
@@ -218,19 +219,20 @@ class LatestRequestTests(unittest.TestCase):
         messages = two_turns()
         summary = ContextSummary(covers=8, content="The user then provided a command.")
         view = builder(window=20_000).build(messages, (LOOKUP,), model_profile="small", summary=summary)
-        head = view.messages[1].content
-        self.assertTrue(head.startswith(TASK.content))
-        self.assertIn("The user then provided a command." + "\n\n" + LATEST + QUESTION.content, head)
-        self.assertNotIn(NOTE.content, head)  # an orchestrator note is not the user's request
-        self.assertEqual(view.messages[2:], tuple(messages[8:]))
+        self.assertEqual(view.messages[1], TASK)
+        state = view.messages[2].content
+        self.assertIn("The user then provided a command.", state)
+        self.assertNotIn(NOTE.content, state)  # an orchestrator note is not the user's request
+        self.assertEqual(view.messages[3], QUESTION)  # carried in the user's own words
+        self.assertEqual(view.messages[4:], tuple(messages[8:]))
         self.assertEqual(sum(QUESTION.content in m.content for m in view.messages), 1)
 
     def test_newest_request_still_in_view_is_not_repeated(self) -> None:
         messages = two_turns()
         summary = ContextSummary(covers=5, content="Answered the first request.")
         view = builder(window=20_000).build(messages, (LOOKUP,), model_profile="small", summary=summary)
-        self.assertNotIn(LATEST, view.messages[1].content)
-        self.assertEqual(view.messages[2:], tuple(messages[5:]))
+        self.assertEqual(view.messages[3:], tuple(messages[5:]))
+        self.assertEqual(sum(m == QUESTION for m in view.messages), 1)
 
     def test_omitted_newest_request_is_kept_in_the_notice(self) -> None:
         messages = [SYSTEM, TASK, Message(role=Role.ASSISTANT, content="First answer."), QUESTION]
@@ -238,9 +240,9 @@ class LatestRequestTests(unittest.TestCase):
             messages.extend(tool_turn(index))
         view = builder().build(messages, (LOOKUP,), model_profile="small")
         self.assertGreater(view.omitted_messages, 2)  # the question (index 3) was cut
-        head = view.messages[1].content
-        self.assertIn("earlier messages were omitted", head)
-        self.assertIn(LATEST + QUESTION.content, head)
+        self.assertEqual(view.messages[1], TASK)
+        self.assertIn("earlier messages were omitted", view.messages[2].content)
+        self.assertEqual(view.messages[3], QUESTION)
         self.assertLessEqual(view.estimated_tokens, 2000 - 200)
 
     def test_latest_request_index(self) -> None:
@@ -351,7 +353,8 @@ class OrchestratorSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.context_summary.content.startswith(f"SUMMARY-{len(model.summary_requests)}"))
         last = model.requests[-1].messages
         self.assertEqual(last[0], SYSTEM)
-        self.assertIn(finished.context_summary.content, last[1].content)
+        self.assertEqual(last[1], TASK)
+        self.assertIn(finished.context_summary.content, last[2].content)
         assert_tool_pairs_intact(self, last)
         # The full history is still stored.
         self.assertEqual(len(finished.messages), 2 + 15 * 2 + 1)
@@ -383,8 +386,8 @@ class OrchestratorSummaryTests(unittest.IsolatedAsyncioTestCase):
         assert finished.context_summary is not None
         self.assertGreater(finished.context_summary.covers, asked)  # the question was summarized
         last = model.requests[-1].messages
-        self.assertIn(LATEST + question, last[1].content)  # ...and the model still sees it
-        self.assertTrue(last[1].content.startswith(TASK.content))
+        self.assertEqual(last[1], TASK)
+        self.assertEqual(last[3].content, question)  # ...and the model still sees it, as its own message
 
     async def test_affinity_key_is_the_run_and_its_summary_point(self) -> None:
         model = RoutingModel(scripted_run(15))
@@ -443,7 +446,7 @@ class OrchestratorSummaryTests(unittest.IsolatedAsyncioTestCase):
         # One attempt per distinct trim point, not one per step.
         self.assertEqual(len({e.payload["covers"] for e in failed}), len(failed))
         self.assertLess(len(model.summary_requests), len(model.requests) - 1)
-        self.assertIn("earlier messages were omitted", model.requests[-1].messages[1].content)
+        self.assertIn("earlier messages were omitted", model.requests[-1].messages[2].content)
 
     async def test_pre_compact_hook_can_veto(self) -> None:
         seen: list[str] = []

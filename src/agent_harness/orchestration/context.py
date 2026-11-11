@@ -71,28 +71,21 @@ class ContextPolicy:
     chars_per_token: float = 3.5
     message_overhead_tokens: int = 8
     max_tool_output_chars: int | None = 16_000
-    # Phase 26. "legacy": the summary and the omission note are appended to the first user
-    # message. "anchored": that message is never changed; the summary, the note and the
-    # ledger are one message of their own after it, and the user's latest request, when
-    # the summary or a trim covers it, follows as a message of its own.
-    # "anchored", recovery_hints and ledger are fixes: on in code since Phase 30.
-    layout: str = "anchored"
+    # The view's layout (Phase 26; the only one since Phase 31): the first user message is
+    # never changed; the summary, the omission note and the ledger of tool calls no longer
+    # shown are one message of their own after it, and the user's latest request, when the
+    # summary or a trim covers it, follows as a message of its own. A truncation marker
+    # says how to get the rest (the artifact, or calling again).
     # Before whole turns are dropped, tool outputs of turns older than the newest
     # ``keep_recent_units`` are shortened to this many characters (None: off).
     stale_tool_output_chars: int | None = None
     keep_recent_units: int = 4
     # The newest turn's tool outputs are never shortened below this.
     min_fitted_output_chars: int = 200
-    # Say in a truncation marker how to get the rest (the artifact, or calling again).
-    recovery_hints: bool = True
-    # A harness-written list of the tool calls that are no longer shown (anchored layout).
-    ledger: bool = True
     ledger_max_entries: int = 40
     ledger_max_chars: int = 4_000
 
     def __post_init__(self) -> None:
-        if self.layout not in {"legacy", "anchored"}:
-            raise ValueError("layout must be 'legacy' or 'anchored'")
         if self.stale_tool_output_chars is not None and self.stale_tool_output_chars < 200:
             raise ValueError("stale_tool_output_chars must be at least 200")
         if self.keep_recent_units < 1:
@@ -163,8 +156,8 @@ class BudgetedContextBuilder:
     ) -> ContextView:
         """``max_input_tokens`` (a cap a provider overflow set) and ``scale`` (how far the
         estimate is under the provider's count) are passed by the orchestrator to builders
-        with ``native_caps`` (the anchored layout); the legacy layout is capped afterwards
-        with :func:`fit_to_tokens`, as before."""
+        with ``native_caps`` (this one); other builders' views are capped afterwards with
+        :func:`fit_to_tokens`."""
 
         limits = self._lookup(model_profile)
         if limits is None:
@@ -184,93 +177,14 @@ class BudgetedContextBuilder:
             trimmed_outputs += shortened is not message
             prepared.append(shortened)
 
-        if self._policy.layout == "anchored":
-            return self._build_anchored(prepared, tools, limits, summary, trimmed_outputs,
-                                        model_profile, max_input_tokens)
-
-        head_end = _pinned_head_end(prepared)
-        head = prepared[:head_end]
-        if summary is not None and (not head or not _summary_applies(summary, prepared, head_end)):
-            summary = None  # e.g. the history was rewound behind it
-        rest_start = summary.covers if summary is not None else head_end
-        units = _group_units(prepared[rest_start:])
-        summarized = rest_start - head_end
-        latest = latest_request_index(prepared, start=head_end)
-
-        budget = limits.context_window - limits.output_reserve_tokens - self._tools_tokens(tools)
-        if summary is not None:
-            block = f"\n\n[Summary of {summarized} earlier messages]\n{summary.content.strip()}"
-            if latest is not None and latest < rest_start:
-                # The newest request is inside the summary: keep its words, or the model
-                # answers the first (pinned) message again. Seen 2026-10-10 in a /ui chat.
-                block += _latest_request_block(prepared[latest])
-                latest = None
-            head[-1] = replace(head[-1], content=head[-1].content + block)
-        reasoning = limits.counts_reasoning
-        head_tokens = sum(self._message_tokens(message, reasoning) for message in head)
-        if budget <= 0 or head_tokens > budget:
-            raise ContextWindowExceededError(
-                f"context window {limits.context_window} cannot hold the output reserve, "
-                f"tool definitions, and pinned instructions{' and summary' if summary else ''} "
-                f"for profile {model_profile!r}"
-            )
-        high_water = math.floor(budget * self._policy.high_water_ratio)
-        low_water = math.floor(budget * self._policy.low_water_ratio)
-
-        unit_tokens = [sum(self._message_tokens(m, reasoning) for m in unit) for unit in units]
-        total = head_tokens
-        cut = 0
-        for index, tokens in enumerate(unit_tokens):
-            total += tokens
-            if total > high_water:
-                # Never omit the newest unit: the model must see the latest turn.
-                while cut < index and total > low_water:
-                    total -= unit_tokens[cut]
-                    cut += 1
-
-        omitted = sum(len(unit) for unit in units[:cut])
-        if omitted and head:
-            notice = (
-                f"\n\n[Context note: {omitted} earlier messages were omitted "
-                "to fit the model's context window.]"
-            )
-            if latest is not None and latest < rest_start + omitted:
-                notice += _latest_request_block(prepared[latest])  # omitted too: keep it
-            head[-1] = replace(head[-1], content=head[-1].content + notice)
-            total += self._text_tokens(notice)
-        if total > budget and units:
-            # Only the newest unit is left (the loop above omits every older one first).
-            # Its tool outputs are shortened together, in proportion to their size,
-            # instead of failing the step.
-            newest, fitted_outputs = self._fit_newest_unit(units[-1], total - budget, reasoning)
-            if fitted_outputs:
-                units[-1] = newest
-                trimmed_outputs += fitted_outputs
-                total = head_tokens + sum(self._message_tokens(m, reasoning) for m in newest)
-                if omitted and head:
-                    total += self._text_tokens(notice)
-        if total > budget:
-            raise ContextWindowExceededError(
-                f"estimated {total} tokens exceed the {budget}-token input budget for "
-                f"profile {model_profile!r} even after omitting older turns"
-            )
-
-        kept = [message for unit in units[cut:] for message in unit]
-        return ContextView(
-            messages=tuple(head + kept),
-            estimated_tokens=total,
-            omitted_messages=omitted,
-            trimmed_tool_outputs=trimmed_outputs,
-            summarized_messages=summarized,
-            omitted_from=rest_start if omitted else None,
-            omitted_through=rest_start + omitted if omitted else None,
-        )
+        return self._build_anchored(prepared, tools, limits, summary, trimmed_outputs,
+                                    model_profile, max_input_tokens)
 
     @property
     def native_caps(self) -> bool:
-        """Whether ``build`` takes ``max_input_tokens`` and ``scale`` itself (anchored layout)."""
+        """Whether ``build`` takes ``max_input_tokens`` and ``scale`` itself."""
 
-        return self._policy.layout == "anchored"
+        return True
 
     @property
     def policy(self) -> ContextPolicy:
@@ -368,7 +282,7 @@ class BudgetedContextBuilder:
                              "to fit the model's context window.]")
             elif omitted:
                 parts.append(f"[Context note: {omitted} earlier messages omitted.]")
-            if policy.ledger and detail >= 2 and kept_from > head_end:
+            if detail >= 2 and kept_from > head_end:
                 room = min(policy.ledger_max_chars,
                            max(200, math.floor(budget * 0.1 * policy.chars_per_token)))
                 ledger = tool_ledger(prepared[head_end:kept_from],
@@ -465,12 +379,10 @@ class BudgetedContextBuilder:
         if limit is None or message.role is not Role.TOOL or len(message.content) <= limit:
             return message
         removed = len(message.content) - limit
-        hint = ""
-        if self._policy.recovery_hints:
-            stored = _ARTIFACT_ID.search(message.content)
-            hint = (f"; the full output is artifact {stored.group(1)}, read the part you need "
-                    "with read_artifact" if stored else
-                    "; call the tool again (a narrower range or query) if you need the rest")
+        stored = _ARTIFACT_ID.search(message.content)
+        hint = (f"; the full output is artifact {stored.group(1)}, read the part you need "
+                "with read_artifact" if stored else
+                "; call the tool again (a narrower range or query) if you need the rest")
         marker = f"\n[... {removed} characters truncated{hint} ...]\n"
         keep_head = limit // 2
         keep_tail = limit - keep_head
@@ -635,10 +547,6 @@ def latest_request_index(messages: Sequence[Message], *, start: int = 0) -> int 
     return None
 
 
-def _latest_request_block(message: Message) -> str:
-    return f"\n\n[Latest user message - answer this one]\n{message.content.strip()}"
-
-
 def pinned_head_end(messages: Sequence[Message]) -> int:
     """Index after the leading system messages and the first user message (always kept)."""
 
@@ -681,12 +589,9 @@ def context_policy_from_config(config: object) -> ContextPolicy:
         chars_per_token=section.chars_per_token,
         message_overhead_tokens=section.message_overhead_tokens,
         max_tool_output_chars=section.max_tool_output_chars or None,
-        layout=getattr(section, "layout", "legacy"),
         stale_tool_output_chars=getattr(section, "stale_tool_output_chars", 0) or None,
         keep_recent_units=getattr(section, "keep_recent_units", 4),
         min_fitted_output_chars=getattr(section, "min_fitted_output_chars", 200),
-        recovery_hints=getattr(section, "recovery_hints", False),
-        ledger=getattr(section, "ledger", False),
         ledger_max_entries=getattr(section, "ledger_max_entries", 40),
         ledger_max_chars=getattr(section, "ledger_max_chars", 4_000),
     )
@@ -773,7 +678,6 @@ class ContextSummarizer:
         input_chars: Callable[[str], int | None] | None = None,
         instructions: str = SUMMARY_INSTRUCTIONS,
         parameters: Mapping[str, Any] | None = None,
-        chunked: bool = False,
     ) -> None:
         if max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be greater than zero")
@@ -788,9 +692,6 @@ class ContextSummarizer:
         self._max_message_chars = max_message_chars
         self._input_chars = input_chars
         self._instructions = instructions
-        # Phase 26: a range too long for one request is summarized in several, each
-        # continuing the last, instead of dropping the middle of the transcript.
-        self.chunked = chunked
 
     def input_limit(self, profile: str) -> int:
         derived = self._input_chars(profile) if self._input_chars is not None else None

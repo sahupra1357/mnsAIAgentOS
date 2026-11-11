@@ -263,9 +263,10 @@ the feature is not configured.
 
 ## Phase 27: scoped memory (implemented, opt-in)
 
-`knowledge/scoped_memory.py` (`MemoryService`) sits on the note stores. Since Phase 30 it is on in
-code (`[memory]` `enabled`, `scopes`, `recall`, `auto_save`, `guidance`; the heading's "opt-in" is
-history). `enabled = false` turns memory off; `scopes = false` is the old unscoped store.
+`knowledge/scoped_memory.py` (`MemoryService`) sits on the note stores. Since Phase 31 it is the only
+memory (the heading's "opt-in" is history): `[memory] enabled` is on in code, notes are always scoped and the
+system prompt always explains the tools. `recall` and `auto_save` are on and can be turned off (benchmarks);
+`enabled = false` turns memory off.
 
 - **Where notes live.** `[memory] database` may be an absolute or `~` path. The root config uses
   `~/.agent-harness/memory.sqlite3`: one store for every project, apart from run storage, so

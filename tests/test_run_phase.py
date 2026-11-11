@@ -54,8 +54,7 @@ from agent_harness.persistence import InMemoryRunStore
 READ = ToolSpec(name="lookup", description="look up", input_schema={"type": "object"}, risk=ToolRisk.READ_ONLY)
 WRITE = ToolSpec(name="write", description="write", input_schema={"type": "object"}, risk=ToolRisk.SIDE_EFFECT)
 TASK = Message(role=Role.USER, content="Do the work.")
-ON = OrchestratorSettings(phase_dispatch=True, verify_phase=True, close_orphan_tool_calls=True,
-                          mid_phase_checks=True)
+ON = OrchestratorSettings(verify_phase=True)
 
 
 def say(text: str = "done", tokens: int = 10) -> ModelResponse:
@@ -224,12 +223,13 @@ class OrphanTests(unittest.TestCase):
         async def scenario() -> None:
             store = InMemoryRunStore()
             tools = Tools()
-            # A run stored by a harness from before Phase 28 (the opt-out reproduces it).
-            old = AgentOrchestrator(models=Model([calls(("a", "write"), tokens=5_000)]), tools=tools, store=store,
-                                    settings=OrchestratorSettings(close_orphan_tool_calls=False))
+            old = AgentOrchestrator(models=Model([calls(("a", "write"), tokens=5_000)]), tools=tools, store=store)
             created = await old.create_run(model_profile="p", messages=[TASK], budget=RunBudget(max_tokens=1_000))
             stopped = await old.run(created.id)
-            self.assertEqual([m.role for m in stopped.messages][-1], Role.ASSISTANT)  # the old behaviour
+            # Make it a run stored before Phase 28: it ends in a tool call without a result.
+            self.assertIs(stopped.messages.pop().role, Role.TOOL)
+            await store.save_checkpoint(stopped, (), expected_version=stopped.version)
+            stopped.version += 1
             new = AgentOrchestrator(models=Model([say("ok")]), tools=tools, store=store, settings=ON)
             await new.continue_run(created.id, "Stop that.", budget=RunBudget(max_tokens=100_000))
             done = await new.run(created.id)
@@ -237,8 +237,6 @@ class OrphanTests(unittest.TestCase):
             self.assertEqual(tools.ran, [])
             self.assertEqual([m.role for m in done.messages][-4:],
                              [Role.ASSISTANT, Role.TOOL, Role.USER, Role.ASSISTANT])
-            events = list(await store.list_events(created.id))
-            self.assertEqual(derive_message_skeleton(events), message_skeleton(done.messages))
 
         run(scenario())
 
@@ -270,28 +268,6 @@ class BetweenToolCallsTests(unittest.TestCase):
 
         run(scenario())
 
-    def test_without_the_option_every_call_runs_first(self) -> None:
-        # The option is on by default since Phase 30; this is the opt-out.
-        async def scenario() -> None:
-            store = InMemoryRunStore()
-            holder: dict[str, object] = {}
-
-            async def during(call: ToolCall) -> None:
-                if call.id == "a":
-                    await holder["o"].steer(holder["run"], "Stop.")  # type: ignore[attr-defined]
-
-            tools = Tools(during)
-            orchestrator = AgentOrchestrator(
-                models=Model([calls(("a", "write"), ("b", "write")), say()]), tools=tools, store=store,
-                steering=store, settings=OrchestratorSettings(mid_phase_checks=False))
-            holder["o"] = orchestrator
-            created = await orchestrator.create_run(model_profile="p", messages=[TASK])
-            holder["run"] = created.id
-            await orchestrator.run(created.id)
-            self.assertEqual(tools.ran, ["a", "b"])
-
-        run(scenario())
-
     def test_cancel_between_calls_stops_the_rest(self) -> None:
         async def scenario() -> None:
             store = InMemoryRunStore()
@@ -317,8 +293,7 @@ class BetweenToolCallsTests(unittest.TestCase):
         async def scenario() -> None:
             store = InMemoryRunStore()
             tools = Tools()
-            settings = OrchestratorSettings(mid_phase_checks=True, close_orphan_tool_calls=True,
-                                            max_tool_calls_per_run=2)
+            settings = OrchestratorSettings(max_tool_calls_per_run=2)
             orchestrator = AgentOrchestrator(
                 models=Model([calls(("a", "write"), ("b", "write"), ("c", "write"))]), tools=tools,
                 store=store, settings=settings)
@@ -456,16 +431,10 @@ class StateBlockTests(unittest.TestCase):
 class ConfigTests(unittest.TestCase):
     def test_validation(self) -> None:
         with self.assertRaises(ConfigError):
-            OrchestratorConfig(max_tool_calls_per_run=5, mid_phase_checks=False)  # needs mid_phase_checks
-        with self.assertRaises(ConfigError):
             OrchestratorConfig(cancel_poll_seconds=-1)
         with self.assertRaises(ValueError):
             OrchestratorSettings(cancel_poll_seconds=0)
-        # The loop fixes are the code default since Phase 30; verify_phase stays a test aid.
-        defaults = OrchestratorSettings()
-        self.assertTrue(defaults.phase_dispatch and defaults.close_orphan_tool_calls
-                        and defaults.mid_phase_checks and defaults.resurface_repeated_results)
-        self.assertFalse(defaults.verify_phase)
+        self.assertFalse(OrchestratorSettings().verify_phase)  # a test aid
 
 
 if __name__ == "__main__":

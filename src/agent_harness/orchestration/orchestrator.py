@@ -101,6 +101,7 @@ from agent_harness.knowledge.scoped_memory import recall_block
 from agent_harness.orchestration.compaction import (
     CompactionPolicy,
     DefaultCompactionPolicy,
+    ThresholdCompactionPolicy,
     compaction_start,
     valid_compaction_range,
 )
@@ -300,31 +301,20 @@ class OrchestratorSettings:
     # by the serial loop, so events are unchanged. Hooks then see calls out of order, which
     # is why it is opt-in. Off: any pre_tool hook turns prefetching off (Phase 8 behavior).
     prefetch_with_hooks: bool = False
-    # Phase 26: a read-only call repeated past max_identical_tool_calls is answered with the
-    # earlier result and a note instead of a refusal (the model often repeats a call because
-    # the result was trimmed from its view). max_refused_repeats still ends a real loop.
-    # A fix: on in code since Phase 30 (False is the opt-out, kept until verified live).
-    resurface_repeated_results: bool = True
-    # Phase 28. phase_dispatch, close_orphan_tool_calls and mid_phase_checks are fixes, on in
-    # code since Phase 30 (see CLAUDE.md, "Fix or feature"); the rest are features, off.
-    # Use the phase stored on the run to pick the next transition instead of re-deriving it
-    # from the messages and the event log at every boundary. verify_phase checks at each
-    # boundary that the two agree and raises if not (tests and scenario runs).
-    phase_dispatch: bool = True
+    # The loop always (Phase 31 removed the switches): picks its next transition from the
+    # phase stored on the run; answers a repeated read-only call with the earlier result;
+    # answers the tool calls a budget stop did not run; and checks cancel, steer and the
+    # budgets between the tool calls of one reply.
+    # verify_phase checks at each boundary that the stored phase agrees with the messages
+    # and raises if not (tests and scenario runs).
     verify_phase: bool = False
-    # A run that stops for its budget answers every tool call it did not run ("not run"), so
-    # the history never ends in a call without a result; a continued run closes such calls
-    # from older runs before the new message instead of executing them.
-    close_orphan_tool_calls: bool = True
-    # Between the tool calls of one reply: stop if the run was cancelled or changed elsewhere,
-    # stop for the token, cost or tool-call budget, and hand a queued steer to the model
-    # (the calls not yet run are answered "not run").
-    mid_phase_checks: bool = True
+    # Stop the run after this many tool calls in total (None: no limit).
     max_tool_calls_per_run: int | None = None
     # Poll the stored run this often (seconds) while it executes and stop the model or tool
-    # call in flight once it is cancelled. Queue workers do this themselves; with it, a run
-    # executed inline (CLI, chat) can be cancelled from another terminal. None: off.
-    cancel_poll_seconds: float | None = None
+    # call in flight once it is cancelled, so a run executed inline (CLI, chat) can be
+    # cancelled from another terminal. Queue workers watch their runs themselves and call
+    # run(watch_cancel=False). None: never poll.
+    cancel_poll_seconds: float | None = 2.0
     # Append the plan, the task list and a low budget as one harness-written status message
     # to each request (never stored, so the cached prefix is untouched).
     state_block: bool = False
@@ -523,7 +513,6 @@ class AgentOrchestrator:
         user_quotas: Callable[[str], Quota | None] | None = None,
         context_policy: ContextPolicy | None = None,
         compaction: CompactionPolicy | None = None,
-        calibrate_estimate: bool = True,
         memory: Any = None,
     ) -> None:
         self._models = models
@@ -532,7 +521,6 @@ class AgentOrchestrator:
         self._memory = memory
         # Phase 26: when the provider reports more input tokens than estimated, later views
         # of the run count characters as that many more tokens (recorded in model_responded).
-        self._calibrate_estimate = calibrate_estimate
         self._tools = tools
         self._store = store
         self._settings = settings or OrchestratorSettings()
@@ -576,7 +564,9 @@ class AgentOrchestrator:
         self._snapshots = snapshots
         self._summarizer = summarizer
         # When and what to summarize (only used with a summarizer); see orchestration/compaction.py.
-        self._compaction: CompactionPolicy = compaction or DefaultCompactionPolicy()
+        # The default summarizes before anything is omitted (DefaultCompactionPolicy, which
+        # summarized only what a view had already dropped, is no longer the default).
+        self._compaction: CompactionPolicy = compaction or ThresholdCompactionPolicy(self._context_policy)
         self._tool_loading = tool_loading or ToolLoadingPolicy()
         self._planning = planning or PlanningPolicy()
         self._quotas = dict(quotas or {})
@@ -1030,15 +1020,18 @@ class AgentOrchestrator:
             events.append(event)
         self._emit_event(run, event)
 
-    async def run(self, run_id: str) -> RunRecord:
-        """Run or resume a persisted workflow until it reaches a terminal state."""
+    async def run(self, run_id: str, *, watch_cancel: bool = True) -> RunRecord:
+        """Run or resume a persisted workflow until it reaches a terminal state.
+
+        ``watch_cancel=False``: the caller polls for cancellation itself (queue workers).
+        """
 
         token = CURRENT_RUN_ID.set(run_id)  # per-run tool resources (warm containers)
         started = CURRENT_RUN_STARTED.set(None)  # set by _run once the run is loaded
         scope = CURRENT_RUN_SCOPE.set(None)  # set by _run: whose data tools read and write
         try:
             poll = self._settings.cancel_poll_seconds
-            if poll is None:
+            if poll is None or not watch_cancel:
                 return await self._run(run_id)
             return await self._run_until_cancelled(run_id, poll)
         finally:
@@ -1050,28 +1043,41 @@ class AgentOrchestrator:
         """Execute the run, and stop its model or tool call in flight once it is cancelled.
 
         Cancellation is a stored status another process (or task) sets; the loop itself only
-        sees it at a step boundary, which may be a 600-second model call away. Here the stored
-        run is polled meanwhile, as queue workers do for their runs (Phase 12c).
+        sees it at a step boundary, which may be a 600-second model call away. A watcher polls
+        the stored run meanwhile and cancels this task's work; the run itself stays in the
+        caller's task, so its exceptions reach the caller unchanged.
         """
 
-        task = asyncio.ensure_future(self._run(run_id))
-        try:
+        me = asyncio.current_task()
+        if me is None:
+            return await self._run(run_id)
+        stopped = False
+
+        async def watch() -> None:
+            nonlocal stopped
             while True:
-                done, _ = await asyncio.wait({task}, timeout=poll)
-                if done:
-                    return task.result()
+                await asyncio.sleep(poll)
                 if await self.is_cancelled(run_id):
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await task
-                    stored = await self._store.get_run(run_id)
-                    assert stored is not None
-                    return stored
+                    stopped = True
+                    me.cancel()
+                    return
+
+        watcher = asyncio.ensure_future(watch())
+        try:
+            return await self._run(run_id)
+        except asyncio.CancelledError:
+            if not stopped:
+                raise  # the caller was cancelled, not the run
+            me.uncancel()
+            stored = await self._store.get_run(run_id)
+            assert stored is not None
+            return stored
         finally:
-            if not task.done():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            watcher.cancel()
+            if stopped and me.cancelling():
+                me.uncancel()  # the run finished just as the watcher fired
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await watcher
 
     async def _run(self, run_id: str) -> RunRecord:
         _validate_identifier(run_id, "run_id")
@@ -1228,8 +1234,8 @@ class AgentOrchestrator:
         """Perform one boundary-to-boundary transition; return True once settled."""
 
         # The phase stored with the last checkpoint says which branch applies; without it
-        # (runs from before Phase 28, or phase_dispatch off) each predicate is evaluated.
-        phase = run.phase if self._settings.phase_dispatch else ""
+        # (a run stored before Phase 28) each predicate is evaluated.
+        phase = run.phase
         if phase not in (PHASE_TOOLS, PHASE_ANSWER, PHASE_MODEL, PHASE_MODEL_REQUEST):
             phase = ""
         if self._settings.verify_phase and run.phase:
@@ -1251,10 +1257,9 @@ class AgentOrchestrator:
                 if self._wall_limit_reached(run):
                     await self._exhaust_budget(run, events, "wall-clock limit")
                     return True
-                if self._settings.mid_phase_checks:
-                    settled = await self._between_tool_calls(run, events, pending[index:], first=index == 0)
-                    if settled is not None:
-                        return settled
+                settled = await self._between_tool_calls(run, events, pending[index:], first=index == 0)
+                if settled is not None:
+                    return settled
                 await self._execute_tool(run, events, call, prefetched=prefetched.get(call.id))
                 if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
                     return True
@@ -1771,18 +1776,17 @@ class AgentOrchestrator:
         _validate_message(added[0])
         prompt_hook = await self._user_prompt_hook(run.id, added, run.model_profile)
         recall_events: list[RunEvent] = []
-        if self._settings.close_orphan_tool_calls:
-            # A run stopped before Phase 28 may end in tool calls without results; the new
-            # message must not start by executing them.
-            for call in _pending_tool_calls(run.messages):
-                run.messages.append(Message(
-                    role=Role.TOOL, name=call.name, tool_call_id=call.id,
-                    content="Not run: the run stopped before this call was executed. Call the tool "
-                            "again if it is still needed."))
-                recall_events.append(RunEvent(
-                    run_id=run.id, type=EventType.TOOL_RESPONDED, step=run.step_count, created_at=now,
-                    payload={"call_id": call.id, "tool": call.name, "attempt": 0, "not_run": True,
-                             "status": ToolResultStatus.POLICY_DENIED.value, "retryable": False}))
+        # A run stopped before Phase 28 may end in tool calls without results; the new
+        # message must not start by executing them.
+        for call in _pending_tool_calls(run.messages):
+            run.messages.append(Message(
+                role=Role.TOOL, name=call.name, tool_call_id=call.id,
+                content="Not run: the run stopped before this call was executed. Call the tool "
+                        "again if it is still needed."))
+            recall_events.append(RunEvent(
+                run_id=run.id, type=EventType.TOOL_RESPONDED, step=run.step_count, created_at=now,
+                payload={"call_id": call.id, "tool": call.name, "attempt": 0, "not_run": True,
+                         "status": ToolResultStatus.POLICY_DENIED.value, "retryable": False}))
         if self._memory is not None and self._memory.settings.recall and run.parent_run_id is None:
             shown = [str(i) for e in events if e.type is EventType.MEMORY_RECALLED
                      for i in e.payload.get("ids", ())]
@@ -2396,7 +2400,9 @@ class AgentOrchestrator:
                         or (early and run.step_count - event.step < _SUMMARY_RETRY_STEPS)):
                     return False
                 break
-        if getattr(self._summarizer, "chunked", False):
+        # A range too long for one request is summarized in several, each continuing the
+        # last (a summarizer without chunks(), e.g. a custom one, gets one request).
+        if hasattr(self._summarizer, "chunks"):
             profile = self._summarizer.profile or run.model_profile
             written = False
             for part_start, part_end in self._summarizer.chunks(
@@ -2623,7 +2629,7 @@ class AgentOrchestrator:
         """
 
         counted = response.usage.input_tokens
-        if (not self._calibrate_estimate or view is None or not view.estimated_tokens
+        if (view is None or not view.estimated_tokens
                 or not view.budget_tokens or not isinstance(counted, int) or counted <= 0):
             return None
         current = _estimate_scale(events, run.model_profile)
@@ -2861,8 +2867,7 @@ class AgentOrchestrator:
         """The stored result of the first identical read-only call, when repeats are answered with it."""
 
         spec = specs.get(call.name)
-        if (not self._settings.resurface_repeated_results or spec is None
-                or spec.risk is not ToolRisk.READ_ONLY):
+        if spec is None or spec.risk is not ToolRisk.READ_ONLY:
             return None
         # By position, not by id: some providers reuse call ids such as "call-1" on every step.
         current = next((i for i in range(len(run.messages) - 1, -1, -1)
@@ -4635,13 +4640,12 @@ class AgentOrchestrator:
     async def _exhaust_budget(
         self, run: RunRecord, events: list[RunEvent], reason: str
     ) -> RunRecord:
-        if self._settings.close_orphan_tool_calls:
-            unrun = _pending_tool_calls(run.messages)
-            if unrun:
-                await self._close_unrun_calls(
-                    run, events, unrun,
-                    f"Not run: the run stopped ({reason}) before this call was executed. Call the "
-                    "tool again if it is still needed.")
+        unrun = _pending_tool_calls(run.messages)
+        if unrun:
+            await self._close_unrun_calls(
+                run, events, unrun,
+                f"Not run: the run stopped ({reason}) before this call was executed. Call the "
+                "tool again if it is still needed.")
         now = self._clock()
         run.status = RunStatus.BUDGET_EXHAUSTED
         run.error = reason

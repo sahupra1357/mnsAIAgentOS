@@ -63,13 +63,13 @@ def history(turns: int, output_chars: int = 700) -> list[Message]:
 def anchored(window: int = 2000, reserve: int = 200, **policy: object) -> BudgetedContextBuilder:
     return BudgetedContextBuilder(
         {"small": ContextLimits(context_window=window, output_reserve_tokens=reserve)},
-        policy=ContextPolicy(layout="anchored", **policy),  # type: ignore[arg-type]
+        policy=ContextPolicy(**policy),  # type: ignore[arg-type]
     )
 
 
 class AnchoredLayoutTests(unittest.TestCase):
     def test_first_request_is_untouched_and_state_is_its_own_message(self) -> None:
-        view = anchored(ledger=True).build(history(20), (), model_profile="small")
+        view = anchored().build(history(20), (), model_profile="small")
         self.assertGreater(view.omitted_messages, 0)
         self.assertEqual(view.messages[:2], (SYSTEM, TASK))  # sent exactly as stored
         state = view.messages[2]
@@ -134,7 +134,7 @@ class AnchoredLayoutTests(unittest.TestCase):
     def test_truncation_marker_names_the_artifact_or_the_way_back(self) -> None:
         stored = ("head " + "z" * 500 + "\n[... output truncated: the full 30413-byte result is stored as "
                   "artifact " + "ab" * 32 + "; page through it ...]\n" + "z" * 500 + " tail")
-        policy = ContextPolicy(max_tool_output_chars=300, recovery_hints=True)
+        policy = ContextPolicy(max_tool_output_chars=300)
         builder = BudgetedContextBuilder({"small": ContextLimits(8000, 200)}, policy=policy)
         messages = [SYSTEM, TASK,
                     Message(role=Role.ASSISTANT, tool_calls=(ToolCall("a", "lookup", {}), ToolCall("b", "lookup", {}))),
@@ -153,7 +153,7 @@ class AnchoredLayoutTests(unittest.TestCase):
         self.assertGreater(scaled.omitted_messages, 0)
 
     def test_cap_is_applied_by_the_builder_and_keeps_the_state_message(self) -> None:
-        view = anchored(window=8000, ledger=True).build(
+        view = anchored(window=8000).build(
             history(12), (), model_profile="small", max_input_tokens=1500)
         self.assertLessEqual(view.estimated_tokens or 0, 1500)
         self.assertTrue(view.messages[2].content.startswith(STATE_HEADER))
@@ -189,10 +189,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(limits_from_profiles({"p": Profile()}, default_window=4096)["p"].context_window, 4096)
 
     def test_invalid_values_are_config_errors(self) -> None:
-        for bad in ({"layout": "floating"}, {"stale_tool_output_chars": 50}, {"default_window": -1}):
+        for bad in ({"stale_tool_output_chars": 50}, {"default_window": -1}):
             with self.assertRaises(ConfigError):
                 ContextConfig(**bad)  # type: ignore[arg-type]
-        for bad in ({"trigger": "sometimes"}, {"keep_ratio": 0.9}, {"style": "haiku"}):
+        for bad in ({"keep_ratio": 0.9}, {"style": "haiku"}):
             with self.assertRaises(ConfigError):
                 SummarizationConfig(**bad)  # type: ignore[arg-type]
 
@@ -258,7 +258,7 @@ def run_to_end(model: RoutingModel, **options: object):
 
 class EarlyCompactionTests(unittest.TestCase):
     def options(self, **summarizer: object) -> dict[str, object]:
-        policy = ContextPolicy(layout="anchored", ledger=True)
+        policy = ContextPolicy()
         return {
             "context": BudgetedContextBuilder({"small": ContextLimits(2000, 200)}, policy=policy),
             "context_policy": policy,
@@ -282,7 +282,7 @@ class EarlyCompactionTests(unittest.TestCase):
 
     def test_a_long_range_is_summarized_in_parts(self) -> None:
         model = RoutingModel([call(i) for i in range(8)] + [DONE])
-        options = self.options(chunked=True, max_input_chars=1000, max_message_chars=200,
+        options = self.options(max_input_chars=1000, max_message_chars=200,
                                max_output_tokens=20)
         run, events, _ = run_to_end(model, **options)
         written = [e for e in events if e.type is EventType.CONTEXT_SUMMARIZED and e.payload.get("ok")]
@@ -330,11 +330,11 @@ class EarlyCompactionTests(unittest.TestCase):
 
 class CalibrationTests(unittest.TestCase):
     def test_estimate_rises_when_the_provider_counts_more(self) -> None:
-        policy = ContextPolicy(layout="anchored")
+        policy = ContextPolicy()
         model = RoutingModel([call(0, usage=Usage(400, 5)), call(1, usage=Usage(900, 5)), DONE])
         run, events, _ = run_to_end(
             model, context=BudgetedContextBuilder({"small": ContextLimits(20_000, 200)}, policy=policy),
-            context_policy=policy, calibrate_estimate=True)
+            context_policy=policy)
         ratios = [e.payload["estimate_ratio"] for e in events
                   if e.type is EventType.MODEL_RESPONDED and "estimate_ratio" in e.payload]
         self.assertTrue(ratios)
@@ -342,19 +342,10 @@ class CalibrationTests(unittest.TestCase):
         self.assertGreater(ratios[0], 1.5)  # two short messages cannot be 400 tokens at 3.5 chars each
         self.assertLessEqual(ratios[-1], 3.0)
 
-    def test_can_be_switched_off(self) -> None:
-        # On by default since Phase 30 (it was test_off_by_default); calibrate_estimate=False opts out.
-        policy = ContextPolicy(layout="anchored")
-        model = RoutingModel([call(0, usage=Usage(4000, 5)), DONE])
-        _, events, _ = run_to_end(
-            model, context=BudgetedContextBuilder({"small": ContextLimits(20_000, 200)}, policy=policy),
-            context_policy=policy, calibrate_estimate=False)
-        self.assertFalse(any("estimate_ratio" in e.payload for e in events))
-
 
 class OverflowWithAnchoredLayoutTests(unittest.TestCase):
     def test_overflow_recovery_caps_the_native_view(self) -> None:
-        policy = ContextPolicy(layout="anchored", ledger=True)
+        policy = ContextPolicy()
         overflow = ContextOverflowError("context too long")
         model = RoutingModel([call(i) for i in range(6)] + [overflow, DONE])
         run, events, _ = run_to_end(
@@ -376,7 +367,7 @@ class RepeatedReadTests(unittest.TestCase):
         return run_to_end(model, settings=OrchestratorSettings(**settings))  # type: ignore[arg-type]
 
     def test_repeat_is_answered_with_the_earlier_result(self) -> None:
-        run, events, tools = self.repeat(7, resurface_repeated_results=True)
+        run, events, tools = self.repeat(7)
         self.assertIs(run.status, RunStatus.COMPLETED)
         # The event log says which calls were answered from an earlier result (Phase 30).
         self.assertEqual(sum(e.payload.get("repeated_call") is True for e in events), 2)
@@ -387,15 +378,9 @@ class RepeatedReadTests(unittest.TestCase):
         self.assertEqual(results[6].count("[Not run again"), 1)  # the original, not a copy of a copy
 
     def test_a_real_loop_still_ends_the_run(self) -> None:
-        run, _, _ = self.repeat(8, resurface_repeated_results=True)
+        run, _, _ = self.repeat(8)
         self.assertIs(run.status, RunStatus.FAILED)
         self.assertIn("repeated tool call loop", run.error or "")
-
-    def test_can_be_switched_off(self) -> None:
-        # On by default since Phase 30 (it was test_off_by_default).
-        self.assertTrue(OrchestratorSettings().resurface_repeated_results)
-        run, _, _ = self.repeat(6, resurface_repeated_results=False)
-        self.assertIn("Refused: lookup was already called", run.messages[-2].content)
 
 
 if __name__ == "__main__":

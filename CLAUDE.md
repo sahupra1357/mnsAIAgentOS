@@ -48,33 +48,35 @@ any of this.
   `ModelRequest`), add it with a default so existing callers and tests keep working.
 - Stay stdlib-only unless a dependency clearly earns its place; ask first.
 
-## Fix or feature: which default a new option gets
+## Fix or feature: is it an option at all?
 
-Decide this before writing the option, and say which it is in the plan. Phases 25–29 shipped
-bug fixes switched off in code, so the harness stayed broken for any config but the root one;
-Phase 30 corrected that.
+Decide this before writing code, and say which it is in the plan.
 
 **The test: would anyone knowingly choose the old behaviour?**
 
-| Answer | It is a | Code default | Root `models.toml` | Tests that pin the old behaviour |
-|---|---|---|---|---|
-| No: the old behaviour is wrong for everyone (a lost message, a corrupt history, an ignored cancel, data dropped silently) | **fix** | **on** | no key | updated to the new behaviour (not deleted) |
-| Yes: it needs something the code cannot supply (a server, a key, credentials, Docker), or it is a mode the user picks per run or per deployment | **feature** | off | turned on | unchanged |
-| It is a number or a choice whose best value depends on the model or the workload | **setting** | a safe value | the user's value | unchanged |
+| Answer | It is a | What to write |
+|---|---|---|
+| No: the old behaviour is wrong for everyone (a lost message, a corrupt history, an ignored cancel, data dropped silently, memory that is never recalled) | **fix** | Replace the behaviour. **No switch, no old code path kept beside the new one.** Rewrite the tests that described the old behaviour; delete the ones that only tested the deleted path. |
+| Yes: it needs something the code cannot supply (a server, a key, credentials, Docker), or it is a mode the user picks per run or per deployment | **feature** | An option, off in code, turned on in the root `models.toml`. |
+| It is a number or a choice whose best value depends on the model or the workload | **setting** | An option with a safe code default; the root `models.toml` holds the user's value. |
 
-- **Backward compatibility is not a reason to keep something off.** The user said so on 2026-11-11: the harness
-  did not work before Phases 25–29, and nothing has to keep behaving that way. "It costs a model call", "it changes
-  the stored format" and "existing tests expect the old behaviour" are not reasons either: if the harness is wrong
-  without it, it is a fix. (I had filed memory recall and saving, and the message table, as features on those
-  grounds; that was the same mistake again.)
-- **A fix may keep its switch as an opt-out**, for the case where it misbehaves on a live model. The
-  opt-out is never set in the root config.
-- **Not sure?** If the change repairs a symptom the user reported, it is a fix. If it still is not
-  clear, ask the user; do not default to "off".
-- **The register:** `tests/test_fix_defaults.py` lists every option added since Phase 25 as a fix
-  or a feature (with the reason). A new `[orchestrator]`, `[context]` or `[summarization]` option
-  that is in neither list fails the suite, and so does a fix that is off in code or set in the root config.
-- **Older wording:** "code defaults stay off" (Phase 15 and later notes) is the rule for features only.
+- **None of these makes a fix optional:** backward compatibility, "it costs a model call", "it changes the stored
+  format", "existing tests expect the old behaviour", "it has not been tried on a live model". The user said so on
+  2026-11-11: "tests are for testing functionality; functionality shouldn't be convoluted saving already written
+  tests; the bug fix fixes the functionality permanently". If a fix misbehaves, fix it again; do not add a way to
+  turn it off.
+- **The no-delete rule above protects working files, features and the user's data.** It does not protect a wrong
+  code path or a test of wrong behaviour.
+- **Stored data is not backward compatibility.** Runs and notes written by an older version stay readable
+  (e.g. a run whose messages are still in its snapshot); only the old way of *writing* goes.
+- **Not sure?** A change that repairs a symptom the user reported is a fix. Otherwise ask; never default to a switch.
+- **The register:** `tests/test_fix_defaults.py`. `REMOVED` lists the switches that once guarded a fix: they must
+  not come back, and a config that names one is an error. `OPTIONS` lists every option added since Phase 25 with
+  the reason it is a feature or a setting; a new `[orchestrator]`, `[context]`, `[summarization]`, `[memory]` or
+  `[storage]` option that is not there fails the suite.
+- **History:** Phases 25–29 shipped fixes switched off in code; Phase 30 turned them on but kept opt-outs;
+  Phase 31 deleted the switches and the old paths. "Code defaults stay off" (Phase 15 and later notes) is the
+  rule for features only.
 
 ## Commands
 
@@ -975,6 +977,23 @@ the tuning values. Also:
 - a repeated call answered from an earlier result has `repeated_call: true` in its `tool_responded` event;
 - `tests/test_fix_defaults.py` is the register of fixes and features.
 Benchmark baselines recorded on other configs shift once (the view sent to the model changed).
+
+**Phase 31 – No switches for fixes** [durable-agent-orchestration, context-management, harness-operations, production-hardening] — on `phase-31-remove-old-paths`
+The user: a bug fix replaces the behaviour permanently, and tests follow the functionality. Deleted, with their old
+code paths: `[orchestrator]` `resurface_repeated_results`, `phase_dispatch`, `close_orphan_tool_calls`,
+`mid_phase_checks`; `[context]` `layout` (the legacy layout is gone), `recovery_hints`, `ledger`, `calibrate`;
+`[summarization]` `trigger`, `chunked`; `[memory]` `scopes`, `guidance`; `[storage]` `message_table`, `off_loop`;
+`SQLiteRunStore(message_table=)`, `AgentOrchestrator(calibrate_estimate=)`, `ContextSummarizer(chunked=)`.
+- An orchestrator with a summarizer and no `compaction` uses `ThresholdCompactionPolicy` (`DefaultCompactionPolicy`
+  stays as a class a caller may pass).
+- Inline runs watch for a cancel without a setting: `run()` polls every `cancel_poll_seconds` (2.0 in code) from a
+  watcher task while the run stays in the caller's task; workers call `run(watch_cancel=False)`.
+- A run stored before Phase 29 (messages in the snapshot) is still read and moves to the table on its next save.
+- Still options: `[memory]` `enabled`, `recall`, `auto_save` (on in code; off for a benchmark), and `state_block`
+  (off in code, on in the root config).
+- **Left open:** `[Plan]`/`[Budget]` notes are still stored messages, so `state_block` repeats them; the phase is
+  still derived at each checkpoint; the orchestrator split; tools filtered on mode changes; the usage roll-up;
+  Postgres whole-snapshot checkpoints.
 
 ## Validation
 
