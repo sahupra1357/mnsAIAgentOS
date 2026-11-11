@@ -427,6 +427,66 @@ class PostgresStoreContract(StoreContract, unittest.TestCase):
             with self.assertRaises(psycopg.Error):
                 connection.execute("UPDATE run_events SET step = 3")
 
+    def test_messages_are_rows_and_a_checkpoint_writes_only_the_new_ones(self) -> None:
+        # Phase 37: the SQLite scheme (run_messages, delta writes) on Postgres.
+        import json
+
+        import psycopg
+
+        def rows() -> list[tuple[int, str]]:
+            with psycopg.connect(POSTGRES_DSN, autocommit=True) as connection:
+                return [(r[0], r[1]) for r in connection.execute(
+                    "SELECT seq, xmin::text FROM run_messages WHERE run_id = 'r1' AND archived = 0 ORDER BY seq")]
+
+        async def body() -> None:
+            record = run()
+            await self.store.create_run(record, created(record))
+            with psycopg.connect(POSTGRES_DSN, autocommit=True) as connection:
+                snapshot = json.loads(connection.execute(
+                    "SELECT snapshot_json FROM runs WHERE id = 'r1'").fetchone()[0])
+            self.assertTrue(snapshot["messages_in_table"])
+            self.assertEqual(snapshot["messages"], [])
+            first = rows()
+            self.assertEqual([seq for seq, _ in first], [0])
+            record.messages.append(Message(Role.ASSISTANT, "hello"))
+            await self.store.save_checkpoint(record, [], expected_version=0)
+            second = rows()
+            self.assertEqual([seq for seq, _ in second], [0, 1])
+            self.assertEqual(second[0], first[0])  # row 0 was not rewritten (same inserting transaction)
+            loaded = await self.store.get_run("r1")
+            self.assertEqual([m.content for m in loaded.messages], ["hi", "hello"])
+            self.assertEqual(await self.store.run_state("r1"), (1, loaded.status))
+            # A changed earlier message (a rewind, a joined answer) rewrites from there on.
+            loaded.messages[1] = Message(Role.ASSISTANT, "hello again")
+            loaded.messages.append(Message(Role.USER, "more"))
+            await self.store.save_checkpoint(loaded, [], expected_version=1)
+            again = await self.store.get_run("r1")
+            self.assertEqual([m.content for m in again.messages], ["hi", "hello again", "more"])
+            self.assertEqual(rows()[0], first[0])
+            self.assertEqual(len(await self.store.list_events_since("r1", 1)), 0)
+        asyncio.run(body())
+
+    def test_a_run_stored_before_the_message_table_is_still_read(self) -> None:
+        import psycopg
+
+        from agent_harness.persistence.sqlite import _encode_run
+
+        async def body() -> None:
+            record = run()
+            await self.store.create_run(record, created(record))
+            with psycopg.connect(POSTGRES_DSN, autocommit=True) as connection:
+                connection.execute("DELETE FROM run_messages")
+                connection.execute("UPDATE runs SET snapshot_json = %s WHERE id = 'r1'", (_encode_run(record),))
+            self.store._forget("r1")
+            loaded = await self.store.get_run("r1")
+            self.assertEqual([m.content for m in loaded.messages], ["hi"])
+            loaded.messages.append(Message(Role.ASSISTANT, "hello"))
+            await self.store.save_checkpoint(loaded, [], expected_version=0)
+            self.assertEqual([m.content for m in (await self.store.get_run("r1")).messages], ["hi", "hello"])
+            with psycopg.connect(POSTGRES_DSN, autocommit=True) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM run_messages").fetchone()[0], 2)
+        asyncio.run(body())
+
     def test_migrations_are_recorded(self) -> None:
         from agent_harness.persistence.postgres import LATEST as PG_LATEST
 
