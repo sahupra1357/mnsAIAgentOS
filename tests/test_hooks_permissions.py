@@ -226,7 +226,10 @@ class PermissionFlowTests(unittest.IsolatedAsyncioTestCase):
         paused_for_write = await setup.orchestrator.run(again.id)
 
         self.assertEqual(paused_for_write.mode, PermissionMode.ACCEPT_EDITS)
-        self.assertNotIn(EXIT_PLAN_TOOL, [t.name for t in setup.model.requests[-1].tools])
+        # The tool list does not change when the mode does (Phase 33): a change there makes
+        # the model server re-read the whole conversation. A late exit_plan call is refused.
+        self.assertEqual([t.name for t in setup.model.requests[-1].tools],
+                         [t.name for t in setup.model.requests[0].tools])
         changed = await setup.events(again.id, EventType.MODE_CHANGED)
         self.assertEqual((changed[0].payload["from"], changed[0].payload["to"]), ("plan", "accept_edits"))
         # accept_edits does not cover write_file (only configured edit tools), so it asks.

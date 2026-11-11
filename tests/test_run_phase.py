@@ -465,6 +465,30 @@ class WrittenByUserTests(unittest.TestCase):
         run(scenario())
 
 
+class StableToolListTests(unittest.TestCase):
+    """Phase 33: a tool that was offered stays offered; a call that no longer fits is refused."""
+
+    def test_exit_plan_outside_plan_mode_is_refused_not_unknown(self) -> None:
+        async def scenario() -> None:
+            from agent_harness.domain import PermissionMode
+
+            store = InMemoryRunStore()
+            model = Model([calls(("x", "exit_plan")), say("ok")])
+            orchestrator = AgentOrchestrator(models=model, tools=Tools(), store=store)
+            created = await orchestrator.create_run(model_profile="p", messages=[TASK], mode=PermissionMode.PLAN)
+            run_record = await store.get_run(created.id)
+            orchestrator._specs_for(run_record)  # offered in plan mode ...
+            run_record.mode = PermissionMode.DEFAULT  # ... and the run then left it
+            await store.save_checkpoint(run_record, (), expected_version=run_record.version)
+            done = await orchestrator.run(created.id)
+            self.assertIn("exit_plan", [t.name for t in model.requests[0].tools])
+            answer = next(m for m in done.messages if m.role is Role.TOOL)
+            self.assertIn("this run is not in plan mode", answer.content)
+            self.assertEqual(done.sticky_tools, ("exit_plan",))
+
+        run(scenario())
+
+
 class ConfigTests(unittest.TestCase):
     def test_validation(self) -> None:
         with self.assertRaises(ConfigError):
