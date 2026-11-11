@@ -38,6 +38,7 @@ use each benchmark's official evaluator on the saved predictions.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import re
@@ -490,6 +491,12 @@ async def docker_problem(binary: str = "docker", timeout_seconds: float = 15.0) 
         return f"cannot start {binary!r}: {exc}"
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+    except asyncio.CancelledError:
+        # The run was cancelled: do not leave the child process running (FIX-07).
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()

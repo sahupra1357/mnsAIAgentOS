@@ -575,6 +575,7 @@ async def _execute(
     result.cost_usd = run.consumed_cost_usd
     result.failures = _check(scenario.expect, run, [e.type.value for e in events])
     result.failures.extend(_skeleton_failures(run, events))
+    result.failures.extend(_phase_failures(run, events))
     for wanted in scenario.expect.event_payloads:
         expected = {k: v for k, v in wanted.items() if k != "type"}
         if not any(e.type.value == wanted["type"] and all(e.payload.get(k) == v for k, v in expected.items())
@@ -614,6 +615,17 @@ def _check(expect: Expectations, run: RunRecord, event_types: Sequence[str]) -> 
     if expect.result is not _UNSET and run.output != expect.result:
         failures.append(f"result {run.output!r} != expected {expect.result!r}")
     return failures
+
+
+def _phase_failures(run: RunRecord, events: Sequence[RunEvent]) -> list[str]:
+    """The phase stored with the last checkpoint must be the one the run's state implies."""
+
+    from agent_harness.orchestration.orchestrator import derive_phase
+
+    derived = derive_phase(run, events)
+    if run.phase and run.phase != derived:
+        return [f"stored phase {run.phase!r} differs from the derived phase {derived!r}"]
+    return []
 
 
 def _skeleton_failures(run: RunRecord, events: Sequence[RunEvent]) -> list[str]:

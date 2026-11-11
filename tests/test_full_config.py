@@ -157,6 +157,9 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual((c.summarization.trigger, c.summarization.chunked, c.summarization.style),
                          ("threshold", True, "structured"))
         self.assertTrue(c.orchestrator.resurface_repeated_results)
+        o = c.orchestrator  # Phase 28
+        self.assertTrue(all((o.phase_dispatch, o.close_orphan_tool_calls, o.mid_phase_checks, o.state_block)))
+        self.assertEqual(o.cancel_poll_seconds, 2.0)
         # Phase 27: one note store for every project, scoped, recalled and saved by the harness.
         self.assertEqual(c.memory.database, "~/.agent-harness/memory.sqlite3")
         self.assertTrue(all((c.memory.scopes, c.memory.recall, c.memory.auto_save, c.memory.guidance)))

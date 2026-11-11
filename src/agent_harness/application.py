@@ -459,6 +459,13 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         max_cut_off_retries=section.max_cut_off_retries,
         prefetch_with_hooks=section.prefetch_with_hooks,
         resurface_repeated_results=section.resurface_repeated_results,
+        phase_dispatch=section.phase_dispatch,
+        verify_phase=section.verify_phase,
+        close_orphan_tool_calls=section.close_orphan_tool_calls,
+        mid_phase_checks=section.mid_phase_checks,
+        max_tool_calls_per_run=section.max_tool_calls_per_run or None,
+        cancel_poll_seconds=section.cancel_poll_seconds or None,
+        state_block=section.state_block,
     )
 
 

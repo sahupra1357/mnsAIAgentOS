@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 from dataclasses import dataclass, field
@@ -68,6 +69,12 @@ async def _invoke_process(
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             process.communicate(), timeout=timeout_seconds
         )
+    except asyncio.CancelledError:
+        # The run was cancelled: do not leave the child process running (FIX-07).
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise
     except TimeoutError:
         process.kill()
         stdout_bytes, stderr_bytes = await process.communicate()

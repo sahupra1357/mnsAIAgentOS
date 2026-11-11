@@ -159,6 +159,12 @@ class CommandHook:
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 stdout, stderr = await process.communicate(payload)
+        except asyncio.CancelledError:
+            # The run was cancelled: do not leave the child process running (FIX-07).
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            raise
         except TimeoutError as exc:
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
