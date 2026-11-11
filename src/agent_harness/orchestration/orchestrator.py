@@ -989,6 +989,8 @@ class AgentOrchestrator:
                 or run.status is not RunStatus.COMPLETED or not events
                 or events[-1].type is not EventType.RUN_COMPLETED):
             return
+        if self._budget_reason(run) is not None:
+            return  # the turn used its token or cost budget: no further model call is made for it
         start = 0
         for index in range(len(run.messages) - 1, -1, -1):
             message = run.messages[index]
@@ -1006,10 +1008,7 @@ class AgentOrchestrator:
             return
         if not notes and usage.total_tokens is None:
             return
-        if usage.total_tokens is not None:
-            run.consumed_tokens += usage.total_tokens
-        if usage.cost_usd is not None:
-            run.consumed_cost_usd += usage.cost_usd
+        self._charge(run, usage)
         event = RunEvent(
             run_id=run.id, type=EventType.MEMORY_SAVED, step=run.step_count, created_at=self._clock(),
             payload={"ids": [note.item.id for note in notes], "scopes": [note.scope for note in notes],
@@ -2473,10 +2472,7 @@ class AgentOrchestrator:
         except Exception as exc:
             await self._record_summary(run, events, {**payload, "ok": False, "error": _safe_error(exc)})
             return False
-        if response.usage.total_tokens is not None:
-            run.consumed_tokens += response.usage.total_tokens
-        if response.usage.cost_usd is not None:
-            run.consumed_cost_usd += response.usage.cost_usd
+        self._charge(run, response.usage)
         run.context_summary = ContextSummary(covers=target, content=content)
         await self._record_summary(
             run,
@@ -2571,11 +2567,7 @@ class AgentOrchestrator:
         view: ContextView | None,
         guard_events: Sequence[RunEvent] = (),
     ) -> None:
-        usage_tokens = response.usage.total_tokens
-        if usage_tokens is not None:
-            run.consumed_tokens += usage_tokens
-        if response.usage.cost_usd is not None:
-            run.consumed_cost_usd += response.usage.cost_usd
+        self._charge(run, response.usage)
         continuation = self._join_continuation(run, events, response)
         if continuation is None:
             run.messages.append(
@@ -3441,7 +3433,7 @@ class AgentOrchestrator:
         """Charge a tool call's embedding tokens and log them with its result (``usage_recorded``)."""
 
         for usage in embeddings:
-            run.consumed_tokens += usage.total_tokens or 0
+            self._charge(run, usage)
             self._tool_guard_events.setdefault((run.id, call_id), []).append(
                 self._usage_event(run, usage, kind="embedding", call_id=call_id))
 
@@ -4157,8 +4149,7 @@ class AgentOrchestrator:
         plan = with_step(plan, replace(step, status=status, result=result))
         run.plan = replace(plan, outbox=(plan.outbox + "\n\n" + note).strip())
         # Roll the child's usage into the parent in the same checkpoint as the result.
-        run.consumed_tokens += child.consumed_tokens
-        run.consumed_cost_usd += child.consumed_cost_usd
+        self._charge_child(run, child)
         await self._checkpoint(run, events,
             RunEvent(run_id=run.id, type=EventType.SUBAGENT_FINISHED,
                      payload={"child_run_id": child.id, "status": child.status.value,
@@ -4396,7 +4387,7 @@ class AgentOrchestrator:
         tokens = verdict.usage.total_tokens
         recorded: list[RunEvent] = []
         if tokens:
-            run.consumed_tokens += tokens  # the guard model counts against the budget
+            self._charge(run, verdict.usage)  # the guard model counts against the budget
             recorded.append(self._usage_event(run, verdict.usage, kind="guard", stage=stage,
                                               model_profile=guard.model_profile))
         if verdict.error is None and verdict.safe:
@@ -4567,8 +4558,7 @@ class AgentOrchestrator:
         )
         # Roll the child's usage into the parent in the same checkpoint as the
         # result, so a crash cannot count it twice.
-        run.consumed_tokens += finished.consumed_tokens
-        run.consumed_cost_usd += finished.consumed_cost_usd
+        self._charge_child(run, finished)
         artifact = await self._append_tool_result(run, result, suffix=stop.context if stop else "")
         await self._record_tool_result(
             run, events, result, attempt=attempt, artifact=artifact,
@@ -4709,6 +4699,28 @@ class AgentOrchestrator:
             ),
         )
         return run
+
+    @staticmethod
+    def _charge(run: RunRecord, usage: Usage) -> None:
+        """Add one model call's usage to the run: the only place that does (Phase 35).
+
+        Every call made for a run goes through here: the main model, summaries, the guard
+        model, embeddings made inside a tool call, and note extraction. Tokens and cost are
+        always charged together (the guard and embedding paths used to drop the cost).
+        """
+
+        if usage.total_tokens:
+            run.consumed_tokens += usage.total_tokens
+        if usage.cost_usd:
+            run.consumed_cost_usd += usage.cost_usd
+
+    @staticmethod
+    def _charge_child(run: RunRecord, child: RunRecord) -> None:
+        """Roll a finished subagent's usage into its parent, in the checkpoint that records
+        its result (so a crash cannot count it twice)."""
+
+        run.consumed_tokens += child.consumed_tokens
+        run.consumed_cost_usd += child.consumed_cost_usd
 
     def _budget_reason(self, run: RunRecord) -> str | None:
         if self._wall_limit_reached(run):

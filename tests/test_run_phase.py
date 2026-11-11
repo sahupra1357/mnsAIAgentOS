@@ -529,6 +529,54 @@ class StableToolListTests(unittest.TestCase):
         run(scenario())
 
 
+class UsagePathTests(unittest.TestCase):
+    """Phase 35: one function adds a model call's usage to a run."""
+
+    def test_tokens_and_cost_are_charged_together(self) -> None:
+        from agent_harness.domain import Usage
+
+        record = RunRecord(id="r", model_profile="p", messages=[TASK])
+        AgentOrchestrator._charge(record, Usage(input_tokens=30, output_tokens=12, cost_usd=0.002))
+        AgentOrchestrator._charge(record, Usage())  # a call that reported nothing
+        self.assertEqual((record.consumed_tokens, record.consumed_cost_usd), (42, 0.002))
+        child = RunRecord(id="c", model_profile="p", messages=[TASK], consumed_tokens=8, consumed_cost_usd=0.001)
+        AgentOrchestrator._charge_child(record, child)
+        self.assertEqual(record.consumed_tokens, 50)
+        self.assertAlmostEqual(record.consumed_cost_usd, 0.003)
+
+    def test_nothing_else_adds_to_a_runs_totals(self) -> None:
+        import inspect
+        import re
+
+        source = inspect.getsource(loop)
+        owners = inspect.getsource(AgentOrchestrator._charge) + inspect.getsource(AgentOrchestrator._charge_child)
+        pattern = re.compile(r"\.consumed_(?:tokens|cost_usd) \+=")
+        self.assertEqual(len(pattern.findall(source)), len(pattern.findall(owners)))
+
+    def test_no_note_extraction_after_the_budget_is_used(self) -> None:
+        async def scenario() -> None:
+            class Memory:
+                class settings:  # noqa: N801 - the attributes the orchestrator reads
+                    auto_save = True
+                    recall = False
+                asked = 0
+
+                async def save_from_turn(self, *args: object, **kwargs: object):
+                    Memory.asked += 1
+                    raise AssertionError("not reached")
+
+            store = InMemoryRunStore()
+            orchestrator = AgentOrchestrator(models=Model([say(tokens=5_000)]), tools=Tools(), store=store,
+                                             memory=Memory())
+            created = await orchestrator.create_run(model_profile="p", messages=[TASK],
+                                                    budget=RunBudget(max_tokens=1_000))
+            done = await orchestrator.run(created.id)
+            self.assertIs(done.status, RunStatus.COMPLETED)  # the answer itself was accepted
+            self.assertEqual(Memory.asked, 0)
+
+        run(scenario())
+
+
 class ConfigTests(unittest.TestCase):
     def test_validation(self) -> None:
         with self.assertRaises(ConfigError):
