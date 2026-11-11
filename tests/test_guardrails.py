@@ -578,6 +578,37 @@ class ModelGuardTests(unittest.IsolatedAsyncioTestCase):
         finished = await start(orch, "refactor the retry loop")
         self.assertEqual((finished.messages[-1].content, model.cancelled), ("fine", 0))
 
+    async def test_a_deadline_makes_a_slow_guard_a_guard_error_and_pauses_it(self) -> None:
+        # Live run, 2026-11-11: a guard server scaled to zero held the first turn for 381 s,
+        # for a verdict that (action = "flag") could not have stopped it.
+        from agent_harness.domain import RetryableModelError
+
+        requests: list[Any] = []
+
+        class Slow:
+            def resolve(self, profile: str) -> "Slow":
+                return self
+
+            async def complete(self, request: Any) -> Any:
+                requests.append(request)
+                raise RetryableModelError("timed out")
+
+        guard = Guardrails(self.config(timeout_seconds=20), models=Slow())
+        first = await guard.classify("hello")
+        second = await guard.classify("hello again")
+        self.assertTrue(first.safe and second.safe)  # on_error = "allow"
+        self.assertEqual((first.categories, second.categories), (("guard_error",), ("guard_error",)))
+        self.assertEqual(len(requests), 1)  # not asked again for a minute
+        self.assertEqual(requests[0].timeout_seconds, 20.0)
+        self.assertEqual(requests[0].metadata["timeout"], "hard")  # not extended by a cold start
+        # Without a deadline (the default) the request is the profile's to time.
+        plain = Guardrails(self.config(), models=Slow())
+        await plain.classify("hello")
+        await plain.classify("hello")
+        self.assertEqual(len(requests), 3)
+        self.assertIsNone(requests[-1].timeout_seconds)
+        self.assertNotIn("timeout", requests[-1].metadata)
+
     async def test_flag_action_does_not_override_on_error_block(self) -> None:
         model = Scripted([], ["not a verdict"])
         config = self.config(check=("input",), on_error="block", action="flag")

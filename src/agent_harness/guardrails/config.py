@@ -91,6 +91,11 @@ class ModelGuardConfig:
     # "block" refuses on an unsafe verdict; "flag" records the verdict and lets the turn go on
     # (for small guard models whose false positives would block ordinary work).
     action: str = "block"
+    # Seconds one guard check may take before it counts as a guard failure (``on_error``
+    # decides). 0: the guard profile's own timeouts, which wait for a server scaled to zero;
+    # with ``action = "flag"`` that can hold a turn for minutes for a verdict that cannot
+    # stop it. After a failed check the guard is not asked again for a minute.
+    timeout_seconds: int = 0
 
 
 @dataclass(frozen=True, slots=True)

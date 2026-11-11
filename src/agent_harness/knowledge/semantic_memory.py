@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import sqlite3
+import time
 from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
@@ -30,6 +31,11 @@ from agent_harness.domain import MemoryItem
 logger = logging.getLogger(__name__)
 
 Embed = Callable[[list[str]], Awaitable[list[list[float]]]]
+class _EmbeddingPaused(RuntimeError):
+    """The embedding endpoint failed a moment ago and is not asked again yet (already logged)."""
+
+
+_EMBED_RETRY_SECONDS = 60.0  # after a failed or timed-out embedding, how long keyword search stands in
 SEARCH_MODES = ("keyword", "semantic", "hybrid")
 _RRF_K = 60
 _BATCH = 32
@@ -129,6 +135,11 @@ class VectorIndex:
         self._connection.close()
 
 
+def _brief(exc: BaseException) -> str:
+    text = " ".join(str(exc).split())
+    return f"{type(exc).__name__}: {text[:160]}" if text else type(exc).__name__
+
+
 class SemanticMemoryStore:
     """A ``MemoryStore`` that adds embedding search to another store (keyword search stays)."""
 
@@ -140,11 +151,19 @@ class SemanticMemoryStore:
         *,
         model: str,
         mode: str = "semantic",
+        quick_embed: Embed | None = None,
     ) -> None:
         if mode not in {"semantic", "hybrid"}:
             raise ValueError("semantic memory mode must be 'semantic' or 'hybrid'")
         self._inner = inner
         self._embed = embed
+        # Inside a run (saving a note, recall, search) the vectors are a help, not a need:
+        # ``quick_embed`` is the same call with a short deadline, and after it fails the
+        # store uses keyword search alone for a while instead of waiting again on every
+        # message (an embedding server scaled to zero takes minutes to start). Only
+        # ``reindex`` waits for the server.
+        self._quick_embed = quick_embed or embed
+        self._health: dict[str, float] = {"down_until": 0.0}
         self._index = index
         self._model = model
         self.mode = mode
@@ -157,19 +176,22 @@ class SemanticMemoryStore:
         """The same notes and vectors seen through another namespace."""
 
         view = SemanticMemoryStore(self._inner.scoped(namespace), self._embed, self._index,
-                                   model=self._model, mode=self.mode)
+                                   model=self._model, mode=self.mode, quick_embed=self._quick_embed)
         view._unindexed = self._unindexed
+        view._health = self._health
         return view
 
     async def put(self, text: str, metadata: Mapping[str, str] | None = None) -> MemoryItem:
         item: MemoryItem = await self._inner.put(text, metadata)
         try:
-            vector = (await self._embed([item.text]))[0]
+            vector = (await self._embed_now([item.text]))[0]
             await self._index.upsert(self.namespace, self._model, item, vector)
-        except Exception:  # noqa: BLE001 - the note is saved; the next search embeds it
+        except _EmbeddingPaused:
             self._unindexed.add(self.namespace)
-            logger.warning("embedding a memory note failed; it is keyword-searchable until reindexed",
-                           exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - the note is saved; the next search embeds it
+            self._unindexed.add(self.namespace)
+            logger.warning("embedding a memory note failed (%s); it is keyword-searchable until "
+                           "embedded by a later search or `memory reindex`", _brief(exc))
         return item
 
     async def get(self, item_id: str) -> MemoryItem | None:
@@ -190,6 +212,17 @@ class SemanticMemoryStore:
             await self._index.delete(self.namespace, item_id)
         return done
 
+    async def _embed_now(self, texts: list[str]) -> list[list[float]]:
+        """Embed with the short deadline; after a failure, fail at once for a while."""
+
+        if time.monotonic() < self._health["down_until"]:
+            raise _EmbeddingPaused("the embedding endpoint did not answer recently")
+        try:
+            return await self._quick_embed(texts)
+        except Exception:
+            self._health["down_until"] = time.monotonic() + _EMBED_RETRY_SECONDS
+            raise
+
     async def _embed_pending(self) -> None:
         """Embed up to one batch of this namespace's notes that have no vector yet."""
 
@@ -200,7 +233,7 @@ class SemanticMemoryStore:
         missing = [item for item in live if item.id not in known]
         batch = missing[:_BATCH]
         if batch:
-            vectors = await self._embed([item.text for item in batch])
+            vectors = await self._embed_now([item.text for item in batch])
             for item, vector in zip(batch, vectors):
                 await self._index.upsert(self.namespace, self._model, item, vector)
         if len(missing) <= _BATCH:
@@ -210,9 +243,12 @@ class SemanticMemoryStore:
         limit = max(1, min(limit, 20))
         try:
             await self._embed_pending()
-            vector = (await self._embed([query]))[0]
-        except Exception:  # noqa: BLE001 - an embedding outage degrades to keyword search
-            logger.warning("embedding a memory query failed; using keyword search", exc_info=True)
+            vector = (await self._embed_now([query]))[0]
+        except _EmbeddingPaused:
+            return await self._inner.search(query, limit)
+        except Exception as exc:  # noqa: BLE001 - an embedding outage degrades to keyword search
+            logger.warning("embedding a memory query failed (%s); using keyword search for the next "
+                           "%d seconds", _brief(exc), int(_EMBED_RETRY_SECONDS))
             return await self._inner.search(query, limit)
         semantic = [item for _, item in await self._index.nearest(self.namespace, self._model, vector, limit * 2)]
         if self.mode == "semantic":

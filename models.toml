@@ -317,6 +317,7 @@ taint = true
 [guardrails.model]
 action = "flag"
 parallel = true
+timeout_seconds = 20
 
 [network]
 restrict_egress = true

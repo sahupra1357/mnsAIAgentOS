@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -37,6 +38,9 @@ LLAMA_GUARD_CATEGORIES = {
     "S10": "hate", "S11": "suicide_and_self_harm", "S12": "sexual_content", "S13": "elections",
     "S14": "code_interpreter_abuse",
 }
+
+
+_GUARD_RETRY_SECONDS = 60.0  # after a guard check failed under a deadline, how long before it is asked again
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +78,7 @@ class Guardrails:
     def __init__(self, config: GuardrailsConfig, models: ModelResolver | None = None) -> None:
         self.config = config
         self._models = models
+        self._guard_down_until = 0.0  # after a guard check missed its deadline (model.timeout_seconds)
         self._input_deny = tuple(re.compile(p, re.IGNORECASE) for p in config.input.denylist)
         self._output_deny = tuple(re.compile(p, re.IGNORECASE) for p in config.output.denylist)
 
@@ -167,12 +172,18 @@ class Guardrails:
         messages = [Message(Role.USER, user_text)]
         if assistant_text is not None:
             messages.append(Message(Role.ASSISTANT, assistant_text))
+        deadline = self.config.model.timeout_seconds
+        if deadline and time.monotonic() < self._guard_down_until:
+            return self._on_error("guard model did not answer recently; not asked again yet")
         try:
             response = await self._models.resolve(self.model_profile).complete(ModelRequest(
                 messages=tuple(messages), temperature=0.0, max_output_tokens=24,
-                metadata={"purpose": "guard"},
+                timeout_seconds=float(deadline) if deadline else None,
+                metadata={"purpose": "guard", **({"timeout": "hard"} if deadline else {})},
             ))
         except HarnessError as exc:
+            if deadline:
+                self._guard_down_until = time.monotonic() + _GUARD_RETRY_SECONDS
             return self._on_error(f"guard model failed: {exc}")
         verdict = parse_llama_guard(response.content)
         if verdict is None and assistant_text and _prefilled(response.content, assistant_text):

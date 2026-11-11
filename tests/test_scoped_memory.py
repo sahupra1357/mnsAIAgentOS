@@ -146,12 +146,64 @@ class SemanticLifecycleTests(unittest.TestCase):
                 note = await store.put("The cache lives in redis-east.")
             self.assertEqual(await index.known("default", "m"), set())
             failing["on"] = False
+            store._health["down_until"] = 0.0  # a minute later: the endpoint is tried again
             found = await store.search("where is the cache redis")
             self.assertEqual([item.id for item in found], [note.id])  # embedded by the search itself
             self.assertEqual(await index.known("default", "m"), {note.id})
             await store.forget(note.id)
             self.assertEqual(await index.known("default", "m"), set())
             self.assertEqual(await store.search("where is the cache redis"), ())
+
+        run(scenario())
+
+    def test_a_slow_embedding_server_does_not_hold_up_a_search(self) -> None:
+        # Live run, 2026-11-11: with the embedding server scaled to zero, recall waited for
+        # its cold start (up to 20 minutes) before the run was even created.
+        async def scenario() -> None:
+            calls = {"quick": 0, "full": 0}
+
+            async def quick(texts: list[str]) -> list[list[float]]:
+                calls["quick"] += 1
+                raise TimeoutError("no answer within the deadline")
+
+            async def full(texts: list[str]) -> list[list[float]]:
+                calls["full"] += 1
+                return await embed(texts)
+
+            store = SemanticMemoryStore(SQLiteMemoryStore(":memory:"), full, VectorIndex(":memory:"),
+                                        model="m", mode="hybrid", quick_embed=quick)
+            with self.assertLogs("agent_harness.knowledge.semantic_memory", level="WARNING"):
+                note = await store.put("The cache lives in redis-east.")
+                found = await store.search("cache redis-east")
+                again = await store.scoped("project:x").search("cache redis-east")
+            self.assertEqual([item.id for item in found], [note.id])  # keyword search stood in
+            self.assertEqual(again, ())
+            self.assertEqual(calls, {"quick": 1, "full": 0})  # asked once, then left alone for a while
+            self.assertEqual(await store.reindex(), 1)  # reindex waits for the server
+            self.assertEqual(calls["full"], 1)
+
+        run(scenario())
+
+    def test_the_client_applies_the_deadline_instead_of_the_cold_start_wait(self) -> None:
+        async def scenario() -> None:
+            from agent_harness.config.loader import ModelProfile
+            from agent_harness.model_gateway.openai_compatible import OpenAICompatibleClient
+            from agent_harness.model_gateway.transport import HttpResponse
+
+            seen: list[float] = []
+
+            class Transport:
+                async def post_json(self, url, payload, headers, timeout_seconds):
+                    seen.append(timeout_seconds)
+                    return HttpResponse(200, {}, b'{"data": [{"index": 0, "embedding": [1.0, 0.0]}]}')
+
+            profile = ModelProfile(adapter="openai_compatible", model="m", endpoint="http://x/v1",
+                                   timeout_seconds=180, cold_start_timeout_seconds=1200)
+            client = OpenAICompatibleClient(profile, transport=Transport(), environ={})
+            await client.embed(["a"], timeout=8)
+            client._warm = False
+            await client.embed(["a"])
+            self.assertEqual(seen, [8, 1200])
 
         run(scenario())
 

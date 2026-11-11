@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fnmatch
+import functools
+import inspect
 import os
 from dataclasses import dataclass, field, replace
 from collections.abc import Callable
@@ -532,8 +534,12 @@ def open_memory_store(
         index: Any = VectorIndex(vectors)
         if config.memory.backend == "sqlite":
             index = OffLoop(index, name="agent-harness-vectors")  # the cosine scan is the slow part
+        quick = None
+        deadline = config.memory.embed_timeout_seconds
+        if deadline and "timeout" in inspect.signature(embed).parameters:
+            quick = functools.partial(embed, timeout=deadline)
         return SemanticMemoryStore(store, embed, index, model=config.models[profile].model,
-                                   mode=config.memory.search)
+                                   mode=config.memory.search, quick_embed=quick)
     except BaseException:
         store.close_now()
         raise

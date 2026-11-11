@@ -316,6 +316,10 @@ class MemoryConfig:
     # search. ``database`` may be an absolute or ~ path shared by every project, e.g.
     # "~/.agent-harness/memory.sqlite3"; without it the notes are next to the run database.
     # ``namespace`` stays readable as the notes from before Phase 27.
+    # Seconds an embedding made inside a run may take (saving a note, recall, search) before
+    # keyword search is used instead; an embedding server scaled to zero takes minutes to
+    # start, and a run must not wait for it. 0: the embedding profile's own timeouts.
+    embed_timeout_seconds: float = 8.0
     recall: bool = True              # put matching notes in front of the model for each message
     recall_limit: int = 5
     recall_max_chars: int = 2_000
@@ -328,6 +332,8 @@ class MemoryConfig:
     def __post_init__(self) -> None:
         if min(self.recall_limit, self.auto_save_max_notes) < 1 or self.recall_max_chars < 200:
             raise ConfigError("memory: recall_limit and auto_save_max_notes >= 1, recall_max_chars >= 200")
+        if self.embed_timeout_seconds < 0:
+            raise ConfigError("memory.embed_timeout_seconds must not be negative (0 = the profile's timeouts)")
         if self.auto_save_max_output_tokens < 64:
             raise ConfigError("memory.auto_save_max_output_tokens must be at least 64")
         if not _PROFILE_NAME.fullmatch(self.namespace):
