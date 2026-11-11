@@ -266,7 +266,8 @@ class OffLoopTests(unittest.IsolatedAsyncioTestCase):
             await store.close()
 
     def test_config_defaults(self) -> None:
-        self.assertEqual((StorageConfig().message_table, StorageConfig().off_loop), (False, False))
+        # On in code since Phase 30 (they were features of the root config before).
+        self.assertEqual((StorageConfig().message_table, StorageConfig().off_loop), (True, True))
 
 
 LOOKUP = ToolSpec(name="lookup", description="look up", input_schema={"type": "object"}, risk=ToolRisk.READ_ONLY)

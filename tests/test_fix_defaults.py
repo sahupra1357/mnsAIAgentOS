@@ -21,7 +21,9 @@ from typing import Any
 
 from agent_harness.config.loader import (
     ContextConfig,
+    MemoryConfig,
     OrchestratorConfig,
+    StorageConfig,
     SummarizationConfig,
     load_config,
 )
@@ -50,6 +52,14 @@ FIXES: tuple[tuple[str, str, Any], ...] = (
     ("context", "calibrate", True),                        # the estimate drifted below the real count
     ("summarization", "trigger", "threshold"),             # history was dropped before it was summarized
     ("summarization", "chunked", True),                    # a long range lost its middle
+    # Memory is one thing: without all five a new chat remembers nothing.
+    ("memory", "enabled", True),
+    ("memory", "scopes", True),                            # notes were per run database, unscoped
+    ("memory", "recall", True),                            # notes were never put in front of the model
+    ("memory", "auto_save", True),                         # nothing was saved unless the model thought of it
+    ("memory", "guidance", True),                          # the model was never told the tools exist
+    ("storage", "message_table", True),                    # every checkpoint rewrote the whole conversation
+    ("storage", "off_loop", True),                         # one run's database work stopped every other run
 )
 
 # (config section, key): why it is a feature or a setting, so off (or neutral) in code.
@@ -68,9 +78,16 @@ FEATURES: dict[tuple[str, str], str] = {
     ("summarization", "keep_ratio"): "tuning value",
     ("summarization", "style"): "a choice of summary format",
     ("summarization", "max_message_chars"): "tuning value",
+    ("memory", "recall_limit"): "tuning value",
+    ("memory", "recall_max_chars"): "tuning value",
+    ("memory", "auto_save_profile"): "a cheaper model for note extraction is the operator's choice",
+    ("memory", "auto_save_max_notes"): "tuning value",
+    ("memory", "auto_save_max_output_tokens"): "tuning value",
+    ("memory", "auto_save_parameters"): "depends on the model served (e.g. thinking off)",
 }
 
-SECTIONS = {"orchestrator": OrchestratorConfig, "context": ContextConfig, "summarization": SummarizationConfig}
+SECTIONS = {"orchestrator": OrchestratorConfig, "context": ContextConfig, "summarization": SummarizationConfig,
+            "memory": MemoryConfig, "storage": StorageConfig}
 
 # Options that existed before Phase 25 keep the older rule and are not classified here.
 BEFORE_PHASE_25 = {
@@ -85,6 +102,9 @@ BEFORE_PHASE_25 = {
     "context": {"chars_per_token", "high_water_ratio", "low_water_ratio", "message_overhead_tokens",
                 "max_tool_output_chars"},
     "summarization": {"enabled", "profile", "max_output_tokens", "max_input_chars", "parameters"},
+    # memory.enabled is older but was off; Phase 30 made it a fix, so it is in FIXES.
+    "memory": {"namespace", "database", "backend", "url_env", "search", "embedding_profile", "vectors"},
+    "storage": {"url_env"},
 }
 
 

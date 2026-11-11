@@ -296,7 +296,7 @@ class ArtifactsConfig:
 class MemoryConfig:
     """Long-term notes exposed as memory_search / memory_write tools."""
 
-    enabled: bool = False
+    enabled: bool = True
     namespace: str = "default"
     database: str | None = None  # SQLite file (backend = "sqlite")
     # "sqlite" (default) or "postgres". Postgres reads its URL from the env var
@@ -310,21 +310,23 @@ class MemoryConfig:
     search: str = "keyword"
     embedding_profile: str = ""
     vectors: str = ""
-    # Phase 27 (knowledge/scoped_memory.py), all off in code.
+    # Phase 27 (knowledge/scoped_memory.py). enabled, scopes, recall, auto_save and guidance
+    # are on in code since Phase 30: memory that is never recalled or saved is not memory.
+    # Without ``database`` the notes are next to the run database.
     # scopes: notes belong to the user or to the project (namespaces of one store, with a
     # tenant's and end user's own), and the tools gain scope, update, forget and list.
     # ``database`` may then be an absolute or ~ path shared by every project, e.g.
     # "~/.agent-harness/memory.sqlite3". ``namespace`` stays readable as the old notes.
-    scopes: bool = False
-    recall: bool = False             # put matching notes in front of the model for each message
+    scopes: bool = True
+    recall: bool = True              # put matching notes in front of the model for each message
     recall_limit: int = 5
     recall_max_chars: int = 2_000
-    auto_save: bool = False          # one model call per finished turn proposes notes to keep
+    auto_save: bool = True           # one model call per finished turn proposes notes to keep
     auto_save_profile: str = ""      # profile or route for that call (empty: the run's own)
     auto_save_max_notes: int = 4
     auto_save_max_output_tokens: int = 512
     auto_save_parameters: Mapping[str, Any] = field(default_factory=dict)
-    guidance: bool = False           # a "Memory" section in the system prompt (when to save and search)
+    guidance: bool = True            # a "Memory" section in the system prompt (when to save and search)
 
     def __post_init__(self) -> None:
         if (self.recall or self.auto_save or self.guidance) and not self.scopes:
@@ -756,13 +758,13 @@ class StorageConfig:
     """Where runs are stored. ``url_env`` names an env var holding a postgresql:// URL."""
 
     url_env: str = ""
-    # Phase 29 (SQLite; both off in code, on in the root models.toml).
+    # Phase 29 (SQLite; both on in code since Phase 30).
     # message_table: a run's messages are rows of run_messages and a checkpoint writes only
     # the rows that changed, instead of rewriting the whole conversation in the snapshot.
-    message_table: bool = False
+    message_table: bool = True
     # off_loop: the run store, the note store and the vector index do their database work on
     # a thread of their own, so a checkpoint or a search does not stop every other run.
-    off_loop: bool = False
+    off_loop: bool = True
 
 
 @dataclass(frozen=True, slots=True)

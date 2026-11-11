@@ -119,7 +119,8 @@ class ConfigAndMigrationTests(unittest.TestCase):
             sqlite_config = root / "sqlite.toml"
             sqlite_config.write_text(MODEL + '[memory]\nenabled = true\ndatabase = "notes.sqlite3"\n', encoding="utf-8")
             app = build_application(config_path=sqlite_config, database_path=root / "runs.sqlite3")
-            self.assertIsInstance(app.memory, SQLiteMemoryStore)
+            # (behind the OffLoop wrapper, which is on in code since Phase 30)
+            self.assertIsInstance(getattr(app.memory, "inner", app.memory), SQLiteMemoryStore)
             asyncio.run(app.close())
 
     def test_migrate_between_sqlite_files_is_idempotent(self) -> None:

@@ -59,9 +59,14 @@ Phase 30 corrected that.
 | Answer | It is a | Code default | Root `models.toml` | Tests that pin the old behaviour |
 |---|---|---|---|---|
 | No: the old behaviour is wrong for everyone (a lost message, a corrupt history, an ignored cancel, data dropped silently) | **fix** | **on** | no key | updated to the new behaviour (not deleted) |
-| Yes: it needs something outside the harness (a server, a key, a store), costs extra model calls or money, changes a stored format, or depends on the deployment | **feature** | off | turned on | unchanged |
+| Yes: it needs something the code cannot supply (a server, a key, credentials, Docker), or it is a mode the user picks per run or per deployment | **feature** | off | turned on | unchanged |
 | It is a number or a choice whose best value depends on the model or the workload | **setting** | a safe value | the user's value | unchanged |
 
+- **Backward compatibility is not a reason to keep something off.** The user said so on 2026-11-11: the harness
+  did not work before Phases 25–29, and nothing has to keep behaving that way. "It costs a model call", "it changes
+  the stored format" and "existing tests expect the old behaviour" are not reasons either: if the harness is wrong
+  without it, it is a fix. (I had filed memory recall and saving, and the message table, as features on those
+  grounds; that was the same mistake again.)
 - **A fix may keep its switch as an opt-out**, for the case where it misbehaves on a live model. The
   opt-out is never set in the root config.
 - **Not sure?** If the change repairs a symptom the user reported, it is a fix. If it still is not
@@ -203,7 +208,7 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   omitted. A new code path that reads `view.messages[1]` for the summary is wrong in this layout. The estimate
   scale (`estimate_ratio` in `model_responded`) and overflow caps are passed to `build`; do not wrap an anchored
   view in `fit_to_tokens`. Details: `skills/context-management/SKILL.md`.
-- **Scoped memory (Phase 27).** The root config keeps notes in `~/.agent-harness/memory.sqlite3` (`[memory]
+- **Scoped memory (Phase 27; on in code since Phase 30).** The root config keeps notes in `~/.agent-harness/memory.sqlite3` (`[memory]
   scopes`, `recall`, `auto_save`, `guidance`), not in the run database. Anything that builds the root config in a
   test or benchmark must override `memory.database`, or it opens the user's real notes. The end-of-turn
   extraction is a model call with `purpose = "memory"`, made after `run_completed`, so `memory_saved` can be the
@@ -216,7 +221,7 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   `tests/test_symptoms.py`) raises on that. New event types go into `ANNOTATION_EVENTS` or `STATE_EVENTS`
   (`domain.py`). The run-state helpers moved to `orchestration/state.py` and are imported back by name.
   Details: `skills/durable-agent-orchestration/SKILL.md`.
-- **Storage (Phase 29).** With the root config, `app.store` is an `OffLoop` around the SQLite store (`.inner`
+- **Storage (Phase 29; on in code since Phase 30).** `app.store` is an `OffLoop` around the SQLite store (`.inner`
   is the store itself), messages are rows of `run_messages` (migration 10), and the snapshot has
   `messages_in_table`. Code that reads `snapshot_json` directly gets no messages: go through `get_run`. The delta
   write trusts its cache only for the version being replaced, so a run object must be saved through the store it
@@ -957,9 +962,14 @@ The Phase 25–29 bug fixes were off in code, so only the root config was repair
 from the root `models.toml`): `[orchestrator]` `resurface_repeated_results`, `phase_dispatch`,
 `close_orphan_tool_calls`, `mid_phase_checks`; `[context]` `layout = "anchored"`, `recovery_hints`, `ledger`,
 `calibrate`; `[summarization]` `trigger = "threshold"`, `chunked`. Each keeps its switch as an opt-out until the
-fixes have been verified on a live model; removing the old code paths is the follow-up. Still features (off in
-code, on in the root config): memory recall and saving, the message table and off-loop storage, `state_block`,
-`cancel_poll_seconds`, and the tuning values. Also:
+fixes have been verified on a live model; removing the old code paths is the follow-up. Also on in code:
+`[memory]` `enabled`, `scopes`, `recall`, `auto_save`, `guidance` (memory is one thing; without `database` the
+notes are next to the run database, and the root config names the shared `~/.agent-harness/memory.sqlite3`) and
+`[storage]` `message_table`, `off_loop`. So every application has the memory tools, `app.store` and `app.memory`
+are `OffLoop` wrappers (`.inner`), and a scripted model in a test gets a `purpose = "memory"` request after a
+completed top-level run. Still off in code, on in the root config: `state_block` (it repeats the stored
+`[Plan]`/`[Budget]` notes until those stop being stored), `cancel_poll_seconds` (queue workers already poll), and
+the tuning values. Also:
 - the anchored state message shrinks under a tight budget (no ledger, then a short note without the header),
   so an overflow retry on a small history no longer fails;
 - a repeated call answered from an earlier result has `repeated_call: true` in its `tool_responded` event;
