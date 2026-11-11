@@ -533,6 +533,21 @@ def _summary_applies(summary: ContextSummary, messages: Sequence[Message], head_
 
 
 ORCHESTRATOR_NOTE_PREFIXES = ("[Plan]", "[Budget]", "[Memory]")
+# Every user-role message the harness writes starts with one of these. The chat format has
+# no role for them: a directive that starts a turn (a plan step, "answer now") has to be a
+# user message, or the next request would hold two assistant messages in a row.
+HARNESS_PREFIXES = (*ORCHESTRATOR_NOTE_PREFIXES, "[Context from hooks]", "[Working state", "[State -")
+
+
+def written_by_user(message: Message) -> bool:
+    """Whether the user wrote this message (the one place that decides it, Phase 32).
+
+    Use it wherever "the user's request" or "the user's latest message" is needed; a
+    harness directive, hook context or status message is never one.
+    """
+
+    return (message.role is Role.USER and bool(message.content.strip())
+            and not message.content.startswith(HARNESS_PREFIXES))
 """Prefixes of the user messages the orchestrator injects; they are not the user's requests."""
 
 
@@ -541,8 +556,7 @@ def latest_request_index(messages: Sequence[Message], *, start: int = 0) -> int 
 
     for index in range(len(messages) - 1, start - 1, -1):
         message = messages[index]
-        if (message.role is Role.USER and message.content.strip()
-                and not message.content.startswith(ORCHESTRATOR_NOTE_PREFIXES)):
+        if written_by_user(message):
             return index
     return None
 

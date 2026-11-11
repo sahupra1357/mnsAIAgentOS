@@ -416,14 +416,51 @@ class StateBlockTests(unittest.TestCase):
             store = InMemoryRunStore()
             model = Model([calls(("a", "lookup")), say()])
             orchestrator = AgentOrchestrator(
-                models=model, tools=Tools(), store=store,
-                settings=OrchestratorSettings(state_block=True))
+                models=model, tools=Tools(), store=store)
             created = await orchestrator.create_run(
                 model_profile="p", messages=[TASK], budget=RunBudget(max_steps=2))
             done = await orchestrator.run(created.id)
             self.assertTrue(model.requests[-1].messages[-1].content.startswith(STATE_PREFIX))
             self.assertIn("Steps left in this turn: 1.", model.requests[0].messages[-1].content)
             self.assertFalse(any(m.content.startswith(STATE_PREFIX) for m in done.messages))
+
+        run(scenario())
+
+
+class WrittenByUserTests(unittest.TestCase):
+    """Phase 32: one function decides which user-role messages the user wrote."""
+
+    def test_harness_messages_are_not_the_users(self) -> None:
+        from agent_harness.orchestration.context import latest_request_index, written_by_user
+
+        user = Message(role=Role.USER, content="What does the loader do?")
+        harness = [
+            Message(role=Role.USER, content="[Plan] Execute step s1 (1/2): read"),
+            Message(role=Role.USER, content="[Budget] This is your last step."),
+            Message(role=Role.USER, content="[Memory] Notes that may help."),
+            Message(role=Role.USER, content="[Context from hooks]\nrun the tests"),
+            Message(role=Role.USER, content=STATE_PREFIX + "\nPlan (executing):"),
+            Message(role=Role.USER, content="   "),
+        ]
+        self.assertTrue(written_by_user(user))
+        self.assertFalse(any(written_by_user(m) for m in harness))
+        self.assertFalse(written_by_user(Message(role=Role.ASSISTANT, content="hello")))
+        # Hook context after the question used to count as "the latest request" in the view.
+        self.assertEqual(latest_request_index([user, *harness]), 0)
+
+    def test_the_status_block_goes_before_a_directive(self) -> None:
+        async def scenario() -> None:
+            store = InMemoryRunStore()
+            model = Model([calls(("a", "lookup")), say("partial"), say("final")])
+            orchestrator = AgentOrchestrator(
+                models=model, tools=Tools(), store=store,
+                settings=OrchestratorSettings(final_answer_on_last_step=True))
+            created = await orchestrator.create_run(
+                model_profile="p", messages=[TASK], budget=RunBudget(max_steps=2))
+            await orchestrator.run(created.id)
+            last = model.requests[-1].messages
+            self.assertTrue(last[-1].content.startswith("[Budget] This is your last step"))
+            self.assertTrue(last[-2].content.startswith(STATE_PREFIX))
 
         run(scenario())
 

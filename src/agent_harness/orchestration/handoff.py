@@ -48,7 +48,7 @@ from agent_harness.domain import (
     utc_now,
 )
 
-from .context import ORCHESTRATOR_NOTE_PREFIXES
+from .context import written_by_user
 
 PREVIOUS_RUNS_TOOL = "previous_runs"
 LINK_THRESHOLD = 4
@@ -89,9 +89,7 @@ def _shorten(text: str, limit: int) -> str:
 
 
 def _user_requests(messages: Sequence[Message]) -> list[str]:
-    return [m.content for m in messages
-            if m.role is Role.USER and m.content.strip()
-            and not m.content.startswith((*ORCHESTRATOR_NOTE_PREFIXES, _HOOK_PREFIX))]
+    return [m.content for m in messages if written_by_user(m)]
 
 
 def build_handoff(run: RunRecord, events: Sequence[RunEvent] = ()) -> RunHandoff:

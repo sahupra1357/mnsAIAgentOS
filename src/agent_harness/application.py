@@ -458,7 +458,6 @@ def orchestrator_settings(section: OrchestratorConfig) -> OrchestratorSettings:
         verify_phase=section.verify_phase,
         max_tool_calls_per_run=section.max_tool_calls_per_run or None,
         cancel_poll_seconds=section.cancel_poll_seconds or None,
-        state_block=section.state_block,
     )
 
 

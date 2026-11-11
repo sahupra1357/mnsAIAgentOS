@@ -58,6 +58,7 @@ REMOVED: dict[tuple[str, str], str] = {
     ("memory", "guidance"): "the system prompt explains the memory tools",
     ("storage", "message_table"): "a checkpoint writes only the messages that changed",
     ("storage", "off_loop"): "database work runs off the event loop",
+    ("orchestrator", "state_block"): "each request carries the current plan, tasks and low budget",
 }
 
 # Options added since Phase 25, each with the reason it is a feature or a setting.
@@ -65,7 +66,6 @@ OPTIONS: dict[tuple[str, str], str] = {
     ("orchestrator", "verify_phase"): "test aid: raises instead of continuing",
     ("orchestrator", "max_tool_calls_per_run"): "a limit only the operator can choose",
     ("orchestrator", "cancel_poll_seconds"): "depends on deployment: queue workers already poll",
-    ("orchestrator", "state_block"): "repeats the stored [Plan]/[Budget] notes until those stop being stored",
     ("context", "default_window"): "depends on the model served",
     ("context", "stale_tool_output_chars"): "tuning value",
     ("context", "keep_recent_units"): "tuning value",
