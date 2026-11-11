@@ -57,6 +57,40 @@ class VectorIndex:
             """
         )
         self._lock = asyncio.Lock()
+        # Decoded vectors per (namespace, model), dropped when this or another connection
+        # writes (PRAGMA data_version); before Phase 27 every search decoded every row.
+        self._cache: dict[tuple[str, str], list[tuple[float, array, MemoryItem]]] = {}
+        self._cache_version = -1
+
+    def _rows(self, namespace: str, model: str) -> list[tuple[float, "array[float]", MemoryItem]]:
+        version = self._connection.execute("PRAGMA data_version").fetchone()[0]
+        if version != self._cache_version:
+            self._cache.clear()
+            self._cache_version = version
+        cached = self._cache.get((namespace, model))
+        if cached is None:
+            cached = []
+            for row in self._connection.execute(
+                    "SELECT * FROM memory_vectors WHERE namespace = ? AND model = ?", (namespace, model)):
+                vector = array("f")
+                vector.frombytes(row["vector"])
+                cached.append((math.sqrt(sum(x * x for x in vector)) or 1.0, vector, _row_item(row)))
+            self._cache[(namespace, model)] = cached
+        return cached
+
+    async def delete(self, namespace: str, item_id: str) -> None:
+        """Drop a note's vectors (every model), e.g. when the note is forgotten."""
+
+        async with self._lock:
+            self._connection.execute(
+                "DELETE FROM memory_vectors WHERE namespace = ? AND id = ?", (namespace, item_id))
+            self._cache.clear()
+
+    async def dimensions(self, namespace: str, model: str) -> set[int]:
+        """Vector sizes stored for a model; more than one means part was written by another model."""
+
+        async with self._lock:
+            return {len(vector) for _, vector, _ in self._rows(namespace, model)}
 
     async def upsert(self, namespace: str, model: str, item: MemoryItem, vector: Sequence[float]) -> None:
         blob = array("f", (float(x) for x in vector)).tobytes()
@@ -66,6 +100,7 @@ class VectorIndex:
                 (namespace, item.id, model, item.text, json.dumps(dict(item.metadata), sort_keys=True),
                  item.created_at.isoformat() if item.created_at else None, blob),
             )
+            self._cache.clear()
 
     async def known(self, namespace: str, model: str) -> set[str]:
         async with self._lock:
@@ -80,18 +115,13 @@ class VectorIndex:
         target = list(query)
         target_norm = math.sqrt(sum(x * x for x in target)) or 1.0
         async with self._lock:
-            rows = self._connection.execute(
-                "SELECT * FROM memory_vectors WHERE namespace = ? AND model = ?", (namespace, model)
-            ).fetchall()
+            rows = list(self._rows(namespace, model))
         scored: list[tuple[float, MemoryItem]] = []
-        for row in rows:
-            vector = array("f")
-            vector.frombytes(row["vector"])
+        for norm, vector, item in rows:
             if len(vector) != len(target):
                 continue  # written by a model with another dimension
-            norm = math.sqrt(sum(x * x for x in vector)) or 1.0
             score = sum(a * b for a, b in zip(vector, target)) / (norm * target_norm)
-            scored.append((score, _row_item(row)))
+            scored.append((score, item))
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return scored[:limit]
 
@@ -119,20 +149,67 @@ class SemanticMemoryStore:
         self._model = model
         self.mode = mode
         self.namespace: str = getattr(inner, "namespace", "default")
+        # Namespaces with notes that may lack a vector (a failed embedding, an import):
+        # the next search embeds a few of them. Shared by scoped views.
+        self._unindexed: set[str] = set()
+
+    def scoped(self, namespace: str) -> "SemanticMemoryStore":
+        """The same notes and vectors seen through another namespace."""
+
+        view = SemanticMemoryStore(self._inner.scoped(namespace), self._embed, self._index,
+                                   model=self._model, mode=self.mode)
+        view._unindexed = self._unindexed
+        return view
 
     async def put(self, text: str, metadata: Mapping[str, str] | None = None) -> MemoryItem:
         item: MemoryItem = await self._inner.put(text, metadata)
         try:
             vector = (await self._embed([item.text]))[0]
             await self._index.upsert(self.namespace, self._model, item, vector)
-        except Exception:  # noqa: BLE001 - the note is saved; `memory reindex` embeds it later
+        except Exception:  # noqa: BLE001 - the note is saved; the next search embeds it
+            self._unindexed.add(self.namespace)
             logger.warning("embedding a memory note failed; it is keyword-searchable until reindexed",
                            exc_info=True)
         return item
 
+    async def get(self, item_id: str) -> MemoryItem | None:
+        found: MemoryItem | None = await self._inner.get(item_id)
+        return found
+
+    async def list_items(self, limit: int = 50, *, include_forgotten: bool = False) -> Sequence[MemoryItem]:
+        items: Sequence[MemoryItem] = await self._inner.list_items(limit, include_forgotten=include_forgotten)
+        return items
+
+    async def set_metadata(self, item_id: str, changes: Mapping[str, str | None]) -> MemoryItem | None:
+        changed: MemoryItem | None = await self._inner.set_metadata(item_id, changes)
+        return changed
+
+    async def forget(self, item_id: str, *, superseded_by: str | None = None) -> bool:
+        done: bool = await self._inner.forget(item_id, superseded_by=superseded_by)
+        if done:
+            await self._index.delete(self.namespace, item_id)
+        return done
+
+    async def _embed_pending(self) -> None:
+        """Embed up to one batch of this namespace's notes that have no vector yet."""
+
+        if self.namespace not in self._unindexed:
+            return
+        live = [item for item in await self._inner.list_items(10_000)]
+        known = await self._index.known(self.namespace, self._model)
+        missing = [item for item in live if item.id not in known]
+        batch = missing[:_BATCH]
+        if batch:
+            vectors = await self._embed([item.text for item in batch])
+            for item, vector in zip(batch, vectors):
+                await self._index.upsert(self.namespace, self._model, item, vector)
+        if len(missing) <= _BATCH:
+            self._unindexed.discard(self.namespace)
+
     async def search(self, query: str, limit: int = 5) -> Sequence[MemoryItem]:
         limit = max(1, min(limit, 20))
         try:
+            await self._embed_pending()
             vector = (await self._embed([query]))[0]
         except Exception:  # noqa: BLE001 - an embedding outage degrades to keyword search
             logger.warning("embedding a memory query failed; using keyword search", exc_info=True)
@@ -143,18 +220,27 @@ class SemanticMemoryStore:
         keyword = list(await self._inner.search(query, limit * 2))
         return tuple(_fuse([keyword, semantic])[:limit])
 
-    async def reindex(self) -> int:
-        """Embed this namespace's notes that have no vector for the current model."""
+    async def reindex(self, *, every_namespace: bool = False) -> int:
+        """Embed this namespace's notes that have no vector for the current model.
 
-        items = [item for namespace, item in await self._inner.export_items() if namespace == self.namespace]
-        known = await self._index.known(self.namespace, self._model)
-        missing = [item for item in items if item.id not in known]
-        for start in range(0, len(missing), _BATCH):
-            batch = missing[start:start + _BATCH]
-            vectors = await self._embed([item.text for item in batch])
-            for item, vector in zip(batch, vectors):
-                await self._index.upsert(self.namespace, self._model, item, vector)
-        return len(missing)
+        ``every_namespace``: all namespaces of the store (scoped memory keeps several).
+        """
+
+        exported = await self._inner.export_items()
+        namespaces = sorted({namespace for namespace, _ in exported}) if every_namespace else [self.namespace]
+        embedded = 0
+        for name in namespaces:
+            items = [item for namespace, item in exported
+                     if namespace == name and "forgotten_at" not in item.metadata]
+            known = await self._index.known(name, self._model)
+            missing = [item for item in items if item.id not in known]
+            for start in range(0, len(missing), _BATCH):
+                batch = missing[start:start + _BATCH]
+                vectors = await self._embed([item.text for item in batch])
+                for item, vector in zip(batch, vectors):
+                    await self._index.upsert(name, self._model, item, vector)
+            embedded += len(missing)
+        return embedded
 
     async def export_items(self) -> list[tuple[str, MemoryItem]]:
         items: list[tuple[str, MemoryItem]] = await self._inner.export_items()
@@ -162,6 +248,9 @@ class SemanticMemoryStore:
 
     async def import_items(self, items: Sequence[tuple[str, MemoryItem]]) -> int:
         inserted: int = await self._inner.import_items(items)
+        # Imported notes have no vectors: searches embed them a batch at a time
+        # (``memory reindex`` does all at once).
+        self._unindexed.update(namespace for namespace, _ in items)
         return inserted
 
     def close_now(self) -> None:

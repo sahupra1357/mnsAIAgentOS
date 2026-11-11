@@ -26,7 +26,12 @@ from agent_harness.orchestration.agents import (
     child_run_id,
     parse_todos,
 )
-from agent_harness.orchestration.runcontext import CURRENT_RUN_ID, CURRENT_RUN_STARTED
+from agent_harness.orchestration.runcontext import (
+    CURRENT_RUN_ID,
+    CURRENT_RUN_SCOPE,
+    CURRENT_RUN_STARTED,
+    RunScope,
+)
 from agent_harness.orchestration.handoff import (
     build_handoff,
     ensure_handoffs,
@@ -93,6 +98,7 @@ from agent_harness.orchestration.structured_output import (
 )
 from agent_harness.tools.validation import ArgumentValidationError, validate_arguments
 from agent_harness.orchestration.interaction import ASK_USER_SPEC, ASK_USER_TOOL
+from agent_harness.knowledge.scoped_memory import recall_block
 from agent_harness.orchestration.compaction import (
     CompactionPolicy,
     DefaultCompactionPolicy,
@@ -424,8 +430,12 @@ class AgentOrchestrator:
         context_policy: ContextPolicy | None = None,
         compaction: CompactionPolicy | None = None,
         calibrate_estimate: bool = False,
+        memory: Any = None,
     ) -> None:
         self._models = models
+        # Phase 27: a knowledge.scoped_memory.MemoryService. With it, notes are recalled for
+        # each new message and saved from each finished turn (per its settings).
+        self._memory = memory
         # Phase 26: when the provider reports more input tokens than estimated, later views
         # of the run count characters as that many more tokens (recorded in model_responded).
         self._calibrate_estimate = calibrate_estimate
@@ -625,6 +635,15 @@ class AgentOrchestrator:
                 first_user = next((i for i, m in enumerate(initial_messages) if m.role is Role.USER),
                                   len(initial_messages))
                 initial_messages.insert(first_user, Message(role=Role.SYSTEM, content=linked_block(found)))
+        recalled: list[Any] = []
+        if (self._memory is not None and self._memory.settings.recall and parent_run_id is None
+                and not any(m.role is Role.ASSISTANT for m in initial_messages)):
+            recalled = await self._recall(
+                initial_messages, RunScope(run_id=identifier, tenant=tenant, end_user=end_user))
+            if recalled:
+                first_user = next((i for i, m in enumerate(initial_messages) if m.role is Role.USER),
+                                  len(initial_messages))
+                initial_messages.insert(first_user, Message(role=Role.SYSTEM, content=recall_block(recalled)))
         if self._guardrails is not None and self._guardrails.uses_canary:
             _add_canary(initial_messages)
         if self._settings.current_date_note and parent_run_id is None:
@@ -716,7 +735,25 @@ class AgentOrchestrator:
         if found is not None:
             await self._checkpoint(run, [event], RunEvent(
                 run_id=run.id, type=EventType.RUN_LINKED, payload=link_payload(found), created_at=now))
+        if recalled:
+            await self._checkpoint(run, [event], RunEvent(
+                run_id=run.id, type=EventType.MEMORY_RECALLED, payload=_recall_payload(recalled),
+                created_at=now))
         return run
+
+    async def _recall(
+        self, messages: Sequence[Message], who: RunScope, exclude: Sequence[str] = ()
+    ) -> list[Any]:
+        """Notes for the latest user message; a memory failure never stops a run."""
+
+        prompt = next((m.content for m in reversed(messages) if m.role is Role.USER), "")
+        if not prompt.strip():
+            return []
+        try:
+            return list(await self._memory.recall(prompt, who=who, exclude=exclude))
+        except Exception:  # noqa: BLE001 - recall is a convenience
+            _LOG.warning("memory recall failed", exc_info=True)
+            return []
 
     async def _find_link(self, tenant: str, messages: Sequence[Message]) -> Any:
         """The earlier run the latest user message continues, if any (orchestration/handoff.py)."""
@@ -844,15 +881,71 @@ class AgentOrchestrator:
         finalize = getattr(self._tools, "release_run", None)
         if finalize is not None:
             await finalize(run.id)
+        await self._save_memories(run, events)
+
+    async def _save_memories(self, run: RunRecord, events: Sequence[RunEvent]) -> None:
+        """After a top-level turn completes: one model call proposes notes, new ones are saved.
+
+        It runs after the terminal checkpoint, so the run already shows as finished. The
+        call's tokens are added to the run and a ``memory_saved`` event records the note ids.
+        Nothing here can fail the run, and a turn that was continued meanwhile keeps its notes
+        but not the event.
+        """
+
+        memory = self._memory
+        if (memory is None or not memory.settings.auto_save or run.parent_run_id is not None
+                or run.status is not RunStatus.COMPLETED or not events
+                or events[-1].type is not EventType.RUN_COMPLETED):
+            return
+        start = 0
+        for index in range(len(run.messages) - 1, -1, -1):
+            message = run.messages[index]
+            if (message.role is Role.USER and message.content.strip()
+                    and not message.content.startswith(("[Context from hooks]", *ORCHESTRATOR_NOTE_PREFIXES))):
+                start = index
+                break
+        who = RunScope(run_id=run.id, tenant=run.tenant, end_user=run.end_user,
+                       tainted=any(m.role is Role.TOOL and m.content.startswith("<untrusted-tool-output")
+                                   for m in run.messages[start:]))
+        try:
+            notes, usage = await memory.save_from_turn(
+                self._models, run.messages[start:], profile=run.model_profile, who=who)
+        except Exception:  # noqa: BLE001 - saving notes is a convenience
+            _LOG.warning("could not save notes from run %s", run.id, exc_info=True)
+            return
+        if not notes and usage.total_tokens is None:
+            return
+        if usage.total_tokens is not None:
+            run.consumed_tokens += usage.total_tokens
+        if usage.cost_usd is not None:
+            run.consumed_cost_usd += usage.cost_usd
+        event = RunEvent(
+            run_id=run.id, type=EventType.MEMORY_SAVED, step=run.step_count, created_at=self._clock(),
+            payload={"ids": [note.item.id for note in notes], "scopes": [note.scope for note in notes],
+                     "count": len(notes), "input_tokens": usage.input_tokens,
+                     "output_tokens": usage.output_tokens, "cost_usd": usage.cost_usd})
+        expected = run.version
+        try:
+            # Not _checkpoint: that would run the terminal work (and this) again.
+            run.version = expected + 1
+            await self._store.save_checkpoint(run, (event,), expected_version=expected)
+        except Exception:  # noqa: BLE001 - e.g. the conversation was continued meanwhile
+            run.version = expected
+            return
+        if isinstance(events, list):
+            events.append(event)
+        self._emit_event(run, event)
 
     async def run(self, run_id: str) -> RunRecord:
         """Run or resume a persisted workflow until it reaches a terminal state."""
 
         token = CURRENT_RUN_ID.set(run_id)  # per-run tool resources (warm containers)
         started = CURRENT_RUN_STARTED.set(None)  # set by _run once the run is loaded
+        scope = CURRENT_RUN_SCOPE.set(None)  # set by _run: whose data tools read and write
         try:
             return await self._run(run_id)
         finally:
+            CURRENT_RUN_SCOPE.reset(scope)
             CURRENT_RUN_STARTED.reset(started)
             CURRENT_RUN_ID.reset(token)
 
@@ -862,6 +955,7 @@ class AgentOrchestrator:
         if run is None:
             raise KeyError(f"unknown run: {run_id}")
         CURRENT_RUN_STARTED.set(run.created_at)  # rm may delete only files created since (coding/removal.py)
+        self._set_run_scope(run)
         events = list(await self._store.list_events(run_id))
         if run.status.is_terminal or run.status is RunStatus.AWAITING_INPUT:
             return run
@@ -913,6 +1007,13 @@ class AgentOrchestrator:
             if settled:
                 return run
         return run
+
+    def _set_run_scope(self, run: RunRecord) -> None:
+        """Tell tools whose run this is, and whether untrusted output is in the turn (memory)."""
+
+        CURRENT_RUN_SCOPE.set(RunScope(
+            run_id=run.id, tenant=run.tenant, end_user=run.end_user,
+            tainted=_tainted(run.messages), top_level=run.parent_run_id is None))
 
     async def _session_start_hook(self, run: RunRecord, events: list[RunEvent]) -> bool:
         """Run session_start hooks; False if a hook blocked the run."""
@@ -1000,6 +1101,7 @@ class AgentOrchestrator:
         if pending:
             if await self._refuse_oversized_turn(run, events, pending):
                 return run.status.is_terminal
+            self._set_run_scope(run)  # tools started from here inherit it (taint as of this reply)
             prefetched = await self._prefetch_parallel(run, events, pending)
             for call in pending:
                 if self._wall_limit_reached(run):
@@ -1465,13 +1567,25 @@ class AgentOrchestrator:
                 added[0] = with_date_note(added[0], self._clock())
         _validate_message(added[0])
         prompt_hook = await self._user_prompt_hook(run.id, added, run.model_profile)
+        recall_events: list[RunEvent] = []
+        if self._memory is not None and self._memory.settings.recall and run.parent_run_id is None:
+            shown = [str(i) for e in events if e.type is EventType.MEMORY_RECALLED
+                     for i in e.payload.get("ids", ())]
+            recalled = await self._recall(
+                added, RunScope(run_id=run.id, tenant=run.tenant, end_user=run.end_user), exclude=shown)
+            if recalled:
+                # Its own message before the user's, so the request stays the latest message.
+                added.insert(0, Message(role=Role.USER, content=recall_block(recalled)))
+                recall_events.append(RunEvent(
+                    run_id=run.id, type=EventType.MEMORY_RECALLED, step=run.step_count, created_at=now,
+                    payload={**_recall_payload(recalled), "message": True}))
         run.status = RunStatus.RUNNING
         run.completed_at = None
         run.error = None
         run.output = None  # a continued structured run must produce a new result
         run.messages.extend(added)
         reopened = self._reopen_cut_plan(run, events)
-        payload: dict[str, Any] = {"chars": len(added[0].content)}
+        payload: dict[str, Any] = {"chars": len(added[-1].content)}
         if prompt_hook is not None:
             payload["user_prompt_hook"] = prompt_hook.as_payload()
         if budget is not None:
@@ -1484,6 +1598,7 @@ class AgentOrchestrator:
         await self._checkpoint(
             run,
             events,
+            *recall_events,
             RunEvent(
                 run_id=run.id,
                 type=EventType.USER_MESSAGE_ADDED,
@@ -4182,7 +4297,7 @@ class AgentOrchestrator:
         """
 
         content = _tool_message_content(result)
-        if self._is_untrusted(result.name):
+        if self._is_untrusted(result.name) or _flagged_untrusted(result):
             if self._guardrails is not None:
                 decision = self._guardrails.check_tool_output(content)
                 content = decision.text
@@ -4543,6 +4658,8 @@ _ANNOTATION_EVENTS = frozenset(
         EventType.RUN_DEAD_LETTERED,
         EventType.USAGE_RECORDED,
         EventType.RUN_LINKED,
+        EventType.MEMORY_RECALLED,
+        EventType.MEMORY_SAVED,
     }
 )
 
@@ -4734,6 +4851,17 @@ class _Prefetched:
 _ORCHESTRATOR_TOOLS = frozenset(
     {AGENT_TOOL, TODO_TOOL, EXIT_PLAN_TOOL, SUBMIT_RESULT_TOOL, ASK_USER_TOOL, *META_TOOLS, *PLAN_TOOLS}
 )
+
+
+def _flagged_untrusted(result: ToolResult) -> bool:
+    """A trusted tool marked this one result untrusted (memory: a note written under taint)."""
+
+    return isinstance(result.output, Mapping) and result.output.get("untrusted") is True
+
+
+def _recall_payload(notes: Sequence[Any]) -> dict[str, Any]:
+    return {"ids": [note.item.id for note in notes], "scopes": [note.scope for note in notes],
+            "count": len(notes)}
 
 
 def _wrap_untrusted(tool_name: str, content: str) -> str:

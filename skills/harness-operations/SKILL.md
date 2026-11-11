@@ -260,3 +260,43 @@ the feature is not configured.
   - **Events:** `addEvent` skips indexes already shown, because the stream and refresh overlap.
   - **Checks:** `tests/test_web_ui.py` verifies that the page only calls existing `/runs`
     and `/profiles` paths and loads nothing from external hosts.
+
+## Phase 27: scoped memory (implemented, opt-in)
+
+`knowledge/scoped_memory.py` (`MemoryService`) sits on the note stores; `[memory] scopes = true`
+turns it on (the root `models.toml` does, with `recall`, `auto_save` and `guidance`).
+
+- **Where notes live.** `[memory] database` may be an absolute or `~` path. The root config uses
+  `~/.agent-harness/memory.sqlite3`: one store for every project, apart from run storage, so
+  `gc`, a deleted state folder or a move to Postgres no longer touches notes.
+- **Scopes are namespaces of that store.** `user` and `project:<slug>` for the local user;
+  `t:<tenant>:user[:<end user>]` and `t:<tenant>:project:<slug>` for API tenants (FIX-02). The
+  owner comes from `CURRENT_RUN_SCOPE` (`orchestration/runcontext.py`), which the orchestrator
+  sets for each run. The old `namespace` stays readable for the local user as scope `legacy`.
+- **Lifecycle (FIX-10).** Saving the same text again merges metadata and brings a forgotten note
+  back; `forget` marks a note (`forgotten_at`) and removes it from search and from the vector
+  index, nothing is deleted; `update` saves the new text and marks the old note `superseded_by`.
+  Notes carry `kind`, `scope`, `source`, `source_run`, `source_user`, and `tainted`.
+- **Tools.** `memory_search` and `memory_write` take `scope` (write also `kind`); new
+  `memory_update`, `memory_forget`, `memory_list`. Ids may be given by their first 12 characters.
+- **Recall.** `create_run` adds a system message before the first user message; `continue_run`
+  adds a user message starting `[Memory]` before the new one (`memory_recalled` events hold ids
+  only; a note is shown once per run). Recalled: the user's `preference` notes, and notes sharing
+  two distinctive words with the message. `[Memory]` is in `ORCHESTRATOR_NOTE_PREFIXES`.
+- **Saving.** After the terminal checkpoint of a completed top-level turn, one model call
+  (`metadata["purpose"] == "memory"`) proposes notes from what the user and the assistant wrote
+  (never tool output). New ones are saved; its tokens are added to the run and a `memory_saved`
+  event follows `run_completed`. A test model must answer that purpose (`{"notes": []}`).
+- **Trust.** A note written while untrusted tool output was in the turn is `tainted`: it is never
+  recalled, and a search or list that returns one sets `output["untrusted"]`, which the
+  orchestrator wraps and taints like an untrusted tool. Clean notes cause no taint prompts.
+- **Embeddings.** A failed embedding or an import marks the namespace; the next search embeds a
+  batch. `VectorIndex` caches decoded vectors (dropped on `PRAGMA data_version` change).
+  `memory reindex` covers every namespace when scopes are on.
+- **CLI.** `agent-harness memory where | list [--scope] [--all] | add TEXT [--scope --kind] |
+  forget ID`.
+- **Tests and tools must not open the user's store.** `scenario_application`, the `tasks` suite
+  and `tests/test_full_config.py` override `memory.database`; do the same in anything that builds
+  the root config.
+- The Postgres memory store has the same methods; they are not exercised without
+  `AGENT_HARNESS_TEST_POSTGRES_DSN`.

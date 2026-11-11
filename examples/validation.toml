@@ -336,7 +336,7 @@ scenarios = ["dynamic_tool_loading"]
 [[feature]]
 name = "memory"
 description = "Artifacts, long-term memory (keyword, semantic, hybrid), memory backends"
-tests = ["test_artifacts_memory_evals", "test_memory_backends", "test_phase14",
+tests = ["test_artifacts_memory_evals", "test_memory_backends", "test_phase14", "test_scoped_memory",
          "test_self_contained_profiles"]
 scenarios = ["memory_roundtrip"]
 benchmarks = ["memory"]

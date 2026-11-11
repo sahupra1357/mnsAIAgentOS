@@ -15,7 +15,13 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agent_harness.domain import MemoryItem, utc_now
-from agent_harness.knowledge.memory import MAX_MEMORY_CHARS, memory_item_id
+from agent_harness.knowledge.memory import (
+    FORGOTTEN_AT,
+    MAX_MEMORY_CHARS,
+    is_live,
+    memory_item_id,
+    merge_metadata,
+)
 
 from .postgres import _psycopg
 
@@ -71,14 +77,83 @@ class PostgresMemoryStore:
         clean = {str(k): str(v) for k, v in (metadata or {}).items()}
 
         def work() -> Any:
-            self._connection.execute(
+            now = utc_now()
+            cursor = self._connection.execute(
                 "INSERT INTO memory_items(id, namespace, text, metadata_json, created_at) "
                 "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-                (item_id, self.namespace, text, json.dumps(clean, sort_keys=True), utc_now()),
+                (item_id, self.namespace, text, json.dumps(clean, sort_keys=True), now),
             )
+            if not cursor.rowcount:
+                # Saved again (Phase 27): merge the metadata and bring a forgotten note back.
+                row = self._connection.execute(
+                    "SELECT metadata_json FROM memory_items WHERE id = %s", (item_id,)).fetchone()
+                stored = json.loads(row["metadata_json"])
+                merged = merge_metadata(stored, clean, now=now)
+                if merged != stored:
+                    self._connection.execute(
+                        "UPDATE memory_items SET metadata_json = %s WHERE id = %s",
+                        (json.dumps(merged, sort_keys=True), item_id))
             return self._connection.execute("SELECT * FROM memory_items WHERE id = %s", (item_id,)).fetchone()
 
         return _item(await self._run(work))
+
+    def scoped(self, namespace: str) -> "PostgresMemoryStore":
+        """The same database seen through another namespace (shares the connection and lock)."""
+
+        if not namespace or len(namespace) > 128:
+            raise ValueError("memory namespace must be 1-128 characters")
+        view = object.__new__(type(self))
+        view.namespace = namespace
+        view.full_text = self.full_text
+        view._connection = self._connection
+        view._lock = self._lock
+        return view
+
+    async def get(self, item_id: str) -> MemoryItem | None:
+        row = await self._run(lambda: self._connection.execute(
+            "SELECT id, namespace, text, metadata_json, created_at FROM memory_items "
+            "WHERE id = %s AND namespace = %s", (item_id, self.namespace)).fetchone())
+        return _item(row) if row is not None else None
+
+    async def list_items(self, limit: int = 50, *, include_forgotten: bool = False) -> Sequence[MemoryItem]:
+        rows = await self._run(lambda: self._connection.execute(
+            "SELECT id, namespace, text, metadata_json, created_at FROM memory_items "
+            "WHERE namespace = %s ORDER BY created_at DESC, id", (self.namespace,)).fetchall())
+        items = [_item(row) for row in rows]
+        if not include_forgotten:
+            items = [item for item in items if is_live(item)]
+        return tuple(items[: max(1, limit)])
+
+    async def set_metadata(self, item_id: str, changes: Mapping[str, str | None]) -> MemoryItem | None:
+        def work() -> Any:
+            row = self._connection.execute(
+                "SELECT metadata_json FROM memory_items WHERE id = %s AND namespace = %s",
+                (item_id, self.namespace)).fetchone()
+            if row is None:
+                return None
+            metadata = json.loads(row["metadata_json"])
+            for key, value in changes.items():
+                if value is None:
+                    metadata.pop(str(key), None)
+                else:
+                    metadata[str(key)] = str(value)
+            self._connection.execute(
+                "UPDATE memory_items SET metadata_json = %s WHERE id = %s",
+                (json.dumps(metadata, sort_keys=True), item_id))
+            return self._connection.execute(
+                "SELECT id, namespace, text, metadata_json, created_at FROM memory_items WHERE id = %s",
+                (item_id,)).fetchone()
+
+        row = await self._run(work)
+        return _item(row) if row is not None else None
+
+    async def forget(self, item_id: str, *, superseded_by: str | None = None) -> bool:
+        """Mark a note forgotten (search skips it; nothing is deleted)."""
+
+        changes: dict[str, str | None] = {FORGOTTEN_AT: utc_now().isoformat()}
+        if superseded_by:
+            changes["superseded_by"] = superseded_by
+        return await self.set_metadata(item_id, changes) is not None
 
     async def search(self, query: str, limit: int = 5) -> Sequence[MemoryItem]:
         terms = _TERM.findall(query.lower())[:16]
@@ -95,10 +170,11 @@ class PostgresMemoryStore:
                 WHERE namespace = %s AND tsv @@ to_tsquery('simple', %s)
                 ORDER BY ts_rank(tsv, to_tsquery('simple', %s)) DESC, created_at DESC LIMIT %s
                 """,
-                (self.namespace, expression, expression, limit),
+                (self.namespace, expression, expression, limit * 3),  # room for forgotten notes
             ).fetchall()
 
-        return tuple(_item(row) for row in await self._run(work))
+        live = [item for item in (_item(row) for row in await self._run(work)) if is_live(item)]
+        return tuple(live[:limit])
 
     async def export_items(self) -> list[tuple[str, MemoryItem]]:
         rows = await self._run(lambda: self._connection.execute(

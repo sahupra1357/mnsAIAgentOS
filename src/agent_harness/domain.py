@@ -96,6 +96,10 @@ class EventType(StrEnum):
     RUN_LINKED = "run_linked"
     # A reply with too many tool calls was set aside (archived) and the model asked again.
     REPLY_DISCARDED = "reply_discarded"
+    # Phase 27: notes put in front of the model for a message (``message``: as a message of
+    # their own), and notes saved from a finished turn. Ids only, never note text.
+    MEMORY_RECALLED = "memory_recalled"
+    MEMORY_SAVED = "memory_saved"
 
 
 class PermissionMode(StrEnum):

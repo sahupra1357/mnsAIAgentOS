@@ -606,7 +606,7 @@ def _summary_applies(summary: ContextSummary, messages: Sequence[Message], head_
     return summary.covers == len(messages) or messages[summary.covers].role is not Role.TOOL
 
 
-ORCHESTRATOR_NOTE_PREFIXES = ("[Plan]", "[Budget]")
+ORCHESTRATOR_NOTE_PREFIXES = ("[Plan]", "[Budget]", "[Memory]")
 """Prefixes of the user messages the orchestrator injects; they are not the user's requests."""
 
 

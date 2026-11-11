@@ -51,6 +51,8 @@ from .domain import ArtifactStore, ModelResolver, PermissionMode, StreamListener
 from .guardrails import Guardrails
 from .extensions.hooks import CommandHook, HookEvent, HookRunner
 from .knowledge.memory import MEMORY_SEARCH_SPEC, MEMORY_WRITE_SPEC, SQLiteMemoryStore, memory_tool_handlers
+from .knowledge.scoped_memory import MEMORY_GUIDANCE, MemoryService, MemorySettings, scoped_memory_tools
+from .config.project import project_slug
 from .extensions.permissions import PermissionPolicy
 from .model_gateway import ModelGateway
 from .orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
@@ -90,6 +92,7 @@ class HarnessApplication:
     telemetry: TelemetrySink | None = None
     artifacts: ArtifactStore | None = None
     memory: Any = None  # SQLiteMemoryStore or PostgresMemoryStore
+    memory_service: Any = None  # knowledge.scoped_memory.MemoryService when [memory] scopes is on
     templates: dict[str, Template] = field(default_factory=dict)
     skills: dict[str, Skill] = field(default_factory=dict)
     plugins: list[Plugin] = field(default_factory=list)
@@ -242,6 +245,7 @@ def build_application(
             if config.memory.enabled
             else None
         )
+        memory_service = memory_service_from_config(config, memory, project_root or base_path)
         tool_runtime = tools
         if tool_runtime is None:
             if config.coding.enabled:
@@ -256,7 +260,10 @@ def build_application(
             tool_runtime.attach_idempotency_store(store)
             if artifacts is not None:
                 tool_runtime.register(READ_ARTIFACT_SPEC, read_artifact_handler(artifacts))
-            if memory is not None:
+            if memory_service is not None:
+                for spec, handler in scoped_memory_tools(memory_service):
+                    tool_runtime.register(spec, handler)
+            elif memory is not None:
                 search, write = memory_tool_handlers(memory)
                 tool_runtime.register(MEMORY_SEARCH_SPEC, search)
                 tool_runtime.register(MEMORY_WRITE_SPEC, write)
@@ -266,7 +273,8 @@ def build_application(
                 tool_runtime.register(PREVIOUS_RUNS_SPEC, previous_runs_tool(store))
         catalog, mcp_sources, sandbox_sources = _load_tool_sources(config, tool_runtime, store, base_path)
         system_context = None
-        if config.instructions.enabled or skills:
+        memory_sections = (MEMORY_GUIDANCE,) if memory_service is not None and config.memory.guidance else ()
+        if config.instructions.enabled or skills or memory_sections:
             subdirectory_filenames: tuple[str, ...] = ()
             if config.instructions.enabled and config.instructions.subdirectories:
                 try:
@@ -286,6 +294,7 @@ def build_application(
                 max_bytes=config.instructions.max_bytes,
                 skills=skills,
                 subdirectory_filenames=subdirectory_filenames,
+                sections=memory_sections,
             )
         hook_sources = [(hook, base_path) for hook in config.hooks] + [
             (hook, plugin.root) for plugin in plugins for hook in plugin.hooks
@@ -348,6 +357,7 @@ def build_application(
                 if config.summarization.trigger == "threshold" else None
             ),
             calibrate_estimate=config.context.calibrate,
+            memory=memory_service,
             tool_loading=_tool_loading(config, tool_runtime),
         planning=_planning(config),
         quotas=quotas_from_config(config),
@@ -368,6 +378,7 @@ def build_application(
             telemetry=telemetry,
             artifacts=artifacts,
             memory=memory,
+            memory_service=memory_service,
             templates=templates,
             skills=skills,
             plugins=plugins,
@@ -587,9 +598,36 @@ def _project_instruction_files(config: HarnessConfig) -> tuple[str, ...]:
     return names
 
 
+def memory_service_from_config(config: HarnessConfig, store: Any, project: Path | None) -> Any:
+    """The scoped memory service for ``[memory] scopes = true`` (None otherwise)."""
+
+    section = config.memory
+    if store is None or not section.scopes:
+        return None
+    profile = None
+    if section.auto_save_profile:
+        try:
+            profile = config.resolve_model_name(section.auto_save_profile)
+        except (ConfigError, KeyError, ValueError) as exc:
+            raise ConfigError(f"memory.auto_save_profile: {exc}") from exc
+    return MemoryService(
+        store,
+        project=project_slug(project) if project is not None else None,
+        settings=MemorySettings(
+            recall=section.recall, recall_limit=section.recall_limit,
+            recall_max_chars=section.recall_max_chars, auto_save=section.auto_save,
+            auto_save_profile=profile, auto_save_max_notes=section.auto_save_max_notes,
+            auto_save_max_output_tokens=section.auto_save_max_output_tokens,
+            auto_save_parameters=dict(section.auto_save_parameters) or None,
+            legacy_namespace=section.namespace,
+        ),
+    )
+
+
 def _memory_path(config: HarnessConfig, base_path: Path, database: str | PathLike[str]) -> Path:
     if config.memory.database:
-        return base_path / config.memory.database
+        # "~/..." (one store for every project) or a path relative to the state folder.
+        return base_path / Path(config.memory.database).expanduser()
     if _is_postgres_url(str(database)) or config.storage.url_env:
         raise ConfigError(
         "memory.backend = 'sqlite' needs a file when runs are in Postgres: set [memory] database "

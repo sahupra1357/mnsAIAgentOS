@@ -15,6 +15,7 @@ Which event adds which message:
 * ``user_message_added``, ``steer_applied``: one user message each;
 * ``hook_decided``: ``session_start`` with context, or ``stop`` with ``continue``: a user message;
 * ``plan_step_updated`` with ``message``, ``output_rejected``: a user message (an orchestrator note);
+* ``memory_recalled`` with ``message``: a user message (notes recalled for a follow-up);
 * ``model_responded`` (``ok``): an assistant message with ``tool_call_ids``; a
   ``continuation`` reply instead removes the note before it and joins the previous answer;
 * ``guardrail_refused``: the refusal message (assistant);
@@ -67,7 +68,9 @@ def derive_message_skeleton(events: Sequence[RunEvent]) -> list[MessageShape]:
             shapes = [MessageShape(str(role)) for role in roles]
         elif kind in {EventType.USER_MESSAGE_ADDED, EventType.STEER_APPLIED, EventType.OUTPUT_REJECTED}:
             shapes.append(user)
-        elif kind is EventType.PLAN_STEP_UPDATED:
+        elif kind in {EventType.PLAN_STEP_UPDATED, EventType.MEMORY_RECALLED}:
+            # memory_recalled: notes recalled for a follow-up message are a message of their own
+            # (for a new run they are in run_created's message_roles).
             if payload.get("message") is True:
                 shapes.append(user)
         elif kind is EventType.HOOK_DECIDED:

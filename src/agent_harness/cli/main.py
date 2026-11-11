@@ -303,6 +303,22 @@ def _parser() -> argparse.ArgumentParser:
     reindex = memory_sub.add_parser(
         "reindex", help="embed notes that have no vector yet ([memory] search = semantic or hybrid)")
     _common_runtime_arguments(reindex)
+    # Phase 27: look at and correct the notes ([memory] scopes = true).
+    where = memory_sub.add_parser("where", help="show the note store and the namespaces this folder uses")
+    _common_runtime_arguments(where)
+    listing = memory_sub.add_parser("list", help="list saved notes, newest first")
+    listing.add_argument("--scope", choices=["project", "user"])
+    listing.add_argument("--limit", type=int, default=50)
+    listing.add_argument("--all", action="store_true", help="include forgotten notes")
+    _common_runtime_arguments(listing)
+    add = memory_sub.add_parser("add", help="save a note")
+    add.add_argument("text")
+    add.add_argument("--scope", choices=["project", "user"], default="project")
+    add.add_argument("--kind", choices=["preference", "fact", "convention", "decision"], default="fact")
+    _common_runtime_arguments(add)
+    forget = memory_sub.add_parser("forget", help="stop using a note (it is marked, not deleted)")
+    forget.add_argument("id", help="a note id or its unique start")
+    _common_runtime_arguments(forget)
 
     gc = subcommands.add_parser("gc", help="retention: delete finished runs older than N days, and artifacts no run references (dry run by default)")
     gc.add_argument("--older-than-days", type=int, required=True)
@@ -970,11 +986,14 @@ async def _memory_command(args: argparse.Namespace) -> int:
             raise ValueError("reindex needs [memory] enabled = true and search = \"semantic\" or \"hybrid\"")
         store = open_memory_store(config, _state_base(config, args.config), args.database)
         try:
-            embedded = await store.reindex()
+            embedded = (await store.reindex(every_namespace=True) if config.memory.scopes
+                        else await store.reindex())
         finally:
             await store.close()
         print(f"embedded {embedded} notes")
         return 0
+    if args.memory_command in {"where", "list", "add", "forget"}:
+        return await _scoped_memory_command(args)
     source = _open_memory_spec(args.source, args.config)
     try:
         if args.target:
@@ -991,6 +1010,51 @@ async def _memory_command(args: argparse.Namespace) -> int:
         await source.close()
     print(f"copied {len(items)} notes: {inserted} inserted, {len(items) - inserted} already present")
     return 0
+
+
+async def _scoped_memory_command(args: argparse.Namespace) -> int:
+    """``memory where|list|add|forget``: the user's view of the scoped notes."""
+
+    from ..application import memory_service_from_config
+    from ..knowledge.scoped_memory import _resolve_id
+
+    config = load_config(args.config, layered=True, workspace=getattr(args, "workspace", None))
+    if not config.memory.enabled or not config.memory.scopes:
+        raise ValueError("this needs [memory] enabled = true and scopes = true")
+    database = args.database  # resolved by main() (the project's state database by default)
+    store = open_memory_store(config, _state_base(config, args.config), database)
+    try:
+        service = memory_service_from_config(config, store, config.project_root or args.config.parent)
+        if args.memory_command == "where":
+            location = config.memory.database or str(database)
+            print(f"store: {Path(location).expanduser()}")
+            for scope, namespace in service.describe().items():
+                print(f"{scope}: {namespace}")
+            print(f"search: {config.memory.search}; recall: {config.memory.recall}; "
+                  f"auto_save: {config.memory.auto_save}")
+            return 0
+        if args.memory_command == "add":
+            note = await service.save(args.text, scope=args.scope, kind=args.kind, source="user")
+            print(f"saved {note.item.id[:12]} ({note.scope})")
+            return 0
+        if args.memory_command == "forget":
+            note_id = await _resolve_id(service, args.id)
+            if note_id is None or not await service.forget(note_id):
+                print(f"no note has the id {args.id!r} (or several start with it)", file=sys.stderr)
+                return 1
+            print(f"forgot {note_id[:12]}")
+            return 0
+        notes = await service.list_notes(scope=args.scope, limit=args.limit, include_forgotten=args.all)
+        for note in notes:
+            flags = "".join(f" [{flag}]" for flag, on in (
+                ("forgotten", "forgotten_at" in note.item.metadata), ("tainted", note.tainted)) if on)
+            saved = note.item.created_at.date().isoformat() if note.item.created_at else "-"
+            print(f"{note.item.id[:12]}  {note.scope:<7} {note.kind:<10} {saved}{flags}  {note.item.text}")
+        if not notes:
+            print("no notes")
+        return 0
+    finally:
+        await store.close()
 
 
 async def _gc_command(args: argparse.Namespace) -> int:

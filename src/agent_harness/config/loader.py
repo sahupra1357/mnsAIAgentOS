@@ -310,8 +310,29 @@ class MemoryConfig:
     search: str = "keyword"
     embedding_profile: str = ""
     vectors: str = ""
+    # Phase 27 (knowledge/scoped_memory.py), all off in code.
+    # scopes: notes belong to the user or to the project (namespaces of one store, with a
+    # tenant's and end user's own), and the tools gain scope, update, forget and list.
+    # ``database`` may then be an absolute or ~ path shared by every project, e.g.
+    # "~/.agent-harness/memory.sqlite3". ``namespace`` stays readable as the old notes.
+    scopes: bool = False
+    recall: bool = False             # put matching notes in front of the model for each message
+    recall_limit: int = 5
+    recall_max_chars: int = 2_000
+    auto_save: bool = False          # one model call per finished turn proposes notes to keep
+    auto_save_profile: str = ""      # profile or route for that call (empty: the run's own)
+    auto_save_max_notes: int = 4
+    auto_save_max_output_tokens: int = 512
+    auto_save_parameters: Mapping[str, Any] = field(default_factory=dict)
+    guidance: bool = False           # a "Memory" section in the system prompt (when to save and search)
 
     def __post_init__(self) -> None:
+        if (self.recall or self.auto_save or self.guidance) and not self.scopes:
+            raise ConfigError("memory.recall, auto_save and guidance need memory.scopes = true")
+        if min(self.recall_limit, self.auto_save_max_notes) < 1 or self.recall_max_chars < 200:
+            raise ConfigError("memory: recall_limit and auto_save_max_notes >= 1, recall_max_chars >= 200")
+        if self.auto_save_max_output_tokens < 64:
+            raise ConfigError("memory.auto_save_max_output_tokens must be at least 64")
         if not _PROFILE_NAME.fullmatch(self.namespace):
             raise ConfigError(f"invalid memory.namespace: {self.namespace!r}")
         if self.backend not in {"sqlite", "postgres"}:
