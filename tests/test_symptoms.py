@@ -129,6 +129,8 @@ class SymptomCase(unittest.TestCase):
             "artifacts": {"directory": str(self.root / "artifacts")},
             "memory": {"database": str(self.root / "memory.sqlite3")},
             "langfuse": {"enabled": False},
+            # Every boundary checks that the stored phase is the one the run's state implies.
+            "orchestrator": {"verify_phase": True},
         }
 
     def app(self, model: SymptomModel, database: str = "runs.sqlite3") -> Any:
@@ -245,7 +247,6 @@ class NewChatTests(SymptomCase):
 
 
 class OrphanToolCallTests(SymptomCase):
-    @unittest.expectedFailure  # fixed in a later phase (see the module docstring)
     def test_budget_exhaustion_leaves_no_tool_call_unanswered(self) -> None:
         (self.workspace / "a.txt").write_text("alpha\n", encoding="utf-8")
         model = SymptomModel([read(0, "a.txt", tokens=5_000), say("Stopped as asked.")])

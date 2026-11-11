@@ -80,3 +80,31 @@ Identical read-only calls within one model reply execute once; later duplicates 
 message reusing the first result (`_reuse_same_reply_result`, `_same_reply_twin`), and
 parallel prefetch skips them. `_identical_prior_calls` counts each reply at most once, so
 refusals are per reply. Side-effect tools are never merged.
+
+## Phase 28: run phase and loop guards (implemented, opt-in)
+
+All off in code (`OrchestratorSettings`, `[orchestrator]`), on in the root `models.toml`.
+
+- **Phase.** `RunRecord.phase` is written by `_checkpoint` from `derive_phase(run, events)`
+  (`orchestration/state.py`): `queued`, `model`, `model_request`, `tools`, `answer`,
+  `awaiting_input`, `done`. With `phase_dispatch`, `_advance` picks its branch from the stored
+  phase; an empty phase (older runs) falls back to the predicates. `verify_phase` raises when the
+  stored and derived phase differ: it catches a code path that changes `run.messages` without a
+  checkpoint. Scenario runs check the final phase.
+- **Events.** `ANNOTATION_EVENTS` and `STATE_EVENTS` in `domain.py` list every `EventType`; a new
+  type must be added to one (a test fails otherwise).
+- **Orphans.** `close_orphan_tool_calls`: a budget stop answers each unrun call ("Not run: ...",
+  `tool_responded` with `not_run`), and `continue_run` does the same for calls an older run left.
+- **Between tool calls.** `mid_phase_checks`: reload when the stored version changed (cancel),
+  stop for the token, cost or `max_tool_calls_per_run` budget, and when a steer is queued answer
+  the remaining calls "not run" so the model reads the steer next.
+- **Cancel.** `cancel_poll_seconds`: `run()` polls the stored status and cancels the task in
+  flight. Subprocess sites kill and reap their child on `CancelledError` (FIX-07).
+- **Ownership.** The parallel-guard model call is always awaited or cancelled (FIX-04);
+  `_run_children` lets every child finish before raising one child's error (FIX-05).
+- **Prefetch.** `tool_responded` carries `prefetch: "used" | "discarded"`.
+- **State block.** `state_block`: plan, tasks and a low budget are appended to each request as
+  one message (`STATE_PREFIX`), never stored. The `[Plan]` / `[Budget]` notes are still stored.
+- **Not done:** the phase is computed by one function, not set at each transition; only the
+  state helpers left `orchestrator.py` (FIX-22 is partial).
+- Tests: `tests/test_run_phase.py`.

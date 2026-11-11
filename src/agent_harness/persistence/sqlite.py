@@ -741,6 +741,7 @@ def _decode_run(value: str) -> RunRecord:
         ),
         end_user=data.get("end_user"),
         dispatch=str(data.get("dispatch", "inline")),
+        phase=str(data.get("phase", "")),
         plan=_decode_plan(data.get("plan")),
         context_summary=(
             ContextSummary(

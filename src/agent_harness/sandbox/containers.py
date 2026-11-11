@@ -14,6 +14,7 @@ Without a run (a tool called outside the orchestrator) a one-shot
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import re
@@ -51,6 +52,12 @@ async def invoke_command(
     )
     try:
         out, err = await asyncio.wait_for(process.communicate(stdin), timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        # The run was cancelled: do not leave the child process running (FIX-07).
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise
     except TimeoutError:
         process.kill()
         out, err = await process.communicate()

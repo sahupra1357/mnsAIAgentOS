@@ -102,6 +102,65 @@ class EventType(StrEnum):
     MEMORY_SAVED = "memory_saved"
 
 
+ANNOTATION_EVENTS: frozenset[EventType] = frozenset(
+    {
+        EventType.HOOK_DECIDED,
+        EventType.MODE_CHANGED,
+        EventType.CONFIG_DRIFT,
+        EventType.SUBAGENT_STARTED,
+        EventType.SUBAGENT_WAITING,
+        EventType.SUBAGENT_RESUMED,
+        EventType.SUBAGENT_FINISHED,
+        EventType.TODOS_UPDATED,
+        EventType.FILE_SNAPSHOT,
+        EventType.REWOUND,
+        EventType.CONTEXT_SUMMARIZED,
+        EventType.CONTEXT_CAPPED,
+        EventType.TOOLS_LOADED,
+        EventType.PLAN_CREATED,
+        EventType.PLAN_STEP_UPDATED,
+        EventType.PLAN_REVISED,
+        EventType.GUARDRAIL_DECIDED,
+        EventType.RUN_DEAD_LETTERED,
+        EventType.USAGE_RECORDED,
+        EventType.RUN_LINKED,
+        EventType.MEMORY_RECALLED,
+        EventType.MEMORY_SAVED,
+    }
+)
+"""Events that record something beside the loop and never decide what happens next.
+
+Every other event is a *state* event: the latest one tells a resumed run where it was
+(a model request without a response, a tool request without a result, ...). A new event
+type must be put in one of the two sets below; a test fails for one that is in neither
+(Phase 28: before, an unlisted type silently counted as state).
+"""
+
+STATE_EVENTS: frozenset[EventType] = frozenset(
+    {
+        EventType.RUN_CREATED,
+        EventType.RUN_STARTED,
+        EventType.MODEL_REQUESTED,
+        EventType.MODEL_RESPONDED,
+        EventType.TOOL_REQUESTED,
+        EventType.TOOL_RESPONDED,
+        EventType.APPROVAL_REQUESTED,
+        EventType.APPROVAL_RESOLVED,
+        EventType.CHECKPOINT_SAVED,
+        EventType.RUN_COMPLETED,
+        EventType.RUN_FAILED,
+        EventType.RUN_CANCELLED,
+        EventType.BUDGET_EXHAUSTED,
+        EventType.MODEL_FALLBACK,
+        EventType.USER_MESSAGE_ADDED,
+        EventType.STEER_APPLIED,
+        EventType.OUTPUT_REJECTED,
+        EventType.GUARDRAIL_REFUSED,
+        EventType.REPLY_DISCARDED,
+    }
+)
+
+
 class PermissionMode(StrEnum):
     """How tool calls are authorized for a run (hard guardrails always apply).
 
@@ -325,6 +384,10 @@ class RunRecord:
     # Worker reliability (Phase 12c): "queue" runs are executed by queue workers and are
     # requeued by the reconciler if they fall out of the queue; "inline" runs (CLI) never are.
     dispatch: str = "inline"
+    # Phase 28: where the loop stands, written with every checkpoint (orchestration/state.py:
+    # tools, answer, model_request, model, awaiting_input, queued, done). Empty on runs stored
+    # before it existed; the loop then derives it from the messages and events, as it always did.
+    phase: str = ""
 
 
 @dataclass(frozen=True, slots=True)

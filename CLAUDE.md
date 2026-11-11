@@ -187,6 +187,12 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   last event of a finished run; scripted models must answer it. Notes that were in per-project run databases are
   not moved automatically: `agent-harness memory migrate --from sqlite:PATH` copies them (they stay readable as
   scope `legacy`). Details: `skills/harness-operations/SKILL.md`.
+- **Run phase (Phase 28).** `_checkpoint` stores `RunRecord.phase` (`derive_phase` in `orchestration/state.py`),
+  and the root config dispatches on it (`phase_dispatch`). Every change to `run.messages` must be checkpointed
+  before the loop takes its next boundary, or the stored phase is stale; `verify_phase = true` (tests,
+  `tests/test_symptoms.py`) raises on that. New event types go into `ANNOTATION_EVENTS` or `STATE_EVENTS`
+  (`domain.py`). The run-state helpers moved to `orchestration/state.py` and are imported back by name.
+  Details: `skills/durable-agent-orchestration/SKILL.md`.
 - `ModelResolver.resolve` is synchronous (no `await`). `Execution.md` was brought up to date
   with the Phase 1–6 flow and now shows it correctly.
 - **Subagent nesting (6c).** Subagents exist only when `[[agents]]` are defined; the

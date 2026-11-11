@@ -676,8 +676,20 @@ class OrchestratorConfig:
     # Phase 26: a read-only call repeated past max_identical_tool_calls gets the earlier
     # result again (with a note) instead of a refusal; max_refused_repeats still ends the run.
     resurface_repeated_results: bool = False
+    # Phase 28 (see OrchestratorSettings for each).
+    phase_dispatch: bool = False        # pick the next transition from the stored run phase
+    verify_phase: bool = False          # ...and raise if it disagrees with the derived one (tests)
+    close_orphan_tool_calls: bool = False  # a run stopped for its budget answers its unrun tool calls
+    mid_phase_checks: bool = False      # cancel, budget and steer are checked between tool calls
+    max_tool_calls_per_run: int = 0     # 0: no limit (needs mid_phase_checks)
+    cancel_poll_seconds: float = 0.0    # 0: off; inline runs stop in-flight calls when cancelled
+    state_block: bool = False           # plan, tasks and a low budget as one status message per request
 
     def __post_init__(self) -> None:
+        if self.max_tool_calls_per_run < 0 or self.cancel_poll_seconds < 0:
+            raise ConfigError("orchestrator.max_tool_calls_per_run and cancel_poll_seconds must not be negative")
+        if self.max_tool_calls_per_run and not self.mid_phase_checks:
+            raise ConfigError("orchestrator.max_tool_calls_per_run needs mid_phase_checks = true")
         if self.turn_max_steps < 0 or self.turn_max_wall_seconds < 0:
             raise ConfigError("orchestrator.turn_max_steps and turn_max_wall_seconds must not be negative")
         if self.final_answer_reserve_seconds < 0:
