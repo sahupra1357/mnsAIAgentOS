@@ -376,7 +376,8 @@ class CompactionPolicyTests(unittest.IsolatedAsyncioTestCase):
             assert stopped.context_summary is not None
             self.assertEqual(stopped.context_summary.covers, 4)
             # The model saw the summary in place of messages 2-3.
-            self.assertIn("SUMMARY-1", model.requests[-1].messages[1].content)
+            # (its own message after the task: the anchored layout)
+            self.assertIn("SUMMARY-1", model.requests[-1].messages[2].content)
 
             # A new process continues the run: the stored summary is reused, not rewritten.
             resumed_model = Model([answer("again")])
@@ -389,7 +390,7 @@ class CompactionPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed_model.summary_requests, [])
         summaries = of_type(events, EventType.CONTEXT_SUMMARIZED)
         self.assertEqual([e.payload["covers"] for e in summaries], [4])
-        self.assertIn("SUMMARY-1", resumed_model.requests[-1].messages[1].content)
+        self.assertIn("SUMMARY-1", resumed_model.requests[-1].messages[2].content)
 
     async def test_range_that_does_not_continue_the_summary_is_ignored(self) -> None:
         model = Model(lookups(3))

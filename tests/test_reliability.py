@@ -324,8 +324,10 @@ class RepeatedCallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished.status, RunStatus.FAILED)
         self.assertIn("repeated tool call loop", finished.error or "")
         self.assertEqual(len(tools.executed), 5)
+        # A repeated read-only call is not run again: it is answered with the earlier result
+        # and a note (the default since Phase 30; before, a bare refusal).
         refusals = [
-            m for m in finished.messages if m.role is Role.TOOL and m.content.startswith("Refused")
+            m for m in finished.messages if m.role is Role.TOOL and m.content.startswith("[Not run again")
         ]
         self.assertEqual(len(refusals), 2)
         self.assertEqual(len(model.requests), 8)

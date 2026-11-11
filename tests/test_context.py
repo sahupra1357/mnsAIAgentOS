@@ -63,6 +63,9 @@ def history(turns: int, output_chars: int = 700) -> list[Message]:
 
 
 def builder(window: int = 2000, reserve: int = 200, **policy: object) -> BudgetedContextBuilder:
+    # These tests cover the "legacy" layout, which stays available as an opt-out (Phase 30
+    # made "anchored" the default; tests/test_working_context.py covers that one).
+    policy = {"layout": "legacy", "recovery_hints": False, "ledger": False, **policy}
     return BudgetedContextBuilder(
         {"small": ContextLimits(context_window=window, output_reserve_tokens=reserve)},
         policy=ContextPolicy(**policy),  # type: ignore[arg-type]

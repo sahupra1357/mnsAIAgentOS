@@ -342,12 +342,13 @@ class CalibrationTests(unittest.TestCase):
         self.assertGreater(ratios[0], 1.5)  # two short messages cannot be 400 tokens at 3.5 chars each
         self.assertLessEqual(ratios[-1], 3.0)
 
-    def test_off_by_default(self) -> None:
+    def test_can_be_switched_off(self) -> None:
+        # On by default since Phase 30 (it was test_off_by_default); calibrate_estimate=False opts out.
         policy = ContextPolicy(layout="anchored")
         model = RoutingModel([call(0, usage=Usage(4000, 5)), DONE])
         _, events, _ = run_to_end(
             model, context=BudgetedContextBuilder({"small": ContextLimits(20_000, 200)}, policy=policy),
-            context_policy=policy)
+            context_policy=policy, calibrate_estimate=False)
         self.assertFalse(any("estimate_ratio" in e.payload for e in events))
 
 
@@ -375,8 +376,10 @@ class RepeatedReadTests(unittest.TestCase):
         return run_to_end(model, settings=OrchestratorSettings(**settings))  # type: ignore[arg-type]
 
     def test_repeat_is_answered_with_the_earlier_result(self) -> None:
-        run, _, tools = self.repeat(7, resurface_repeated_results=True)
+        run, events, tools = self.repeat(7, resurface_repeated_results=True)
         self.assertIs(run.status, RunStatus.COMPLETED)
+        # The event log says which calls were answered from an earlier result (Phase 30).
+        self.assertEqual(sum(e.payload.get("repeated_call") is True for e in events), 2)
         self.assertEqual(len(tools.executed), 5)  # the sixth and seventh did not run
         results = [m.content for m in run.messages if m.role is Role.TOOL]
         self.assertTrue(results[5].startswith("[Not run again: lookup was already called 5 times"))
@@ -388,8 +391,10 @@ class RepeatedReadTests(unittest.TestCase):
         self.assertIs(run.status, RunStatus.FAILED)
         self.assertIn("repeated tool call loop", run.error or "")
 
-    def test_off_by_default(self) -> None:
-        run, _, _ = self.repeat(6)
+    def test_can_be_switched_off(self) -> None:
+        # On by default since Phase 30 (it was test_off_by_default).
+        self.assertTrue(OrchestratorSettings().resurface_repeated_results)
+        run, _, _ = self.repeat(6, resurface_repeated_results=False)
         self.assertIn("Refused: lookup was already called", run.messages[-2].content)
 
 

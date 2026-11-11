@@ -510,14 +510,15 @@ class SummarizationConfig:
     # Extra request fields sent with summary calls only, e.g.
     # parameters = { chat_template_kwargs = { enable_thinking = false } }
     parameters: Mapping[str, Any] = field(default_factory=dict)
-    # Phase 26. "omission": summarize what the view already left out (the old trigger).
+    # Phase 26. "omission": summarize what the view already left out (the old trigger, an
+    # opt-out since Phase 30: it sends one request with a hole before it summarizes).
     # "threshold": summarize once the view reaches trigger_ratio of its input budget,
     # keeping about keep_ratio of it (the newest turns), so nothing is sent with a hole.
-    trigger: str = "omission"
+    trigger: str = "threshold"
     trigger_ratio: float = 0.70
     keep_ratio: float = 0.35
     # Several summary requests for a range too long for one, instead of dropping its middle.
-    chunked: bool = False
+    chunked: bool = True
     # "prose" (the old instructions) or "structured" (fixed sections: goal, files, facts, next).
     style: str = "prose"
     # Characters of one message shown to the summarizer (longer ones lose their middle).
@@ -548,17 +549,18 @@ class ContextConfig:
     low_water_ratio: float = 0.60
     message_overhead_tokens: int = 8
     max_tool_output_chars: int = 16_000
-    # Phase 26 (all off or unchanged by default; the root models.toml turns them on).
+    # Phase 26. layout, recovery_hints, ledger and calibrate are fixes, on in code since
+    # Phase 30; the others are settings the root models.toml chooses.
     default_window: int = 0          # window for profiles without context_window (0: unbounded)
-    layout: str = "legacy"           # "anchored": summary and ledger in their own message
+    layout: str = "anchored"          # "anchored": summary and ledger in their own message
     stale_tool_output_chars: int = 0  # shorten old turns' tool outputs before dropping turns (0: off)
     keep_recent_units: int = 4       # ...but never those of the newest turns
     min_fitted_output_chars: int = 200  # floor for the newest turn's tool outputs
-    recovery_hints: bool = False     # truncation markers say how to get the rest
-    ledger: bool = False             # list the tool calls that are no longer shown
+    recovery_hints: bool = True      # truncation markers say how to get the rest
+    ledger: bool = True              # list the tool calls that are no longer shown
     ledger_max_entries: int = 40
     ledger_max_chars: int = 4_000
-    calibrate: bool = False          # raise the estimate when the provider counts more tokens
+    calibrate: bool = True           # raise the estimate when the provider counts more tokens
 
     def __post_init__(self) -> None:
         if self.default_window < 0:
@@ -675,12 +677,12 @@ class OrchestratorConfig:
     prefetch_with_hooks: bool = False  # run a reply's read-only calls concurrently despite pre_tool hooks
     # Phase 26: a read-only call repeated past max_identical_tool_calls gets the earlier
     # result again (with a note) instead of a refusal; max_refused_repeats still ends the run.
-    resurface_repeated_results: bool = False
+    resurface_repeated_results: bool = True
     # Phase 28 (see OrchestratorSettings for each).
-    phase_dispatch: bool = False        # pick the next transition from the stored run phase
+    phase_dispatch: bool = True         # pick the next transition from the stored run phase
     verify_phase: bool = False          # ...and raise if it disagrees with the derived one (tests)
-    close_orphan_tool_calls: bool = False  # a run stopped for its budget answers its unrun tool calls
-    mid_phase_checks: bool = False      # cancel, budget and steer are checked between tool calls
+    close_orphan_tool_calls: bool = True   # a run stopped for its budget answers its unrun tool calls
+    mid_phase_checks: bool = True       # cancel, budget and steer are checked between tool calls
     max_tool_calls_per_run: int = 0     # 0: no limit (needs mid_phase_checks)
     cancel_poll_seconds: float = 0.0    # 0: off; inline runs stop in-flight calls when cancelled
     state_block: bool = False           # plan, tasks and a low budget as one status message per request

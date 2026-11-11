@@ -48,6 +48,29 @@ any of this.
   `ModelRequest`), add it with a default so existing callers and tests keep working.
 - Stay stdlib-only unless a dependency clearly earns its place; ask first.
 
+## Fix or feature: which default a new option gets
+
+Decide this before writing the option, and say which it is in the plan. Phases 25–29 shipped
+bug fixes switched off in code, so the harness stayed broken for any config but the root one;
+Phase 30 corrected that.
+
+**The test: would anyone knowingly choose the old behaviour?**
+
+| Answer | It is a | Code default | Root `models.toml` | Tests that pin the old behaviour |
+|---|---|---|---|---|
+| No: the old behaviour is wrong for everyone (a lost message, a corrupt history, an ignored cancel, data dropped silently) | **fix** | **on** | no key | updated to the new behaviour (not deleted) |
+| Yes: it needs something outside the harness (a server, a key, a store), costs extra model calls or money, changes a stored format, or depends on the deployment | **feature** | off | turned on | unchanged |
+| It is a number or a choice whose best value depends on the model or the workload | **setting** | a safe value | the user's value | unchanged |
+
+- **A fix may keep its switch as an opt-out**, for the case where it misbehaves on a live model. The
+  opt-out is never set in the root config.
+- **Not sure?** If the change repairs a symptom the user reported, it is a fix. If it still is not
+  clear, ask the user; do not default to "off".
+- **The register:** `tests/test_fix_defaults.py` lists every option added since Phase 25 as a fix
+  or a feature (with the reason). A new `[orchestrator]`, `[context]` or `[summarization]` option
+  that is in neither list fails the suite, and so does a fix that is off in code or set in the root config.
+- **Older wording:** "code defaults stay off" (Phase 15 and later notes) is the rule for features only.
+
 ## Commands
 
 ```bash
@@ -174,7 +197,7 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   The model's view keeps the newest request too: when a summary or omission covers it, its
   text follows the summary as `[Latest user message - answer this one]`. Before, only the
   first user message survived verbatim, and a chat's second question was answered as the first.
-- **Working context (Phase 26).** The root config uses `[context] layout = "anchored"`: the summary, omission
+- **Working context (Phase 26; the code default since Phase 30).** `[context] layout = "anchored"`: the summary, omission
   note and tool-call ledger are one message after the first user message (never glued onto it), and the latest
   request is carried as its own message. `[summarization] trigger = "threshold"` compacts before anything is
   omitted. A new code path that reads `view.messages[1]` for the summary is wrong in this layout. The estimate
@@ -680,8 +703,9 @@ with different wording). Example profiles `llamacpp`/`modal` use `token_counting
 `[models.embed]` is `nomic-embed-text` on Ollama.
 
 **Phase 15 – Defaults, feature validation, chat clients, web UI** [interactive-extensibility, harness-verification, harness-operations] — approved by the user; each part on its own branch and PR.
-Code defaults stay off (opt-in). "Everything on" is a config file, not a change to dataclass
-defaults, so existing tests, version hashes, and the prefix cache are unaffected.
+Code defaults stay off (opt-in) for features. "Everything on" is a config file, not a change to dataclass
+defaults, so existing tests, version hashes, and the prefix cache are unaffected. Bug fixes are on in code:
+see "Fix or feature" above.
 - **15a CLI defaults** (`phase-15a-cli-defaults`) — implemented:
   1. `--config` becomes optional. Order: `--config` → `AGENT_HARNESS_CONFIG` → `./models.toml` →
      `~/.agent-harness/models.toml`. If none is found, the error lists the paths that were tried.
@@ -927,6 +951,20 @@ All five phases are implemented (2026-11-10 to 11). Left open, on purpose: the p
 at each checkpoint, not set at each transition; `[Plan]`/`[Budget]` notes are still stored messages (a status
 block is sent beside them); only the state helpers left `orchestrator.py`; tools are still filtered on mode
 changes; Postgres keeps whole-snapshot checkpoints, and its memory methods are untested without a server.
+
+**Phase 30 – Fixes on by default** [durable-agent-orchestration, context-management] — on `phase-30-fix-defaults`
+The Phase 25–29 bug fixes were off in code, so only the root config was repaired. Now on in code (and removed
+from the root `models.toml`): `[orchestrator]` `resurface_repeated_results`, `phase_dispatch`,
+`close_orphan_tool_calls`, `mid_phase_checks`; `[context]` `layout = "anchored"`, `recovery_hints`, `ledger`,
+`calibrate`; `[summarization]` `trigger = "threshold"`, `chunked`. Each keeps its switch as an opt-out until the
+fixes have been verified on a live model; removing the old code paths is the follow-up. Still features (off in
+code, on in the root config): memory recall and saving, the message table and off-loop storage, `state_block`,
+`cancel_poll_seconds`, and the tuning values. Also:
+- the anchored state message shrinks under a tight budget (no ledger, then a short note without the header),
+  so an overflow retry on a small history no longer fails;
+- a repeated call answered from an earlier result has `repeated_call: true` in its `tool_responded` event;
+- `tests/test_fix_defaults.py` is the register of fixes and features.
+Benchmark baselines recorded on other configs shift once (the view sent to the model changed).
 
 ## Validation
 

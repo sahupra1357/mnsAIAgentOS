@@ -162,7 +162,11 @@ window fails cleanly, and resume produces the same view.
 
 ## Phase 26: context as working memory (implemented, opt-in)
 
-All of it is off in code and on in the root `models.toml`.
+Since Phase 30 the fixes are the code default: the anchored layout, `recovery_hints`, `ledger`, `calibrate`,
+`[summarization] trigger = "threshold"` and `chunked` (the old values are opt-outs: `layout = "legacy"`,
+`trigger = "omission"`). The tuning values (`default_window`, `stale_tool_output_chars`, `style`, the ratios)
+are set by the root `models.toml`. Under a tight budget the state message shrinks: first without the ledger,
+then a short note without the header, so it never costs more than the turns it stands for.
 
 - **Anchored layout** (`[context] layout = "anchored"`): the first user message is sent as stored.
   The summary, the omission note and the ledger are one user message after it

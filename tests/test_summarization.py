@@ -71,7 +71,9 @@ def history(turns: int) -> list[Message]:
 def builder(window: int = 2000, reserve: int = 200) -> BudgetedContextBuilder:
     return BudgetedContextBuilder(
         {"small": ContextLimits(context_window=window, output_reserve_tokens=reserve)},
-        policy=ContextPolicy(),
+        # The "legacy" layout (an opt-out since Phase 30; "anchored" is tested in
+        # tests/test_working_context.py).
+        policy=ContextPolicy(layout="legacy", recovery_hints=False, ledger=False),
     )
 
 

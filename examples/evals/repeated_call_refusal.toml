@@ -1,5 +1,7 @@
-# The sixth identical read-only call is refused (max_identical_tool_calls = 5),
-# and the model recovers with an answer.
+# The sixth identical read-only call is not run again (max_identical_tool_calls = 5):
+# it is answered with the earlier result and a note, and the model recovers with an
+# answer. (Before Phase 30 it was refused with status policy_denied; that is still what
+# happens with [orchestrator] resurface_repeated_results = false.)
 name = "repeated_call_refusal"
 prompt = "Echo the word ready."
 
@@ -24,4 +26,4 @@ max_steps = 10
 [expect]
 status = "completed"
 output_contains = ["ready"]
-event_payloads = [{ type = "tool_responded", status = "policy_denied" }]
+event_payloads = [{ type = "tool_responded", status = "success", repeated_call = true }]
