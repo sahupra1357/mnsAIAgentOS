@@ -61,19 +61,17 @@ class SQLiteRunStore:
     advance a given snapshot from a particular version.
     """
 
-    def __init__(self, path: str | Path, *, lease_clock: Callable[[], float] = time.time,
-                 message_table: bool = False) -> None:
+    def __init__(self, path: str | Path, *, lease_clock: Callable[[], float] = time.time) -> None:
         self._lease_clock = lease_clock
         self.path = str(path)
         if not self.path:
             raise ValueError("SQLite path must not be empty")
-        # Phase 29. message_table: messages go to the run_messages table, one row each, and a
-        # checkpoint writes only the rows that changed (the snapshot keeps everything else).
-        # Runs stored either way are read either way. The cache holds, per run, the messages
-        # as last read or written here and the version they belong to.
-        self._message_table = message_table
+        # Messages go to the run_messages table, one row each, and a checkpoint writes only
+        # the rows that changed (the snapshot keeps everything else). A run stored before
+        # Phase 29, with its messages in the snapshot, is still read, and moves to the table
+        # the next time it is saved. The cache holds, per run, the messages as last read or
+        # written here and the version they belong to.
         self._message_cache: OrderedDict[tuple[str, int], tuple[int, list[Message]]] = OrderedDict()
-        self._table_runs: set[str] = set()  # runs read here whose messages were in the table
         # check_same_thread off: an OffLoopStore runs every call on its own thread.
         self._connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
@@ -180,8 +178,6 @@ class SQLiteRunStore:
     # -- messages in their own table (Phase 29) ----------------------------------------
 
     def _snapshot(self, run: RunRecord) -> str:
-        if not self._message_table:
-            return _encode_run(run)
         data = asdict(replace(run, messages=[], archived_messages=[]))
         data["messages_in_table"] = True
         return _json_dumps(data)
@@ -197,15 +193,6 @@ class SQLiteRunStore:
         for archived, messages in ((0, run.messages), (1, run.archived_messages)):
             key = (run.id, archived)
             cached = self._message_cache.pop(key, None)
-            if not self._message_table:
-                # The snapshot holds the messages again; rows of a run that was stored in the
-                # table (seen when it was read) would be stale.
-                if run.id in self._table_runs:
-                    self._connection.execute(
-                        "DELETE FROM run_messages WHERE run_id = ? AND archived = ?", key)
-                    if archived:
-                        self._table_runs.discard(run.id)
-                continue
             start = 0
             if cached is not None and cached[0] == expected_version:
                 known = cached[1]
@@ -240,7 +227,6 @@ class SQLiteRunStore:
 
         data = json.loads(snapshot_json)
         if data.get("messages_in_table"):
-            self._table_runs.add(data["id"])
             version = int(data.get("version", 0))
             for archived, field_name in ((0, "messages"), (1, "archived_messages")):
                 key = (data["id"], archived)

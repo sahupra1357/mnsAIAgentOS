@@ -448,24 +448,17 @@ endpoint = "http://x/v1"
 [memory]
 enabled = true
 database = "{database}"
-scopes = true
-recall = true
-guidance = true
 """
 
 
 class ApplicationTests(unittest.TestCase):
     def test_config_rules(self) -> None:
         with self.assertRaises(ConfigError):
-            MemoryConfig(scopes=False, recall=True)
-        with self.assertRaises(ConfigError):
-            MemoryConfig(scopes=True, recall_limit=0)
-        # Since Phase 30 memory is one thing, on in code: scoped, recalled, saved, explained.
+            MemoryConfig(recall_limit=0)
+        # Memory is one thing, on in code: scoped, recalled, saved, explained (Phases 30-31).
         defaults = MemoryConfig()
-        self.assertTrue(all((defaults.enabled, defaults.scopes, defaults.recall, defaults.auto_save,
-                             defaults.guidance)))
-        # The old unscoped store is the opt-out; recall and saving do not exist there.
-        self.assertFalse(MemoryConfig(scopes=False, recall=False, auto_save=False, guidance=False).scopes)
+        self.assertTrue(all((defaults.enabled, defaults.recall, defaults.auto_save)))
+        self.assertFalse(hasattr(defaults, "scopes") or hasattr(defaults, "guidance"))  # not switches
 
     def test_application_registers_scoped_tools_and_guidance(self) -> None:
         async def scenario(directory: str) -> None:

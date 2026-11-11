@@ -310,14 +310,12 @@ class MemoryConfig:
     search: str = "keyword"
     embedding_profile: str = ""
     vectors: str = ""
-    # Phase 27 (knowledge/scoped_memory.py). enabled, scopes, recall, auto_save and guidance
-    # are on in code since Phase 30: memory that is never recalled or saved is not memory.
-    # Without ``database`` the notes are next to the run database.
-    # scopes: notes belong to the user or to the project (namespaces of one store, with a
-    # tenant's and end user's own), and the tools gain scope, update, forget and list.
-    # ``database`` may then be an absolute or ~ path shared by every project, e.g.
-    # "~/.agent-harness/memory.sqlite3". ``namespace`` stays readable as the old notes.
-    scopes: bool = True
+    # Memory is one thing (knowledge/scoped_memory.py): notes belong to the user or to the
+    # project (namespaces of one store, with a tenant's and end user's own), the tools take
+    # a scope and can update, forget and list, and the system prompt says when to save and
+    # search. ``database`` may be an absolute or ~ path shared by every project, e.g.
+    # "~/.agent-harness/memory.sqlite3"; without it the notes are next to the run database.
+    # ``namespace`` stays readable as the notes from before Phase 27.
     recall: bool = True              # put matching notes in front of the model for each message
     recall_limit: int = 5
     recall_max_chars: int = 2_000
@@ -326,11 +324,8 @@ class MemoryConfig:
     auto_save_max_notes: int = 4
     auto_save_max_output_tokens: int = 512
     auto_save_parameters: Mapping[str, Any] = field(default_factory=dict)
-    guidance: bool = True            # a "Memory" section in the system prompt (when to save and search)
 
     def __post_init__(self) -> None:
-        if (self.recall or self.auto_save or self.guidance) and not self.scopes:
-            raise ConfigError("memory.recall, auto_save and guidance need memory.scopes = true")
         if min(self.recall_limit, self.auto_save_max_notes) < 1 or self.recall_max_chars < 200:
             raise ConfigError("memory: recall_limit and auto_save_max_notes >= 1, recall_max_chars >= 200")
         if self.auto_save_max_output_tokens < 64:
@@ -512,23 +507,17 @@ class SummarizationConfig:
     # Extra request fields sent with summary calls only, e.g.
     # parameters = { chat_template_kwargs = { enable_thinking = false } }
     parameters: Mapping[str, Any] = field(default_factory=dict)
-    # Phase 26. "omission": summarize what the view already left out (the old trigger, an
-    # opt-out since Phase 30: it sends one request with a hole before it summarizes).
-    # "threshold": summarize once the view reaches trigger_ratio of its input budget,
-    # keeping about keep_ratio of it (the newest turns), so nothing is sent with a hole.
-    trigger: str = "threshold"
+    # Summarize once the view reaches trigger_ratio of its input budget, keeping about
+    # keep_ratio of it (the newest turns), so nothing is sent with a hole. A range too long
+    # for one request is summarized in several.
     trigger_ratio: float = 0.70
     keep_ratio: float = 0.35
-    # Several summary requests for a range too long for one, instead of dropping its middle.
-    chunked: bool = True
     # "prose" (the old instructions) or "structured" (fixed sections: goal, files, facts, next).
     style: str = "prose"
     # Characters of one message shown to the summarizer (longer ones lose their middle).
     max_message_chars: int = 4_000
 
     def __post_init__(self) -> None:
-        if self.trigger not in {"omission", "threshold"}:
-            raise ConfigError("summarization.trigger must be 'omission' or 'threshold'")
         if not 0 < self.keep_ratio < self.trigger_ratio <= 1:
             raise ConfigError("summarization: require 0 < keep_ratio < trigger_ratio <= 1")
         if self.style not in {"prose", "structured"}:
@@ -551,24 +540,16 @@ class ContextConfig:
     low_water_ratio: float = 0.60
     message_overhead_tokens: int = 8
     max_tool_output_chars: int = 16_000
-    # Phase 26. layout, recovery_hints, ledger and calibrate are fixes, on in code since
-    # Phase 30; the others are settings the root models.toml chooses.
     default_window: int = 0          # window for profiles without context_window (0: unbounded)
-    layout: str = "anchored"          # "anchored": summary and ledger in their own message
     stale_tool_output_chars: int = 0  # shorten old turns' tool outputs before dropping turns (0: off)
     keep_recent_units: int = 4       # ...but never those of the newest turns
     min_fitted_output_chars: int = 200  # floor for the newest turn's tool outputs
-    recovery_hints: bool = True      # truncation markers say how to get the rest
-    ledger: bool = True              # list the tool calls that are no longer shown
     ledger_max_entries: int = 40
     ledger_max_chars: int = 4_000
-    calibrate: bool = True           # raise the estimate when the provider counts more tokens
 
     def __post_init__(self) -> None:
         if self.default_window < 0:
             raise ConfigError("context.default_window must not be negative (0 = unbounded)")
-        if self.layout not in {"legacy", "anchored"}:
-            raise ConfigError("context.layout must be 'legacy' or 'anchored'")
         if self.stale_tool_output_chars and self.stale_tool_output_chars < 200:
             raise ConfigError("context.stale_tool_output_chars must be 0 (off) or at least 200")
         if self.keep_recent_units < 1 or self.min_fitted_output_chars < 200:
@@ -677,23 +658,14 @@ class OrchestratorConfig:
     max_answer_continuations: int = 0  # continue an answer cut off at max_tokens (0: off)
     max_cut_off_retries: int = 0  # ask again after an empty reply cut off at max_tokens (0: off)
     prefetch_with_hooks: bool = False  # run a reply's read-only calls concurrently despite pre_tool hooks
-    # Phase 26: a read-only call repeated past max_identical_tool_calls gets the earlier
-    # result again (with a note) instead of a refusal; max_refused_repeats still ends the run.
-    resurface_repeated_results: bool = True
-    # Phase 28 (see OrchestratorSettings for each).
-    phase_dispatch: bool = True         # pick the next transition from the stored run phase
-    verify_phase: bool = False          # ...and raise if it disagrees with the derived one (tests)
-    close_orphan_tool_calls: bool = True   # a run stopped for its budget answers its unrun tool calls
-    mid_phase_checks: bool = True       # cancel, budget and steer are checked between tool calls
-    max_tool_calls_per_run: int = 0     # 0: no limit (needs mid_phase_checks)
-    cancel_poll_seconds: float = 0.0    # 0: off; inline runs stop in-flight calls when cancelled
+    verify_phase: bool = False          # raise if the stored phase disagrees with the messages (tests)
+    max_tool_calls_per_run: int = 0     # 0: no limit
+    cancel_poll_seconds: float = 2.0    # inline runs stop in-flight calls when cancelled (0: never poll)
     state_block: bool = False           # plan, tasks and a low budget as one status message per request
 
     def __post_init__(self) -> None:
         if self.max_tool_calls_per_run < 0 or self.cancel_poll_seconds < 0:
             raise ConfigError("orchestrator.max_tool_calls_per_run and cancel_poll_seconds must not be negative")
-        if self.max_tool_calls_per_run and not self.mid_phase_checks:
-            raise ConfigError("orchestrator.max_tool_calls_per_run needs mid_phase_checks = true")
         if self.turn_max_steps < 0 or self.turn_max_wall_seconds < 0:
             raise ConfigError("orchestrator.turn_max_steps and turn_max_wall_seconds must not be negative")
         if self.final_answer_reserve_seconds < 0:
@@ -758,13 +730,6 @@ class StorageConfig:
     """Where runs are stored. ``url_env`` names an env var holding a postgresql:// URL."""
 
     url_env: str = ""
-    # Phase 29 (SQLite; both on in code since Phase 30).
-    # message_table: a run's messages are rows of run_messages and a checkpoint writes only
-    # the rows that changed, instead of rewriting the whole conversation in the snapshot.
-    message_table: bool = True
-    # off_loop: the run store, the note store and the vector index do their database work on
-    # a thread of their own, so a checkpoint or a search does not stop every other run.
-    off_loop: bool = True
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,7 +1,6 @@
 # The sixth identical read-only call is not run again (max_identical_tool_calls = 5):
 # it is answered with the earlier result and a note, and the model recovers with an
-# answer. (Before Phase 30 it was refused with status policy_denied; that is still what
-# happens with [orchestrator] resurface_repeated_results = false.)
+# answer. (Before Phase 30 it was refused with status policy_denied.)
 name = "repeated_call_refusal"
 prompt = "Echo the word ready."
 

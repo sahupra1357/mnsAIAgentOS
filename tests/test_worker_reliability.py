@@ -92,7 +92,7 @@ class DeadLetterTests(unittest.IsolatedAsyncioTestCase):
         run_id = await queued_run(real)
 
         class Raising(AgentOrchestrator):
-            async def run(self, run_id: str) -> Any:
+            async def run(self, run_id: str, **_: object) -> Any:
                 raise RuntimeError("bug in a tool")
 
         broken = Raising(models=Model(), tools=ToolRuntime(ToolRegistry()), store=store)

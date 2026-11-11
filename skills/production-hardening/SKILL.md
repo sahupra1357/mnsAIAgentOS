@@ -146,9 +146,9 @@ Everything above stays network-free:
 
 ## Phase 29: storage (implemented, opt-in)
 
-`[storage] message_table` and `off_loop`, on in code since Phase 30 (`false` opts out). SQLite only.
+Always on since Phase 31 (the `[storage] message_table` and `off_loop` switches were deleted). SQLite only.
 
-- **Message table.** `SQLiteRunStore(message_table=True)` keeps `messages` and
+- **Message table.** `SQLiteRunStore` keeps `messages` and
   `archived_messages` as rows of `run_messages` (migration 10); the snapshot holds the rest and
   `messages_in_table`. A checkpoint compares the run's messages with what this store last read or
   wrote *for the version being replaced* and rewrites rows from the first difference on: a step

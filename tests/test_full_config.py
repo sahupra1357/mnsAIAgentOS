@@ -150,20 +150,15 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(c.web_search.max_results, 3)
         self.assertEqual((c.context.high_water_ratio, c.context.low_water_ratio), (0.85, 0.60))
         # Phase 26: context as working memory.
-        self.assertEqual((c.context.layout, c.context.ledger, c.context.recovery_hints, c.context.calibrate),
-                         ("anchored", True, True, True))
         self.assertEqual((c.context.stale_tool_output_chars, c.context.min_fitted_output_chars), (1500, 2000))
         self.assertEqual(c.context.default_window, 32768)
-        self.assertEqual((c.summarization.trigger, c.summarization.chunked, c.summarization.style),
-                         ("threshold", True, "structured"))
-        self.assertTrue(c.orchestrator.resurface_repeated_results)
-        o = c.orchestrator  # Phase 28
-        self.assertTrue(all((o.phase_dispatch, o.close_orphan_tool_calls, o.mid_phase_checks, o.state_block)))
+        self.assertEqual(c.summarization.style, "structured")
+        o = c.orchestrator  # Phase 28 (the loop fixes themselves are not switches: Phase 31)
+        self.assertTrue(o.state_block)
         self.assertEqual(o.cancel_poll_seconds, 2.0)
-        self.assertTrue(c.storage.message_table and c.storage.off_loop)  # Phase 29
         # Phase 27: one note store for every project, scoped, recalled and saved by the harness.
         self.assertEqual(c.memory.database, "~/.agent-harness/memory.sqlite3")
-        self.assertTrue(all((c.memory.scopes, c.memory.recall, c.memory.auto_save, c.memory.guidance)))
+        self.assertTrue(c.memory.enabled and c.memory.recall and c.memory.auto_save)
         self.assertIn("memory_update", c.tool_loading.core)
         self.assertEqual(c.web_search.max_chars_per_result, 800)
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date

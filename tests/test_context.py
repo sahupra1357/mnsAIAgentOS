@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 from agent_harness.config.loader import ModelProfile
 from agent_harness.orchestration.context import (
+    STATE_HEADER,
     BudgetedContextBuilder,
     ContextLimits,
     ContextPolicy,
@@ -63,9 +64,6 @@ def history(turns: int, output_chars: int = 700) -> list[Message]:
 
 
 def builder(window: int = 2000, reserve: int = 200, **policy: object) -> BudgetedContextBuilder:
-    # These tests cover the "legacy" layout, which stays available as an opt-out (Phase 30
-    # made "anchored" the default; tests/test_working_context.py covers that one).
-    policy = {"layout": "legacy", "recovery_hints": False, "ledger": False, **policy}
     return BudgetedContextBuilder(
         {"small": ContextLimits(context_window=window, output_reserve_tokens=reserve)},
         policy=ContextPolicy(**policy),  # type: ignore[arg-type]
@@ -105,12 +103,14 @@ class BudgetedContextBuilderTests(unittest.TestCase):
 
         self.assertGreater(view.omitted_messages, 0)
         self.assertEqual(view.messages[0], SYSTEM)
-        self.assertEqual(view.messages[1].role, Role.USER)
-        self.assertTrue(view.messages[1].content.startswith(TASK.content))
-        self.assertIn(f"{view.omitted_messages} earlier messages were omitted", view.messages[1].content)
+        self.assertEqual(view.messages[1], TASK)  # the request is sent exactly as stored
+        # What stands in for the omitted turns is one harness-written message after it.
+        self.assertEqual(view.messages[2].role, Role.USER)
+        self.assertTrue(view.messages[2].content.startswith(STATE_HEADER))
+        self.assertIn(f"{view.omitted_messages} earlier messages were omitted", view.messages[2].content)
         self.assertEqual(view.messages[-2:], tuple(messages[-2:]))
-        self.assertEqual(len(view.messages), len(messages) - view.omitted_messages)
-        self.assertEqual(view.messages[2].role, Role.ASSISTANT)
+        self.assertEqual(len(view.messages), len(messages) - view.omitted_messages + 1)
+        self.assertEqual(view.messages[3].role, Role.ASSISTANT)
         assert_tool_pairs_intact(self, view.messages)
         assert view.estimated_tokens is not None
         self.assertLessEqual(view.estimated_tokens, 2000 - 200)
@@ -147,8 +147,9 @@ class BudgetedContextBuilderTests(unittest.TestCase):
         )
         self.assertEqual(view.trimmed_tool_outputs, 1)
         trimmed = view.messages[-1].content
-        self.assertLess(len(trimmed), 1100)
+        self.assertLess(len(trimmed), 1200)
         self.assertIn("characters truncated", trimmed)
+        self.assertIn("call the tool again", trimmed)  # the marker says how to get the rest
         self.assertTrue(trimmed.startswith("result 0 "))
         self.assertEqual(len(messages[-1].content), len("result 0 ") + 5000)
 

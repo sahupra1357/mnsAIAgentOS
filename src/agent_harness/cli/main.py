@@ -986,8 +986,7 @@ async def _memory_command(args: argparse.Namespace) -> int:
             raise ValueError("reindex needs [memory] enabled = true and search = \"semantic\" or \"hybrid\"")
         store = open_memory_store(config, _state_base(config, args.config), args.database)
         try:
-            embedded = (await store.reindex(every_namespace=True) if config.memory.scopes
-                        else await store.reindex())
+            embedded = await store.reindex(every_namespace=True)
         finally:
             await store.close()
         print(f"embedded {embedded} notes")
@@ -1019,8 +1018,8 @@ async def _scoped_memory_command(args: argparse.Namespace) -> int:
     from ..knowledge.scoped_memory import _resolve_id
 
     config = load_config(args.config, layered=True, workspace=getattr(args, "workspace", None))
-    if not config.memory.enabled or not config.memory.scopes:
-        raise ValueError("this needs [memory] enabled = true and scopes = true")
+    if not config.memory.enabled:
+        raise ValueError("this needs [memory] enabled = true")
     database = args.database  # resolved by main() (the project's state database by default)
     store = open_memory_store(config, _state_base(config, args.config), database)
     try:

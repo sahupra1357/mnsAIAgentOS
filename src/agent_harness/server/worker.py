@@ -89,7 +89,7 @@ class Worker:
                                     "(the worker crashed or lost its lease each time)")
             await self._queue.release(run_id, self.worker_id, requeue=False)
             return None
-        execution = asyncio.create_task(self._orchestrator.run(run_id))
+        execution = asyncio.create_task(self._orchestrator.run(run_id, watch_cancel=False))
         heartbeat = asyncio.create_task(self._heartbeat(run_id, execution))
         result: RunRecord | None = None
         give_up = False
