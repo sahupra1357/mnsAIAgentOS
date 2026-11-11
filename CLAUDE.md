@@ -101,7 +101,10 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
 |-----------------------------------|---------------------------------------------------------|
 | Domain values & protocols         | `src/agent_harness/domain.py`                           |
 | Composition root                  | `src/agent_harness/application.py`                      |
-| State machine, budgets, resume    | `src/agent_harness/orchestration/orchestrator.py`       |
+| Public API, the loop, checkpoints | `src/agent_harness/orchestration/orchestrator.py`       |
+| Model step, tool step, plan steps | `src/agent_harness/orchestration/{model_step,tool_step,plan_steps}.py` |
+| Guard steps, child runs           | `src/agent_harness/orchestration/{guard_steps,child_runs}.py` |
+| Loop settings, phases, transitions | `src/agent_harness/orchestration/{loop_types,state}.py` |
 | Plans, subagents, context, output | `src/agent_harness/orchestration/`                      |
 | TOML/env config, `ModelProfile`   | `src/agent_harness/config/loader.py`                    |
 | Layered settings, .env, secrets   | `src/agent_harness/config/`                             |
@@ -217,8 +220,8 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   last event of a finished run; scripted models must answer it. Notes that were in per-project run databases are
   not moved automatically: `agent-harness memory migrate --from sqlite:PATH` copies them (they stay readable as
   scope `legacy`). Details: `skills/harness-operations/SKILL.md`.
-- **Run phase (Phase 28).** `_checkpoint` stores `RunRecord.phase` (`derive_phase` in `orchestration/state.py`),
-  and the root config dispatches on it (`phase_dispatch`). Every change to `run.messages` must be checkpointed
+- **Run phase (Phase 28, 34).** `_checkpoint` stores `RunRecord.phase`, set by `phase_after` (the transition
+  table in `orchestration/state.py`), and the loop dispatches on it. Every change to `run.messages` must be checkpointed
   before the loop takes its next boundary, or the stored phase is stale; `verify_phase = true` (tests,
   `tests/test_symptoms.py`) raises on that. New event types go into `ANNOTATION_EVENTS` or `STATE_EVENTS`
   (`domain.py`). The run-state helpers moved to `orchestration/state.py` and are imported back by name.
@@ -991,9 +994,34 @@ code paths: `[orchestrator]` `resurface_repeated_results`, `phase_dispatch`, `cl
 - A run stored before Phase 29 (messages in the snapshot) is still read and moves to the table on its next save.
 - Still options: `[memory]` `enabled`, `recall`, `auto_save` (on in code; off for a benchmark), and `state_block`
   (off in code, on in the root config).
-- **Left open:** `[Plan]`/`[Budget]` notes are still stored messages, so `state_block` repeats them; the phase is
-  still derived at each checkpoint; the orchestrator split; tools filtered on mode changes; the usage roll-up;
-  Postgres whole-snapshot checkpoints.
+- The items left open here were done in Phases 32–37.
+
+**Phases 32–37 – The rest of the loop repair** [durable-agent-orchestration, tool-platform, production-hardening] — 2026-11-11, stacked branches
+- **32 Status and directives** (`phase-32-status-not-notes`): the status block (plan, tasks, low budget) is sent with
+  every request, with no switch; it goes before a trailing harness directive so the directive stays last.
+  `written_by_user()` (`context.py`) is the one test for "the user wrote this"; hook context and status messages
+  were mistaken for the latest request. **The `[Plan]`/`[Budget]` messages stay stored on purpose:** they are turns
+  of the conversation (a plan step, "answer now"). The chat format has no other role for them, and without them
+  two assistant messages would follow each other. What changes over time (progress, budget) is in the status block.
+- **33 Stable tool list** (`phase-33-stable-tool-list`): `RunRecord.sticky_tools` holds `exit_plan`, `create_plan`,
+  `update_plan`, `revise_plan` in the order first offered; once offered they stay, after the stable tools and before
+  loaded ones. A planned run lists side-effect tools before its plan exists and refuses the call (`_state_refusal`);
+  `exit_plan` outside plan mode is refused. Never filter the list by state again: it invalidates the prefix cache.
+- **34 Transition table** (`phase-34-phase-transitions`): `phase_after()` (`state.py`) sets the phase from the run's
+  status and the newest state event of the checkpoint. `derive_phase()` is only for runs stored before the phase
+  existed and the cross-check under `verify_phase`; the whole suite agrees with verification forced on. A new state
+  event type needs a row in `phase_after`.
+- **35 One usage path** (`phase-35-usage-path`): `_charge()` and `_charge_child()` are the only code that adds to
+  `consumed_tokens` / `consumed_cost_usd` (a test scans the loop modules). The guard and embedding paths used to
+  drop the cost. Note extraction is skipped when the turn has used its token or cost budget.
+- **36 Orchestrator split** (`phase-36-orchestrator-split`): `orchestrator.py` (4,885 lines) keeps the public API,
+  the loop, checkpoints and budgets (about 2,160). `loop_types.py` has `OrchestratorSettings` and the directive
+  texts (imported back by name); `model_step.py`, `tool_step.py`, `plan_steps.py`, `guard_steps.py` and
+  `child_runs.py` hold methods as functions taking `self: AgentOrchestrator`, bound in the class body. Add a method
+  to the module of its step and bind it in the class; those modules must not import `orchestrator` at run time.
+- **37 Postgres messages** (`phase-37-postgres-messages`): migration 7 `run_messages`, delta writes, `run_state`,
+  `list_events_since`, as in SQLite. The note lifecycle tests run on both backends. Verified on a local
+  PostgreSQL 14 (`initdb` in a temporary folder, `psycopg` in a scratch venv): 1,081 tests, none skipped.
 
 ## Validation
 

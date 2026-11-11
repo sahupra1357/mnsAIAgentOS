@@ -146,7 +146,8 @@ Everything above stays network-free:
 
 ## Phase 29: storage (implemented, opt-in)
 
-Always on since Phase 31 (the `[storage] message_table` and `off_loop` switches were deleted). SQLite only.
+Always on since Phase 31 (the `[storage] message_table` and `off_loop` switches were deleted). Postgres has the
+same message table since Phase 37 (migration 7); off-loop wrapping is for SQLite.
 
 - **Message table.** `SQLiteRunStore` keeps `messages` and
   `archived_messages` as rows of `run_messages` (migration 10); the snapshot holds the rest and

@@ -22,8 +22,10 @@ events, so resume continues exactly where it stopped.
 ## Plan-and-execute mode (`[planning]` or `run --plan`)
 
 1. **Plan.** At creation, the system context gains the planner instructions: first
-   explore with read-only tools, then call `create_plan`. Until a plan exists, only
-   read-only tools and `create_plan` are offered.
+   explore with read-only tools, then call `create_plan`. Until a plan exists, a call to
+   any other tool that is not read-only is refused. The tools stay in the list (Phase 33:
+   the list of a run only grows, so the prompt prefix stays cached); `update_plan` and
+   `revise_plan` are added once the plan exists.
 2. **Execute, the orchestrator driving.** At each boundary the orchestrator picks the
    ready steps, meaning pending steps whose dependencies are all completed.
    - **Agent steps** (`agent` set): the orchestrator starts the child runs itself,
