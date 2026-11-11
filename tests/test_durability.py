@@ -271,7 +271,7 @@ class VersionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(versions["harness_version"], "0.1.0")
                 self.assertEqual(versions["profile_sha256"], profile_sha256(app.config.models["p"]))
             finally:
-                app.store._connection.close()
+                app.store.inner._connection.close()  # app.store is an OffLoop wrapper since Phase 30
 
 
 class CachedTokenTests(unittest.IsolatedAsyncioTestCase):

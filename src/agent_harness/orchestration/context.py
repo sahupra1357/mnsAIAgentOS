@@ -75,7 +75,8 @@ class ContextPolicy:
     # message. "anchored": that message is never changed; the summary, the note and the
     # ledger are one message of their own after it, and the user's latest request, when
     # the summary or a trim covers it, follows as a message of its own.
-    layout: str = "legacy"
+    # "anchored", recovery_hints and ledger are fixes: on in code since Phase 30.
+    layout: str = "anchored"
     # Before whole turns are dropped, tool outputs of turns older than the newest
     # ``keep_recent_units`` are shortened to this many characters (None: off).
     stale_tool_output_chars: int | None = None
@@ -83,9 +84,9 @@ class ContextPolicy:
     # The newest turn's tool outputs are never shortened below this.
     min_fitted_output_chars: int = 200
     # Say in a truncation marker how to get the rest (the artifact, or calling again).
-    recovery_hints: bool = False
+    recovery_hints: bool = True
     # A harness-written list of the tool calls that are no longer shown (anchored layout).
-    ledger: bool = False
+    ledger: bool = True
     ledger_max_entries: int = 40
     ledger_max_chars: int = 4_000
 
@@ -351,16 +352,23 @@ class BudgetedContextBuilder:
                 total -= unit_tokens[cut]
                 cut += 1
 
-        def state(cut: int) -> tuple[list[Message], int]:
-            """The state message and the carried request for this cut, and their tokens."""
+        def state(cut: int, detail: int = 2) -> tuple[list[Message], int]:
+            """The state message and the carried request for this cut, and their tokens.
+
+            ``detail`` 2 is the full message; 1 leaves the ledger out; 0 also leaves the
+            header out. The smaller forms are for a budget so tight that the state message
+            would cost more than the turns it stands for (Phase 30).
+            """
 
             kept_from = rest_start + sum(len(unit) for unit in units[:cut])
             parts = [summary_text] if summary_text else []
             omitted = kept_from - rest_start
-            if omitted:
+            if omitted and detail:
                 parts.append(f"[Context note: {omitted} earlier messages were omitted "
                              "to fit the model's context window.]")
-            if policy.ledger and kept_from > head_end:
+            elif omitted:
+                parts.append(f"[Context note: {omitted} earlier messages omitted.]")
+            if policy.ledger and detail >= 2 and kept_from > head_end:
                 room = min(policy.ledger_max_chars,
                            max(200, math.floor(budget * 0.1 * policy.chars_per_token)))
                 ledger = tool_ledger(prepared[head_end:kept_from],
@@ -369,7 +377,8 @@ class BudgetedContextBuilder:
                     parts.append(ledger)
             extra: list[Message] = []
             if parts:
-                extra.append(Message(role=Role.USER, content=STATE_HEADER + "\n\n" + "\n\n".join(parts)))
+                body = "\n\n".join(parts)
+                extra.append(Message(role=Role.USER, content=STATE_HEADER + "\n\n" + body if detail else body))
             if latest is not None and latest < kept_from:
                 extra.append(prepared[latest])  # the request being worked on, in the user's words
             return extra, sum(self._message_tokens(m, reasoning) for m in extra)
@@ -382,6 +391,11 @@ class BudgetedContextBuilder:
             cut += 1
             extra, extra_tokens = state(cut)
         total = head_tokens + extra_tokens + kept_tokens
+        for detail in (1, 0):
+            if total <= budget:
+                break
+            extra, extra_tokens = state(cut, detail)
+            total = head_tokens + extra_tokens + kept_tokens
         if total > budget and units:
             newest, fitted_outputs = self._fit_newest_unit(units[-1], total - budget, reasoning)
             if fitted_outputs:

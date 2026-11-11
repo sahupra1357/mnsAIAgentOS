@@ -83,7 +83,10 @@ refusals are per reply. Side-effect tools are never merged.
 
 ## Phase 28: run phase and loop guards (implemented, opt-in)
 
-All off in code (`OrchestratorSettings`, `[orchestrator]`), on in the root `models.toml`.
+Since Phase 30 the fixes are on in code: `phase_dispatch`, `close_orphan_tool_calls`, `mid_phase_checks`
+(and `resurface_repeated_results` from Phase 26); `False` is an opt-out. The features stay off in code and on
+in the root `models.toml`: `state_block`, `cancel_poll_seconds`, `max_tool_calls_per_run`; `verify_phase` is
+for tests. CLAUDE.md, "Fix or feature", says how to classify a new option.
 
 - **Phase.** `RunRecord.phase` is written by `_checkpoint` from `derive_phase(run, events)`
   (`orchestration/state.py`): `queued`, `model`, `model_request`, `tools`, `answer`,

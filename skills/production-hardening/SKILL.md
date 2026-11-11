@@ -146,7 +146,7 @@ Everything above stays network-free:
 
 ## Phase 29: storage (implemented, opt-in)
 
-`[storage] message_table` and `off_loop`, off in code, on in the root `models.toml`. SQLite only.
+`[storage] message_table` and `off_loop`, on in code since Phase 30 (`false` opts out). SQLite only.
 
 - **Message table.** `SQLiteRunStore(message_table=True)` keeps `messages` and
   `archived_messages` as rows of `run_messages` (migration 10); the snapshot holds the rest and

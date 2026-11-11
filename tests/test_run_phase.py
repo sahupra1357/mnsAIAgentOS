@@ -224,7 +224,9 @@ class OrphanTests(unittest.TestCase):
         async def scenario() -> None:
             store = InMemoryRunStore()
             tools = Tools()
-            old = AgentOrchestrator(models=Model([calls(("a", "write"), tokens=5_000)]), tools=tools, store=store)
+            # A run stored by a harness from before Phase 28 (the opt-out reproduces it).
+            old = AgentOrchestrator(models=Model([calls(("a", "write"), tokens=5_000)]), tools=tools, store=store,
+                                    settings=OrchestratorSettings(close_orphan_tool_calls=False))
             created = await old.create_run(model_profile="p", messages=[TASK], budget=RunBudget(max_tokens=1_000))
             stopped = await old.run(created.id)
             self.assertEqual([m.role for m in stopped.messages][-1], Role.ASSISTANT)  # the old behaviour
@@ -269,6 +271,7 @@ class BetweenToolCallsTests(unittest.TestCase):
         run(scenario())
 
     def test_without_the_option_every_call_runs_first(self) -> None:
+        # The option is on by default since Phase 30; this is the opt-out.
         async def scenario() -> None:
             store = InMemoryRunStore()
             holder: dict[str, object] = {}
@@ -280,7 +283,7 @@ class BetweenToolCallsTests(unittest.TestCase):
             tools = Tools(during)
             orchestrator = AgentOrchestrator(
                 models=Model([calls(("a", "write"), ("b", "write")), say()]), tools=tools, store=store,
-                steering=store)
+                steering=store, settings=OrchestratorSettings(mid_phase_checks=False))
             holder["o"] = orchestrator
             created = await orchestrator.create_run(model_profile="p", messages=[TASK])
             holder["run"] = created.id
@@ -453,12 +456,16 @@ class StateBlockTests(unittest.TestCase):
 class ConfigTests(unittest.TestCase):
     def test_validation(self) -> None:
         with self.assertRaises(ConfigError):
-            OrchestratorConfig(max_tool_calls_per_run=5)  # needs mid_phase_checks
+            OrchestratorConfig(max_tool_calls_per_run=5, mid_phase_checks=False)  # needs mid_phase_checks
         with self.assertRaises(ConfigError):
             OrchestratorConfig(cancel_poll_seconds=-1)
         with self.assertRaises(ValueError):
             OrchestratorSettings(cancel_poll_seconds=0)
-        self.assertFalse(OrchestratorSettings().phase_dispatch)
+        # The loop fixes are the code default since Phase 30; verify_phase stays a test aid.
+        defaults = OrchestratorSettings()
+        self.assertTrue(defaults.phase_dispatch and defaults.close_orphan_tool_calls
+                        and defaults.mid_phase_checks and defaults.resurface_repeated_results)
+        self.assertFalse(defaults.verify_phase)
 
 
 if __name__ == "__main__":

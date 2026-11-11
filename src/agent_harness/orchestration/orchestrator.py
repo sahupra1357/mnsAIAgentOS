@@ -303,21 +303,23 @@ class OrchestratorSettings:
     # Phase 26: a read-only call repeated past max_identical_tool_calls is answered with the
     # earlier result and a note instead of a refusal (the model often repeats a call because
     # the result was trimmed from its view). max_refused_repeats still ends a real loop.
-    resurface_repeated_results: bool = False
-    # Phase 28 (all off in code).
+    # A fix: on in code since Phase 30 (False is the opt-out, kept until verified live).
+    resurface_repeated_results: bool = True
+    # Phase 28. phase_dispatch, close_orphan_tool_calls and mid_phase_checks are fixes, on in
+    # code since Phase 30 (see CLAUDE.md, "Fix or feature"); the rest are features, off.
     # Use the phase stored on the run to pick the next transition instead of re-deriving it
     # from the messages and the event log at every boundary. verify_phase checks at each
     # boundary that the two agree and raises if not (tests and scenario runs).
-    phase_dispatch: bool = False
+    phase_dispatch: bool = True
     verify_phase: bool = False
     # A run that stops for its budget answers every tool call it did not run ("not run"), so
     # the history never ends in a call without a result; a continued run closes such calls
     # from older runs before the new message instead of executing them.
-    close_orphan_tool_calls: bool = False
+    close_orphan_tool_calls: bool = True
     # Between the tool calls of one reply: stop if the run was cancelled or changed elsewhere,
     # stop for the token, cost or tool-call budget, and hand a queued steer to the model
     # (the calls not yet run are answered "not run").
-    mid_phase_checks: bool = False
+    mid_phase_checks: bool = True
     max_tool_calls_per_run: int | None = None
     # Poll the stored run this often (seconds) while it executes and stop the model or tool
     # call in flight once it is cancelled. Queue workers do this themselves; with it, a run
@@ -521,7 +523,7 @@ class AgentOrchestrator:
         user_quotas: Callable[[str], Quota | None] | None = None,
         context_policy: ContextPolicy | None = None,
         compaction: CompactionPolicy | None = None,
-        calibrate_estimate: bool = False,
+        calibrate_estimate: bool = True,
         memory: Any = None,
     ) -> None:
         self._models = models
@@ -2837,7 +2839,8 @@ class AgentOrchestrator:
                 ),
             )
             self._append_tool_message(run, result)
-            await self._record_tool_result(run, events, result, attempt=0)
+            # The event says the call was answered from an earlier result, not run.
+            await self._record_tool_result(run, events, result, attempt=0, extra={"repeated_call": True})
             return True
         result = ToolResult(
             call_id=call.id,

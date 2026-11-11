@@ -139,7 +139,9 @@ class OverflowRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(retried.messages), len(full.messages))
         self.assertEqual(retried.messages[0], full.messages[0])  # system and task are pinned
         self.assertTrue(retried.messages[1].content.startswith("the task"))
-        self.assertIn("omitted", retried.messages[1].content)
+        # The omission note is its own message after the task (the anchored layout).
+        self.assertEqual(retried.messages[1].content, "the task")
+        self.assertIn("omitted", retried.messages[2].content)
         events = await store.list_events(finished.id)
         recovered = [e for e in events if e.payload.get("context_overflow")]
         self.assertEqual(len(recovered), 1)

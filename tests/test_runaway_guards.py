@@ -333,7 +333,8 @@ class DuplicateCallsInOneReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished.status, RunStatus.COMPLETED)
         # Replies 1 and 2 ran their first call; their duplicates and all of reply 3 did not.
         self.assertEqual({c.id for c in tools.executed}, {"r0-0", "r1-0"})
-        refused = [m for m in finished.messages if m.role is Role.TOOL and m.content.startswith("Refused")]
+        # (answered with the earlier result and a note: the default since Phase 30)
+        refused = [m for m in finished.messages if m.role is Role.TOOL and m.content.startswith("[Not run again")]
         self.assertEqual(len(refused), 1)  # one refusal for the whole third reply
 
     async def test_a_reply_after_refusals_still_fails_the_loop(self) -> None:

@@ -282,10 +282,15 @@ class CompositionTests(unittest.IsolatedAsyncioTestCase):
             async with again:
                 self.assertEqual(len(await again.memory.search("restarts")), 1)
 
+            # Memory is on in code since Phase 30; artifacts are still a feature.
             plain = build_application(config_path=self._config(directory, ""), database_path=database)
             async with plain:
-                self.assertNotIn("memory_search", {spec.name for spec in plain.tools.specs()})
+                self.assertIn("memory_search", {spec.name for spec in plain.tools.specs()})
                 self.assertIsNone(plain.artifacts)
+            off = build_application(config_path=self._config(directory, "[memory]\nenabled = false\n"),
+                                    database_path=database)
+            async with off:
+                self.assertNotIn("memory_search", {spec.name for spec in off.tools.specs()})
 
 
 # --- Evaluations --------------------------------------------------------------------

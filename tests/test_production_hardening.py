@@ -296,6 +296,7 @@ class StorageTests(unittest.TestCase):
             path.write_text(MODEL + '[storage]\nurl_env = "HARNESS_DB_URL"\n', encoding="utf-8")
             config = load_config(path)
             store = open_run_store(Path(directory) / "runs.sqlite3", config)  # env unset: SQLite
+            store = getattr(store, "inner", store)  # behind the OffLoop wrapper since Phase 30
             self.assertIsInstance(store, SQLiteRunStore)
             store.close_now()
             try:

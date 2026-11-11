@@ -48,6 +48,34 @@ any of this.
   `ModelRequest`), add it with a default so existing callers and tests keep working.
 - Stay stdlib-only unless a dependency clearly earns its place; ask first.
 
+## Fix or feature: which default a new option gets
+
+Decide this before writing the option, and say which it is in the plan. Phases 25–29 shipped
+bug fixes switched off in code, so the harness stayed broken for any config but the root one;
+Phase 30 corrected that.
+
+**The test: would anyone knowingly choose the old behaviour?**
+
+| Answer | It is a | Code default | Root `models.toml` | Tests that pin the old behaviour |
+|---|---|---|---|---|
+| No: the old behaviour is wrong for everyone (a lost message, a corrupt history, an ignored cancel, data dropped silently) | **fix** | **on** | no key | updated to the new behaviour (not deleted) |
+| Yes: it needs something the code cannot supply (a server, a key, credentials, Docker), or it is a mode the user picks per run or per deployment | **feature** | off | turned on | unchanged |
+| It is a number or a choice whose best value depends on the model or the workload | **setting** | a safe value | the user's value | unchanged |
+
+- **Backward compatibility is not a reason to keep something off.** The user said so on 2026-11-11: the harness
+  did not work before Phases 25–29, and nothing has to keep behaving that way. "It costs a model call", "it changes
+  the stored format" and "existing tests expect the old behaviour" are not reasons either: if the harness is wrong
+  without it, it is a fix. (I had filed memory recall and saving, and the message table, as features on those
+  grounds; that was the same mistake again.)
+- **A fix may keep its switch as an opt-out**, for the case where it misbehaves on a live model. The
+  opt-out is never set in the root config.
+- **Not sure?** If the change repairs a symptom the user reported, it is a fix. If it still is not
+  clear, ask the user; do not default to "off".
+- **The register:** `tests/test_fix_defaults.py` lists every option added since Phase 25 as a fix
+  or a feature (with the reason). A new `[orchestrator]`, `[context]` or `[summarization]` option
+  that is in neither list fails the suite, and so does a fix that is off in code or set in the root config.
+- **Older wording:** "code defaults stay off" (Phase 15 and later notes) is the rule for features only.
+
 ## Commands
 
 ```bash
@@ -174,13 +202,13 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   The model's view keeps the newest request too: when a summary or omission covers it, its
   text follows the summary as `[Latest user message - answer this one]`. Before, only the
   first user message survived verbatim, and a chat's second question was answered as the first.
-- **Working context (Phase 26).** The root config uses `[context] layout = "anchored"`: the summary, omission
+- **Working context (Phase 26; the code default since Phase 30).** `[context] layout = "anchored"`: the summary, omission
   note and tool-call ledger are one message after the first user message (never glued onto it), and the latest
   request is carried as its own message. `[summarization] trigger = "threshold"` compacts before anything is
   omitted. A new code path that reads `view.messages[1]` for the summary is wrong in this layout. The estimate
   scale (`estimate_ratio` in `model_responded`) and overflow caps are passed to `build`; do not wrap an anchored
   view in `fit_to_tokens`. Details: `skills/context-management/SKILL.md`.
-- **Scoped memory (Phase 27).** The root config keeps notes in `~/.agent-harness/memory.sqlite3` (`[memory]
+- **Scoped memory (Phase 27; on in code since Phase 30).** The root config keeps notes in `~/.agent-harness/memory.sqlite3` (`[memory]
   scopes`, `recall`, `auto_save`, `guidance`), not in the run database. Anything that builds the root config in a
   test or benchmark must override `memory.database`, or it opens the user's real notes. The end-of-turn
   extraction is a model call with `purpose = "memory"`, made after `run_completed`, so `memory_saved` can be the
@@ -193,7 +221,7 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   `tests/test_symptoms.py`) raises on that. New event types go into `ANNOTATION_EVENTS` or `STATE_EVENTS`
   (`domain.py`). The run-state helpers moved to `orchestration/state.py` and are imported back by name.
   Details: `skills/durable-agent-orchestration/SKILL.md`.
-- **Storage (Phase 29).** With the root config, `app.store` is an `OffLoop` around the SQLite store (`.inner`
+- **Storage (Phase 29; on in code since Phase 30).** `app.store` is an `OffLoop` around the SQLite store (`.inner`
   is the store itself), messages are rows of `run_messages` (migration 10), and the snapshot has
   `messages_in_table`. Code that reads `snapshot_json` directly gets no messages: go through `get_run`. The delta
   write trusts its cache only for the version being replaced, so a run object must be saved through the store it
@@ -680,8 +708,9 @@ with different wording). Example profiles `llamacpp`/`modal` use `token_counting
 `[models.embed]` is `nomic-embed-text` on Ollama.
 
 **Phase 15 – Defaults, feature validation, chat clients, web UI** [interactive-extensibility, harness-verification, harness-operations] — approved by the user; each part on its own branch and PR.
-Code defaults stay off (opt-in). "Everything on" is a config file, not a change to dataclass
-defaults, so existing tests, version hashes, and the prefix cache are unaffected.
+Code defaults stay off (opt-in) for features. "Everything on" is a config file, not a change to dataclass
+defaults, so existing tests, version hashes, and the prefix cache are unaffected. Bug fixes are on in code:
+see "Fix or feature" above.
 - **15a CLI defaults** (`phase-15a-cli-defaults`) — implemented:
   1. `--config` becomes optional. Order: `--config` → `AGENT_HARNESS_CONFIG` → `./models.toml` →
      `~/.agent-harness/models.toml`. If none is found, the error lists the paths that were tried.
@@ -927,6 +956,25 @@ All five phases are implemented (2026-11-10 to 11). Left open, on purpose: the p
 at each checkpoint, not set at each transition; `[Plan]`/`[Budget]` notes are still stored messages (a status
 block is sent beside them); only the state helpers left `orchestrator.py`; tools are still filtered on mode
 changes; Postgres keeps whole-snapshot checkpoints, and its memory methods are untested without a server.
+
+**Phase 30 – Fixes on by default** [durable-agent-orchestration, context-management] — on `phase-30-fix-defaults`
+The Phase 25–29 bug fixes were off in code, so only the root config was repaired. Now on in code (and removed
+from the root `models.toml`): `[orchestrator]` `resurface_repeated_results`, `phase_dispatch`,
+`close_orphan_tool_calls`, `mid_phase_checks`; `[context]` `layout = "anchored"`, `recovery_hints`, `ledger`,
+`calibrate`; `[summarization]` `trigger = "threshold"`, `chunked`. Each keeps its switch as an opt-out until the
+fixes have been verified on a live model; removing the old code paths is the follow-up. Also on in code:
+`[memory]` `enabled`, `scopes`, `recall`, `auto_save`, `guidance` (memory is one thing; without `database` the
+notes are next to the run database, and the root config names the shared `~/.agent-harness/memory.sqlite3`) and
+`[storage]` `message_table`, `off_loop`. So every application has the memory tools, `app.store` and `app.memory`
+are `OffLoop` wrappers (`.inner`), and a scripted model in a test gets a `purpose = "memory"` request after a
+completed top-level run. Still off in code, on in the root config: `state_block` (it repeats the stored
+`[Plan]`/`[Budget]` notes until those stop being stored), `cancel_poll_seconds` (queue workers already poll), and
+the tuning values. Also:
+- the anchored state message shrinks under a tight budget (no ledger, then a short note without the header),
+  so an overflow retry on a small history no longer fails;
+- a repeated call answered from an earlier result has `repeated_call: true` in its `tool_responded` event;
+- `tests/test_fix_defaults.py` is the register of fixes and features.
+Benchmark baselines recorded on other configs shift once (the view sent to the model changed).
 
 ## Validation
 
