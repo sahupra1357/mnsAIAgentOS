@@ -323,6 +323,8 @@ async def scenario_application(
         overrides = merge_tables(scenario.harness, {
             "coding": {"workspace": str(workspace)},
             "artifacts": {"directory": str(root / "artifacts")},
+            # Never the user's own note store (the root config keeps it under ~/.agent-harness).
+            "memory": {"database": str(root / "memory.sqlite3")},
         })
         app = build_application(
             config_path=scenario.config or default_config,
@@ -439,6 +441,9 @@ class _ScenarioModel(ScriptedModelClient):
     async def complete(self, request: ModelRequest) -> ModelResponse:
         if request.metadata.get("purpose") == "guard":
             return ModelResponse(content="safe", finish_reason=FinishReason.STOP)
+        if request.metadata.get("purpose") == "memory":
+            # End-of-turn note extraction ([memory] auto_save): nothing to keep, script untouched.
+            return ModelResponse(content='{"notes": []}', finish_reason=FinishReason.STOP)
         return await super().complete(request)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:

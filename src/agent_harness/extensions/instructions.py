@@ -186,6 +186,8 @@ class SystemContextBuilder:
     skills: Mapping[str, Skill] = field(default_factory=dict)
     subdirectory_filenames: Sequence[str] = ()
     working_directory: Callable[[], Path] | None = None  # default: Path.cwd
+    # Fixed sections added after the instructions and the skills index (Phase 27: memory guidance).
+    sections: Sequence[str] = ()
 
     def __call__(self) -> SystemContext:
         files = list(self.instruction_files)
@@ -205,6 +207,7 @@ class SystemContextBuilder:
         if self.skills:
             parts.append(skills_index(self.skills))
             sources = [*sources, *(str(skill.path) for skill in self.skills.values())]
+        parts.extend(section for section in self.sections if section)
         return SystemContext("\n\n".join(parts), tuple(sources))
 
 

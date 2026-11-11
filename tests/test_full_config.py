@@ -157,6 +157,10 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual((c.summarization.trigger, c.summarization.chunked, c.summarization.style),
                          ("threshold", True, "structured"))
         self.assertTrue(c.orchestrator.resurface_repeated_results)
+        # Phase 27: one note store for every project, scoped, recalled and saved by the harness.
+        self.assertEqual(c.memory.database, "~/.agent-harness/memory.sqlite3")
+        self.assertTrue(all((c.memory.scopes, c.memory.recall, c.memory.auto_save, c.memory.guidance)))
+        self.assertIn("memory_update", c.tool_loading.core)
         self.assertEqual(c.web_search.max_chars_per_result, 800)
         self.assertTrue(c.orchestrator.current_date_note)  # the model is told today's date
         self.assertTrue(c.orchestrator.final_answer_on_last_step)  # the last step answers
@@ -274,7 +278,10 @@ class FullConfigTests(unittest.TestCase):
     def test_plugin_parts_are_loaded(self) -> None:
         async def build() -> tuple[list[str], list[str], list[str], list[str]]:
             with tempfile.TemporaryDirectory() as directory:
-                app = build_application(config_path=FULL, database_path=str(Path(directory, "db.sqlite3")))
+                app = build_application(
+                    config_path=FULL, database_path=str(Path(directory, "db.sqlite3")),
+                    # Never the user's own notes (the root config keeps them under ~/.agent-harness).
+                    config_overrides={"memory": {"database": str(Path(directory, "memory.sqlite3"))}})
                 async with app:
                     (plugin,) = app.plugins
                     self.assertEqual(app.orchestrator._agent_limits.max_parallel, 2)  # config reaches it
@@ -315,7 +322,10 @@ class FullConfigTests(unittest.TestCase):
     def test_application_builds_with_every_tool(self) -> None:
         async def build() -> list[str]:
             with tempfile.TemporaryDirectory() as directory:
-                app = build_application(config_path=FULL, database_path=str(Path(directory, "db.sqlite3")))
+                app = build_application(
+                    config_path=FULL, database_path=str(Path(directory, "db.sqlite3")),
+                    # Never the user's own notes (the root config keeps them under ~/.agent-harness).
+                    config_overrides={"memory": {"database": str(Path(directory, "memory.sqlite3"))}})
                 async with app:
                     return [spec.name for spec in app.tools.specs()]
 
@@ -323,6 +333,8 @@ class FullConfigTests(unittest.TestCase):
 
         with mock.patch.dict("os.environ", HERMETIC):
             names = asyncio.run(build())
+        for tool in ("memory_write", "memory_update", "memory_forget", "memory_list"):  # Phase 27
+            self.assertIn(tool, names)
         for tool in ("read_file", "apply_patch", "run_command", "memory_search", "web_fetch",
                      "web_search", "word_count", "github_repo", "load_skill", "read_artifact",
                      "previous_runs"):

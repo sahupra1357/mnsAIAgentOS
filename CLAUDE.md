@@ -180,6 +180,13 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   omitted. A new code path that reads `view.messages[1]` for the summary is wrong in this layout. The estimate
   scale (`estimate_ratio` in `model_responded`) and overflow caps are passed to `build`; do not wrap an anchored
   view in `fit_to_tokens`. Details: `skills/context-management/SKILL.md`.
+- **Scoped memory (Phase 27).** The root config keeps notes in `~/.agent-harness/memory.sqlite3` (`[memory]
+  scopes`, `recall`, `auto_save`, `guidance`), not in the run database. Anything that builds the root config in a
+  test or benchmark must override `memory.database`, or it opens the user's real notes. The end-of-turn
+  extraction is a model call with `purpose = "memory"`, made after `run_completed`, so `memory_saved` can be the
+  last event of a finished run; scripted models must answer it. Notes that were in per-project run databases are
+  not moved automatically: `agent-harness memory migrate --from sqlite:PATH` copies them (they stay readable as
+  scope `legacy`). Details: `skills/harness-operations/SKILL.md`.
 - `ModelResolver.resolve` is synchronous (no `await`). `Execution.md` was brought up to date
   with the Phase 1–6 flow and now shows it correctly.
 - **Subagent nesting (6c).** Subagents exist only when `[[agents]]` are defined; the

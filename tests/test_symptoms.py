@@ -217,7 +217,6 @@ class RepeatedCallTests(SymptomCase):
 
 
 class NewChatTests(SymptomCase):
-    @unittest.expectedFailure  # fixed in a later phase (see the module docstring)
     def test_a_new_chat_is_given_what_an_earlier_chat_was_told(self) -> None:
         model = SymptomModel(
             [say("Noted."), say("You deploy to falcon-prod.")],

@@ -935,7 +935,10 @@ class TasksSuite:
             root = Path(scratch)
             # The benchmark reports its items itself (--langfuse); live export would duplicate them.
             overrides: dict[str, Any] = {"artifacts": {"directory": str(root / "artifacts")},
-                                         "langfuse": {"enabled": False}}
+                                         "langfuse": {"enabled": False},
+                                         # A task starts without the user's notes and leaves none.
+                                         "memory": {"database": str(root / "memory.sqlite3"),
+                                                    "recall": False, "auto_save": False}}
             if isinstance(workspace, Mapping):
                 files = root / "workspace"
                 for name, text in workspace.items():
