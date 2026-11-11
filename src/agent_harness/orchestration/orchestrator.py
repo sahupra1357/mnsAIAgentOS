@@ -227,6 +227,7 @@ from agent_harness.orchestration.state import (  # noqa: F401
     _waiting_child,
     _wrap_untrusted,
     derive_phase,
+    phase_after,
     state_block,
     validate_image_url,
 )
@@ -4737,8 +4738,18 @@ class AgentOrchestrator:
         expected_version = run.version
         run.version = expected_version + 1
         previous_phase = run.phase
-        # Where the loop stands after this checkpoint, stored with it (Phase 28).
-        run.phase = derive_phase(run, [*event_log, *events])
+        # Where the loop stands after this checkpoint, stored with it: set by the transition
+        # being recorded (Phase 34). A run from before the phase existed is derived once.
+        if previous_phase:
+            run.phase = phase_after(run, events, previous_phase)
+            if self._settings.verify_phase:
+                derived = derive_phase(run, [*event_log, *events])
+                if derived != run.phase:
+                    kinds = [e.type.value for e in events]
+                    raise AssertionError(f"run {run.id}: transition {previous_phase!r} -> {run.phase!r} "
+                                         f"on {kinds}, but the history says {derived!r}")
+        else:
+            run.phase = derive_phase(run, [*event_log, *events])
         try:
             await self._store.save_checkpoint(
                 run,

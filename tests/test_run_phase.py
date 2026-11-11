@@ -129,6 +129,46 @@ class EventTableTests(unittest.TestCase):
         self.assertIs(loop._ANNOTATION_EVENTS, ANNOTATION_EVENTS)
 
 
+class TransitionTableTests(unittest.TestCase):
+    """Phase 34: the phase is set by the transition a checkpoint records."""
+
+    def at(self, kind: EventType, messages: list[Message], previous: str = "model", **payload: object) -> str:
+        from agent_harness.domain import RunEvent, utc_now
+        from agent_harness.orchestration.state import phase_after
+
+        record = RunRecord(id="r", model_profile="p", messages=messages, status=RunStatus.RUNNING)
+        event = RunEvent(run_id="r", type=kind, payload=dict(payload), step=0, created_at=utc_now())
+        return phase_after(record, [event], previous)
+
+    def test_each_row(self) -> None:
+        asking = Message(role=Role.ASSISTANT, content="", tool_calls=(ToolCall("a", "lookup", {}),))
+        answer = Message(role=Role.TOOL, content="x", tool_call_id="a", name="lookup")
+        reply = Message(role=Role.ASSISTANT, content="done")
+        self.assertEqual(self.at(EventType.MODEL_REQUESTED, [TASK]), "model_request")
+        self.assertEqual(self.at(EventType.MODEL_RESPONDED, [TASK], ok=False, retryable=True), "model_request")
+        self.assertEqual(self.at(EventType.MODEL_RESPONDED, [TASK, asking], ok=True), "tools")
+        self.assertEqual(self.at(EventType.MODEL_RESPONDED, [TASK, reply], ok=True), "answer")
+        self.assertEqual(self.at(EventType.TOOL_RESPONDED, [TASK, asking, answer]), "model")
+        two = Message(role=Role.ASSISTANT, content="", tool_calls=(ToolCall("a", "lookup", {}),
+                                                                   ToolCall("b", "lookup", {})))
+        self.assertEqual(self.at(EventType.TOOL_RESPONDED, [TASK, two, answer]), "tools")  # b is still open
+        self.assertEqual(self.at(EventType.USER_MESSAGE_ADDED, [TASK, reply, TASK], previous="done"), "model")
+
+    def test_annotations_do_not_move_the_phase_unless_a_message_followed_the_reply(self) -> None:
+        reply = Message(role=Role.ASSISTANT, content="done")
+        note = Message(role=Role.USER, content="[Plan] Execute step s2 (2/2): write")
+        self.assertEqual(self.at(EventType.USAGE_RECORDED, [TASK, reply], previous="answer"), "answer")
+        self.assertEqual(self.at(EventType.PLAN_STEP_UPDATED, [TASK, reply, note], previous="answer"), "model")
+
+    def test_status_wins(self) -> None:
+        from agent_harness.orchestration.state import phase_after
+
+        for status, phase in ((RunStatus.COMPLETED, "done"), (RunStatus.AWAITING_INPUT, "awaiting_input"),
+                              (RunStatus.QUEUED, "queued")):
+            record = RunRecord(id="r", model_profile="p", messages=[TASK], status=status)
+            self.assertEqual(phase_after(record, [], "tools"), phase)
+
+
 class PhaseTests(unittest.TestCase):
     def test_phase_is_stored_with_every_checkpoint(self) -> None:
         async def scenario() -> None:
