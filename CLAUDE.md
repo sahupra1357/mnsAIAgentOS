@@ -1019,6 +1019,20 @@ code paths: `[orchestrator]` `resurface_repeated_results`, `phase_dispatch`, `cl
   texts (imported back by name); `model_step.py`, `tool_step.py`, `plan_steps.py`, `guard_steps.py` and
   `child_runs.py` hold methods as functions taking `self: AgentOrchestrator`, bound in the class body. Add a method
   to the module of its step and bind it in the class; those modules must not import `orchestrator` at run time.
+- **39 Live-run fixes** (`phase-39-live-fixes`): the first live run on `modal_shared` (2026-11-11) found two
+  waits on servers scaled to zero, both before the model had answered anything:
+  - **Recall:** embedding the question waited for the embedding server's cold start (up to
+    `cold_start_timeout_seconds`, 1200) before the run was created. Embeddings made inside a run now have a
+    deadline (`[memory] embed_timeout_seconds`, 8; `embed(texts, timeout=)` is a hard limit), fall back to keyword
+    search, and are not tried again for 60 seconds. `memory reindex` still waits for the server.
+  - **Guard:** the parallel guard check held the first turn for 381 s. `[guardrails.model] timeout_seconds` (0 in
+    code = the profile's timeouts; 20 in the root config) makes a slow check a guard error, which `on_error`
+    decides, and pauses the guard for 60 seconds. A request with `metadata["timeout"] = "hard"` is not extended by
+    the cold-start timeout.
+  - **Result after the fixes:** 10–14 s per turn; a follow-up question was answered as asked; a new chat recalled
+    the preference saved in the first. Seen and not explained: one step reused only the first 3,840 of 9,240
+    prompt tokens (the next reused 9,280 of 10,186), and a `config_drift` on `tools_sha256` at the follow-up turn
+    (the hash covers the whole registry, which changes when an MCP server syncs; the offered tools were identical).
 - **37 Postgres messages** (`phase-37-postgres-messages`): migration 7 `run_messages`, delta writes, `run_state`,
   `list_events_since`, as in SQLite. The note lifecycle tests run on both backends. Verified on a local
   PostgreSQL 14 (`initdb` in a temporary folder, `psycopg` in a scratch venv): 1,081 tests, none skipped.

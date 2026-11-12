@@ -77,6 +77,7 @@ OPTIONS: dict[tuple[str, str], str] = {
     ("summarization", "style"): "a choice of summary format",
     ("summarization", "max_message_chars"): "tuning value",
     ("memory", "recall"): "on; off for a benchmark that must not see earlier notes",
+    ("memory", "embed_timeout_seconds"): "tuning value: how long a run waits for an embedding",
     ("memory", "recall_limit"): "tuning value",
     ("memory", "recall_max_chars"): "tuning value",
     ("memory", "auto_save"): "on; off for a benchmark that must not write notes",

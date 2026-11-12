@@ -302,16 +302,23 @@ class OpenAICompatibleClient:
 
         return f"{self.api_base_url()}/models"
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embeddings from the OpenAI-compatible ``/embeddings`` endpoint, in input order."""
+    async def embed(self, texts: list[str], *, timeout: float | None = None) -> list[list[float]]:
+        """Embeddings from the OpenAI-compatible ``/embeddings`` endpoint, in input order.
+
+        ``timeout`` (seconds) is a hard limit for this request, cold start included: a caller
+        that can do without the vectors (note recall inside a run) passes a short one.
+        """
 
         if not texts:
             return []
-        timeout = self._profile.timeout_seconds
         cold_start = self._cold_start_timeout()
-        if not self._warm and cold_start is not None:
-            # The first request after scale-to-zero waits for the model to load (as completions do).
-            timeout = max(timeout, cold_start)
+        if timeout is not None:
+            timeout = min(timeout, self._profile.timeout_seconds)
+        else:
+            timeout = self._profile.timeout_seconds
+            if not self._warm and cold_start is not None:
+                # The first request after scale-to-zero waits for the model to load (as completions do).
+                timeout = max(timeout, cold_start)
         response = await self._transport.post_json(
             f"{self.api_base_url()}/embeddings",
             {"model": self._profile.model, "input": list(texts)},
@@ -390,7 +397,10 @@ class OpenAICompatibleClient:
         if request.timeout_seconds is not None:
             timeout = min(timeout, request.timeout_seconds)
         cold_start = self._cold_start_timeout()
-        if not self._warm and cold_start is not None:
+        hard = request.timeout_seconds is not None and request.metadata.get("timeout") == "hard"
+        if not hard and not self._warm and cold_start is not None:
+            # (A caller that can do without the reply, such as a guard check with a deadline,
+            # asks for a hard limit: it does not wait for a server scaled to zero.)
             timeout = max(timeout, cold_start)
         return timeout
 
