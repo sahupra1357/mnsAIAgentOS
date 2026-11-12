@@ -197,8 +197,9 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   results), its tool outputs are shortened in proportion (`_fit_newest_unit`) instead of
   raising `ContextWindowExceededError`; Qwen 3.6 35B-A3B hit this with three `search_files`
   results (35K characters) in a 16K window.
-- **Summarization (Phase 2.3).** It is off unless `[summarization] enabled = true`, and
-  applies only to profiles with `context_window`. The summary is a model call that
+- **Summarization (Phase 2.3; on in code since Phase 41).** `[summarization] enabled = false` turns it off;
+  it applies only to profiles with `context_window`. An `AgentOrchestrator` built directly with a trimming
+  builder and no `summarizer` summarizes too; pass `summarizer=NO_SUMMARIZER` for omission only. The summary is a model call that
   counts against the budget and is persisted on the run (`context_summary`). A test
   model must answer requests with `metadata["purpose"] == "summary"`.
   The summary request starts with the user's request (first and latest user messages,
@@ -220,6 +221,15 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   last event of a finished run; scripted models must answer it. Notes that were in per-project run databases are
   not moved automatically: `agent-harness memory migrate --from sqlite:PATH` copies them (they stay readable as
   scope `legacy`). Details: `skills/harness-operations/SKILL.md`.
+- **Stored text is data (Phase 41).** Recalled notes and a linked run's handoff are **user-role** harness
+  messages (`[Memory]`, `[Earlier run `) before the user's first message, never system messages: the adapters
+  merge leading system messages into the system prompt. The pinned head runs to the first message the user
+  wrote. They are scanned with `check_tool_output` when added and skipped by the input guard
+  (`STORED_DATA_PREFIXES`). A tool result that returns notes or a handoff sets `stored_data` and is wrapped as
+  `<stored-data>` (no taint); only one that came from a run with untrusted output sets `untrusted`. Do not
+  make `memory_search` an untrusted tool: every search would then taint the turn (the 2026-10-25 prompt storm).
+  What a run *stores* is tainted when untrusted output is anywhere in the run (`_holds_untrusted`); approval
+  prompts stay per turn (`_tainted`).
 - **Run phase (Phase 28, 34).** `_checkpoint` stores `RunRecord.phase`, set by `phase_after` (the transition
   table in `orchestration/state.py`), and the loop dispatches on it. Every change to `run.messages` must be checkpointed
   before the loop takes its next boundary, or the stored phase is stale; `verify_phase = true` (tests,
@@ -1046,6 +1056,37 @@ code paths: `[orchestrator]` `resurface_repeated_results`, `phase_dispatch`, `cl
 - **37 Postgres messages** (`phase-37-postgres-messages`): migration 7 `run_messages`, delta writes, `run_state`,
   `list_events_since`, as in SQLite. The note lifecycle tests run on both backends. Verified on a local
   PostgreSQL 14 (`initdb` in a temporary folder, `psycopg` in a scratch venv): 1,081 tests, none skipped.
+
+**Phase 41 – Audit close-out** [durable-agent-orchestration, context-management, harness-operations, guardrails, planning-delegation] — on `phase-41-audit-closeout`
+A second static audit (2026-11-11) of Phases 25–40 found seams that were only half closed. One commit per item:
+1. **Memory trust.** Recalled notes are a user-role `[Memory]` message at run creation (they were a system
+   message); note results are wrapped as `<stored-data>`; a note is tainted when untrusted output is anywhere
+   in the run.
+2. **The phase drives the loop.** `_advance` dispatches to `_advance_tools` / `_advance_answer` /
+   `_advance_model`; the predicate chain is deleted. `annotation_adds_message()` is shared by `phase_after` and
+   the message skeleton (a submitted result used to leave `answer` on any annotation). Scripted eval scenarios
+   run with `verify_phase`.
+3. **Library defaults.** `[summarization] enabled` and `MemorySettings.recall` / `auto_save` are on in code; an
+   orchestrator with a trimming builder and no summarizer summarizes (`NO_SUMMARIZER` opts out; `BenchContext`
+   uses it).
+4. **Context accounting.** Hook context and the status block are reserved in the view (`build(reserve=)`); a
+   first message larger than the window loses its middle in the view instead of failing the run; the summarizer
+   never cuts the previous summary, reports `truncated_chars`, and splits one oversized turn over several requests.
+5. **Memory lifecycle.** `expires_in_days` (service, `memory_write`, CLI), `purge` in all three stores,
+   `memory update` and `memory purge`, `gc` purges notes, preferences take at most half of the recall places.
+6. **Interrupting long work.** A model retry checks tokens, cost and quota and takes a queued steer; a read
+   batch is bounded by the wall clock; `StdlibHttpTransport` closes the socket of a cancelled call.
+7. **Storage.** `InMemoryRunStore.run_state` / `list_events_since`. Archived messages are not pruned on their
+   own: they go with their run in `gc` (pruning them separately would delete audit history of live runs).
+8. **Handoffs and plans.** A linked handoff is a user-role `[Earlier run ` message, scanned like tool output;
+   `RunHandoff.tainted`; `previous_runs` results are stored data. `update_plan` refuses a step whose
+   dependencies are open; delegation checks the run's limits between rounds of children.
+
+Left open, on purpose: `phase_after` still reads the open calls of the newest reply (a fact about one message,
+not history); a steer during a plan made only of delegated steps waits for the next model turn; handoffs and
+notes stay two stores (a run's status and a durable fact are different things), now with one trust model.
+Not changed: a config that asks for embeddings from a profile without an embeddings endpoint is still a
+`ConfigError` at startup. Verified on a local PostgreSQL 14: 1,132 tests, none skipped. Not run against a live model.
 
 ## Validation
 

@@ -36,6 +36,13 @@ events, so resume continues exactly where it stopped.
      <instructions>`, and the main model works with its normal tools.
      - The step ends when the model calls `update_plan(step_id, status, result)`, or
        gives a final text answer, which completes the step with that text as its result.
+     - **Who writes step status:** the orchestrator sequences (in progress, delegated,
+       skipped); the model only reports the outcome of a step it was handed. `update_plan`
+       on a pending step whose dependencies are not completed is refused (Phase 41), as it
+       already was for delegated and finished steps.
+   - **Limits between rounds (Phase 41):** after each round of children the run's own limits
+     are checked before the next round starts; a run out of budget stops with the remaining
+     steps pending (resumable), instead of marking them failed.
 3. **Replan.** When a step fails, the orchestrator injects the failure and asks for
    `revise_plan`.
    - `revise_plan` replaces the steps that are not finished; completed steps are kept.
