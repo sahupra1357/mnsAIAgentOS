@@ -40,7 +40,7 @@ from agent_harness.orchestration.handoff import (
 )
 from agent_harness.server.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
 from agent_harness.orchestration.context import (
-    ORCHESTRATOR_NOTE_PREFIXES,
+    written_by_user,
     ContextPolicy,
     ContextSummarizer,
     FullHistoryContextBuilder,
@@ -315,9 +315,6 @@ class OrchestratorSettings:
     # cancelled from another terminal. Queue workers watch their runs themselves and call
     # run(watch_cancel=False). None: never poll.
     cancel_poll_seconds: float | None = 2.0
-    # Append the plan, the task list and a low budget as one harness-written status message
-    # to each request (never stored, so the cached prefix is untouched).
-    state_block: bool = False
 
     def __post_init__(self) -> None:
         if self.max_tool_calls_per_run is not None and self.max_tool_calls_per_run < 1:
@@ -454,9 +451,7 @@ def _summary_task(messages: Sequence[Message]) -> str | None:
     Orchestrator notes (``[Plan] ...``, ``[Budget] ...``) are user messages too, and are skipped.
     """
 
-    requests = [m.content for m in messages
-                if m.role is Role.USER and m.content.strip()
-                and not m.content.startswith(ORCHESTRATOR_NOTE_PREFIXES)]
+    requests = [m.content for m in messages if written_by_user(m)]
     if not requests:
         return None
     first, latest = requests[0], requests[-1]
@@ -984,8 +979,7 @@ class AgentOrchestrator:
         start = 0
         for index in range(len(run.messages) - 1, -1, -1):
             message = run.messages[index]
-            if (message.role is Role.USER and message.content.strip()
-                    and not message.content.startswith(("[Context from hooks]", *ORCHESTRATOR_NOTE_PREFIXES))):
+            if written_by_user(message):
                 start = index
                 break
         who = RunScope(run_id=run.id, tenant=run.tenant, end_user=run.end_user,
@@ -2109,10 +2103,21 @@ class AgentOrchestrator:
                     request_messages += (
                         Message(role=Role.USER, content="[Context from hooks]\n" + pre_model.context),
                     )
-                if self._settings.state_block and not _continuing_answer(run.messages):
+                # The plan, the task list and a low budget as one status message, rendered
+                # from the run's records for this request and never stored. The stored
+                # [Plan]/[Budget] messages are the turns of the conversation; this is where
+                # the model reads the current state.
+                if not _continuing_answer(run.messages):
                     status = state_block(run, self._clock())
                     if status:
-                        request_messages += (Message(role=Role.USER, content=status),)
+                        block = Message(role=Role.USER, content=status)
+                        last = request_messages[-1] if request_messages else None
+                        if last is not None and last.role is Role.USER and not written_by_user(last):
+                            # Before a harness directive (a plan step, "answer now"), so
+                            # the directive stays the last thing the model reads.
+                            request_messages = (*request_messages[:-1], block, request_messages[-1])
+                        else:
+                            request_messages += (block,)
                 return ModelRequest(
                     messages=request_messages,
                     tools=specs,

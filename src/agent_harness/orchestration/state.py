@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 from agent_harness.orchestration.agents import AGENT_TOOL, TODO_TOOL
-from agent_harness.orchestration.context import ORCHESTRATOR_NOTE_PREFIXES
+from agent_harness.orchestration.context import written_by_user
 from agent_harness.orchestration.planning import PLAN_TOOLS
 from agent_harness.tools.loading import META_TOOLS
 from agent_harness.extensions.hooks import HookResult
@@ -251,9 +251,7 @@ def _tainted(messages: Sequence[Message], accepted_at: int | None = None) -> boo
     tainted until they write again.
     """
 
-    def from_user(message: Message) -> bool:
-        return message.role is Role.USER and not message.content.startswith(
-            ("[Context from hooks]", *ORCHESTRATOR_NOTE_PREFIXES))
+    from_user = written_by_user
 
     if accepted_at is not None and not any(from_user(m) for m in messages[accepted_at:]):
         return False

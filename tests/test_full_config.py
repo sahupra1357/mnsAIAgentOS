@@ -154,7 +154,6 @@ class FullConfigTests(unittest.TestCase):
         self.assertEqual(c.context.default_window, 32768)
         self.assertEqual(c.summarization.style, "structured")
         o = c.orchestrator  # Phase 28 (the loop fixes themselves are not switches: Phase 31)
-        self.assertTrue(o.state_block)
         self.assertEqual(o.cancel_poll_seconds, 2.0)
         # Phase 27: one note store for every project, scoped, recalled and saved by the harness.
         self.assertEqual(c.memory.database, "~/.agent-harness/memory.sqlite3")

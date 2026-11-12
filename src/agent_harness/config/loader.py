@@ -661,7 +661,6 @@ class OrchestratorConfig:
     verify_phase: bool = False          # raise if the stored phase disagrees with the messages (tests)
     max_tool_calls_per_run: int = 0     # 0: no limit
     cancel_poll_seconds: float = 2.0    # inline runs stop in-flight calls when cancelled (0: never poll)
-    state_block: bool = False           # plan, tasks and a low budget as one status message per request
 
     def __post_init__(self) -> None:
         if self.max_tool_calls_per_run < 0 or self.cancel_poll_seconds < 0:
