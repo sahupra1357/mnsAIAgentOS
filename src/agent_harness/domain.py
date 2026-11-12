@@ -388,6 +388,12 @@ class RunRecord:
     # tools, answer, model_request, model, awaiting_input, queued, done). Empty on runs stored
     # before it existed; the loop then derives it from the messages and events, as it always did.
     phase: str = ""
+    # Phase 33: tools that depend on the run's state (exit_plan, create_plan, update_plan,
+    # revise_plan), in the order they were first offered. Once offered a tool stays in the
+    # list, so the tool definitions at the front of every request never change mid-run (a
+    # change there makes the model server re-read the whole conversation). A call that is
+    # not valid in the run's current state is refused when it is made.
+    sticky_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

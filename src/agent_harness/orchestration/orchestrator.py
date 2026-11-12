@@ -56,6 +56,7 @@ from agent_harness.orchestration.planning import (
     PLAN_TOOLS,
     PLANNER_INSTRUCTIONS,
     REVISE_PLAN_SPEC,
+    REVISE_PLAN,
     UPDATE_PLAN,
     UPDATE_PLAN_SPEC,
     PlanningPolicy,
@@ -371,6 +372,15 @@ _MAX_CHECKPOINT_CONFLICTS = 5
 _SUMMARY_RETRY_STEPS = 3
 
 
+_AUTO_CREATE_PLAN = "create_plan.auto"  # the sticky key of create_plan as planning mode "auto" offers it
+_STICKY_SPECS: dict[str, ToolSpec] = {
+    EXIT_PLAN_TOOL: EXIT_PLAN_SPEC,
+    _AUTO_CREATE_PLAN: AUTO_CREATE_PLAN_SPEC,
+    CREATE_PLAN: CREATE_PLAN_SPEC,
+    UPDATE_PLAN: UPDATE_PLAN_SPEC,
+    REVISE_PLAN: REVISE_PLAN_SPEC,
+}
+
 FINAL_STEP_NOTE = (
     "[Budget] This is your last step: tools are no longer available. Answer now with what "
     "you have found so far, and say briefly what you could not check."
@@ -599,8 +609,10 @@ class AgentOrchestrator:
             ToolHandler(frozenset(META_TOOLS), meta,
                         applies=lambda run, call: self._tool_loading.dynamic),
             ToolHandler(frozenset(PLAN_TOOLS), plan,
-                        applies=lambda run, call: run.planning or (
-                            call.name == CREATE_PLAN and self._offers_auto_plan(run))),
+                        # Offered once, offered for the rest of the run: the handler itself
+                        # says "a plan already exists" or "there is no plan yet".
+                        applies=lambda run, call: run.planning or self._offers_auto_plan(run) or any(
+                            name in run.sticky_tools for name in (CREATE_PLAN, _AUTO_CREATE_PLAN))),
             ToolHandler(frozenset({AGENT_TOOL}), subagent),
         ]
 
@@ -2963,6 +2975,13 @@ class AgentOrchestrator:
             await self._reject_invalid_arguments(run, events, call)
             return
         if spec is not None and pending_request is None:
+            refusal = self._state_refusal(run, call, spec)
+            if refusal is not None:
+                result = ToolResult(call_id=call.id, name=call.name, status=ToolResultStatus.POLICY_DENIED,
+                                    output={"error": "not available in this state"}, model_message=refusal)
+                self._append_tool_message(run, result)
+                await self._record_tool_result(run, events, result, attempt=0)
+                return
             if await self._reuse_same_reply_result(run, events, call, specs):
                 return
             if await self._refuse_repeated_call(run, events, call, specs):
@@ -3185,31 +3204,53 @@ class AgentOrchestrator:
             loaded = tuple(by_name[name] for name in run.loaded_tools if name in by_name and name not in core)
         else:
             specs = available
-        if run.mode is PermissionMode.PLAN:
-            specs += (EXIT_PLAN_SPEC,)
         if self._agent_spec is not None and run.depth < self._agent_limits.max_depth:
             specs += (self._agent_spec,)
         if self._task_tracking:
             specs += (TODO_SPEC,)
         if self._ask_user:
             specs += (ASK_USER_SPEC,)
-        if self._offers_auto_plan(run):
-            specs += (AUTO_CREATE_PLAN_SPEC,)
         specs += self._tool_handlers.offered(run)
-        if run.planning:
-            if run.plan is None:
-                # Explore read-only, then plan: nothing can change before the plan exists.
-                specs = tuple(
-                    s for s in specs
-                    if s.risk is ToolRisk.READ_ONLY and s.name not in {AGENT_TOOL, TODO_TOOL}
-                ) + (CREATE_PLAN_SPEC,)
-                loaded = tuple(s for s in loaded if s.risk is ToolRisk.READ_ONLY)
-            else:
-                specs += (UPDATE_PLAN_SPEC, REVISE_PLAN_SPEC)
         if run.output_schema is not None and (specs or loaded):
             # Before loaded tools, so its position never changes (prefix cache).
             specs += (submit_result_spec(run.output_schema),)
+        # Tools that depend on the run's state are only ever added (Phase 33): the list at the
+        # front of the prompt is the same for every request of a run, apart from growing at
+        # its end. What a tool may do in the current state is decided when it is called
+        # (_state_refusal, the permission mode, and each handler's own checks).
+        wanted: list[str] = []
+        if run.mode is PermissionMode.PLAN:
+            wanted.append(EXIT_PLAN_TOOL)
+        if self._offers_auto_plan(run):
+            wanted.append(_AUTO_CREATE_PLAN)
+        if run.planning:
+            wanted.extend((UPDATE_PLAN, REVISE_PLAN) if run.plan is not None else (CREATE_PLAN,))
+        new = tuple(name for name in wanted if name not in run.sticky_tools)
+        if new:
+            run.sticky_tools += new  # stored with the run's next checkpoint
+        taken = {spec.name for spec in specs}
+        for name in run.sticky_tools:
+            sticky = _STICKY_SPECS.get(name)
+            if sticky is not None and sticky.name not in taken:
+                specs += (sticky,)
+                taken.add(sticky.name)
         return specs + loaded
+
+    def _state_refusal(self, run: RunRecord, call: ToolCall, spec: ToolSpec) -> str | None:
+        """Why this offered tool cannot be used in the run's current state; None: it can.
+
+        A planned run explores read-only until its plan exists: nothing may change, and
+        nothing is delegated or tracked, before then. The tools stay in the list (see
+        ``_specs_for``); the call is answered with what to do instead.
+        """
+
+        if call.name == EXIT_PLAN_TOOL and run.mode is not PermissionMode.PLAN:
+            return "exit_plan is only for plan mode, and this run is not in plan mode. Go on with the task."
+        if run.planning and run.plan is None and call.name != CREATE_PLAN and (
+                spec.risk is not ToolRisk.READ_ONLY or call.name in {AGENT_TOOL, TODO_TOOL}):
+            return (f"{call.name} is not available before the plan exists. Explore with read-only "
+                    "tools if you need to, then call create_plan.")
+        return None
 
     def _permission(
         self, spec: ToolSpec, call: ToolCall, mode: PermissionMode, run: RunRecord | None = None

@@ -855,6 +855,7 @@ def _decode_run_data(data: dict[str, Any]) -> RunRecord:
         end_user=data.get("end_user"),
         dispatch=str(data.get("dispatch", "inline")),
         phase=str(data.get("phase", "")),
+        sticky_tools=tuple(data.get("sticky_tools", ())),
         plan=_decode_plan(data.get("plan")),
         context_summary=(
             ContextSummary(

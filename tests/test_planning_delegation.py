@@ -175,17 +175,50 @@ class PlanExecuteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.plan.phase, "done")
         self.assertEqual([s.status for s in stored.plan.steps], [PlanStepStatus.COMPLETED] * 2)
         self.assertEqual(stored.plan.steps[1].result, "draft written")
-        # Before the plan exists only read-only tools and create_plan are offered.
+        # The list only grows (Phase 33). Before the plan exists write_file is listed but a
+        # call to it is refused (PlanExecuteTests.test_nothing_changes_before_the_plan_exists).
         before = [t.name for t in model.requests[0].tools]
-        self.assertIn("create_plan", before)
-        self.assertNotIn("write_file", before)
+        self.assertTrue({"create_plan", "write_file"} <= set(before))
         after = [t.name for t in model.requests[1].tools]
-        self.assertTrue({"write_file", "update_plan", "revise_plan"} <= set(after))
+        self.assertEqual(after[:len(before)], before)
+        self.assertEqual(after[len(before):], ["update_plan", "revise_plan"])
         self.assertTrue(any(m.role is Role.SYSTEM and m.content == PLANNER_INSTRUCTIONS
                             for m in finished.messages))
         kinds = [e.type for e in events]
         self.assertIn(EventType.PLAN_CREATED, kinds)
         self.assertEqual(len(model.requests), 4)  # plan, s1, s2, final
+
+    async def test_nothing_changes_before_the_plan_exists(self) -> None:
+        # Phase 33: write_file is in the list from the start, and refused until the plan exists.
+        written: list[Mapping[str, Any]] = []
+        replies = iter([
+            call("write_file", {"path": "a"}, "w1"),
+            call("create_plan", {"goal": "g", "steps": [{"id": "s1", "title": "Write"}]}, "p1"),
+            call("write_file", {"path": "a"}, "w2"),
+            call("update_plan", {"step_id": "s1", "status": "completed", "result": "ok"}, "u1"),
+            final("done"),
+            final("answer"),
+        ])
+
+        async def handler(request: ModelRequest) -> ModelResponse:
+            return next(replies)
+
+        async def write_file(arguments: Mapping[str, Any]) -> dict[str, Any]:
+            written.append(arguments)
+            return {}
+
+        runtime = create_default_runtime()
+        runtime.register(ToolSpec(name="write_file", description="Write.", input_schema={"type": "object"},
+                                  risk=ToolRisk.SIDE_EFFECT), write_file)
+        model = RoutedModel(handler)
+        orchestrator = AgentOrchestrator(models=model, tools=runtime, store=InMemoryRunStore())
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "task")],
+                                            planning=True)
+        finished = await orchestrator.run(run.id)
+        refused = next(m for m in finished.messages if m.role is Role.TOOL and m.tool_call_id == "w1")
+        self.assertIn("not available before the plan exists", refused.content)
+        self.assertEqual(len(written), 1)  # only the call made after the plan was accepted
+        self.assertEqual(finished.sticky_tools, ("create_plan", "update_plan", "revise_plan"))
 
     async def test_replanning_and_replan_limit(self) -> None:
         async def handler(request: ModelRequest) -> ModelResponse:
@@ -522,9 +555,10 @@ class AutoPlanningTests(unittest.IsolatedAsyncioTestCase):
         created = [e for e in events if e.type is EventType.PLAN_CREATED]
         self.assertEqual(len(created), 1)
         self.assertTrue(created[0].payload.get("auto"))
-        after = self.offered(self.model.requests[1])
-        self.assertNotIn("create_plan", after)
-        self.assertIn("update_plan", after)
+        # Tools are only ever added (Phase 33): create_plan stays, the plan tools follow it.
+        before, after = self.offered(self.model.requests[0]), self.offered(self.model.requests[1])
+        self.assertEqual(after[:len(before)], before)
+        self.assertEqual(after[len(before):], ["update_plan", "revise_plan"])
 
     async def test_rejected_plan_does_not_switch_the_run(self) -> None:
         replies = iter([call("create_plan", {"goal": "g", "steps": [
