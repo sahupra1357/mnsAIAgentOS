@@ -253,8 +253,14 @@ async def _plan_next(self: AgentOrchestrator, run: RunRecord, events: list[RunEv
     return True
 
 
+_AUTO_PLAN_REMINDERS_PER_RUN = 2
+"""A run that was reminded this often without making a plan is not reminded again: each
+reminder is a stored message, and a model that ignores two ignores the eleventh too."""
+
+
 async def _auto_plan_reminder(self: AgentOrchestrator, run: RunRecord, events: list[RunEvent]) -> None:
-    """Planning mode "auto": remind the model once per turn that it can plan and delegate.
+    """Planning mode "auto": remind the model once per turn that it can plan and delegate,
+    at most ``_AUTO_PLAN_REMINDERS_PER_RUN`` times in a run.
 
     Fires when the current turn (since the last user message) has made
     ``auto_reminder_after_steps`` tool-calling steps, or summarized its context,
@@ -264,6 +270,9 @@ async def _auto_plan_reminder(self: AgentOrchestrator, run: RunRecord, events: l
     after = self._planning.auto_reminder_after_steps
     if not after or not self._offers_auto_plan(run):
         return
+    if sum(1 for m in run.messages if m.role is Role.USER and m.content == AUTO_PLAN_REMINDER) \
+            >= _AUTO_PLAN_REMINDERS_PER_RUN:
+        return  # reminded and never planned: the model works this conversation without a plan
     tool_steps = 0
     for message in reversed(run.messages):
         if message.role is Role.USER:

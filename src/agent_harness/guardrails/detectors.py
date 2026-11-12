@@ -154,12 +154,39 @@ def _printable(raw: bytes) -> str | None:
 _REPEAT = re.compile(r"(.{2,40}?)\1{30,}", re.DOTALL)
 
 
-def detect_flooding(text: str, max_chars: int) -> list[Finding]:
-    findings = []
-    if max_chars and len(text) > max_chars:
-        findings.append(Finding("flooding", "too_long", max_chars, len(text)))
+def repeated_runs(text: str) -> list[tuple[int, int, str, int]]:
+    """Runs of one short fragment repeated more than 30 times: (start, end, fragment, times).
+
+    Only a fragment with a letter or digit counts. Logs are full of long runs of spaces,
+    rule lines, table borders and progress bars; a pasted log is not a flood.
+    """
+
+    runs = []
     for match in _REPEAT.finditer(text):
-        findings.append(Finding("flooding", "repetition", match.start(), match.end()))
+        fragment = match.group(1)
+        if any(char.isalnum() for char in fragment):
+            runs.append((match.start(), match.end(), fragment, (match.end() - match.start()) // len(fragment)))
+    return runs
+
+
+def detect_flooding(text: str, max_chars: int) -> list[Finding]:
+    """Repeated text, and a message longer than ``max_chars`` once repeats are collapsed.
+
+    The ``too_long`` finding spans the middle of the message: redacting it keeps the
+    start and the end, which is where a log's command and its error are.
+    """
+
+    runs = repeated_runs(text)
+    findings = [Finding("flooding", "repetition", start, end) for start, end, _, _ in runs]
+    collapsed = len(text) - sum(end - start - len(fragment) for start, end, fragment, _ in runs)
+    if max_chars and collapsed > max_chars:
+        head = max_chars * 2 // 3
+        tail = len(text) - (max_chars - head)
+        for start, end, _, _ in runs:
+            if start < head < end:
+                head = end  # a repeat that crosses the cut is collapsed, not cut in two
+        if head < tail:
+            findings.append(Finding("flooding", "too_long", head, tail))
     return findings
 
 

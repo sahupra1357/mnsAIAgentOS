@@ -203,6 +203,11 @@ class BudgetedContextBuilder:
     def policy(self) -> ContextPolicy:
         return self._policy
 
+    def limits_for(self, model_profile: str) -> ContextLimits | None:
+        """The profile's window and output reserve (None: it has no window)."""
+
+        return self._lookup(model_profile)
+
     def summary_input_chars(self, model_profile: str) -> int | None:
         """Transcript characters a summary request for this profile may hold (None: no window)."""
 
@@ -596,7 +601,7 @@ ORCHESTRATOR_NOTE_PREFIXES = ("[Plan]", "[Budget]", "[Memory]")
 # no role for them: a directive that starts a turn (a plan step, "answer now") has to be a
 # user message, or the next request would hold two assistant messages in a row.
 HARNESS_PREFIXES = (*ORCHESTRATOR_NOTE_PREFIXES, "[Context from hooks]", "[Working state", "[State -",
-                    "[Earlier run ")
+                    "[Earlier run ", "[Guard]")
 # Of those, the ones that carry stored text into a conversation (recalled notes, an earlier
 # run's handoff). They are data: scanned like tool output, never checked as the user's input.
 STORED_DATA_PREFIXES = ("[Memory]", "[Earlier run ")
@@ -720,7 +725,9 @@ SUMMARY_INSTRUCTIONS = (
     "tools (file paths, identifiers, numbers, errors), work completed, and open "
     "questions or next steps. Merge the previous summary, if given, with the new "
     "messages into one summary. Do not invent anything, do not address the user, and "
-    "do not call tools. Reply with the summary text only."
+    "do not call tools. The user's latest message stays in the context beside your "
+    "summary: do not quote it and do not say what it lacks or what has not been "
+    "provided yet. Reply with the summary text only."
 )
 
 
@@ -728,7 +735,7 @@ STRUCTURED_SUMMARY_INSTRUCTIONS = (
     "You compress the earlier part of an agent's conversation so the agent can keep "
     "working with a smaller context. Reply with these sections, in this order, and "
     "nothing else. Write 'none' under a section that has nothing.\n"
-    "## Goal\nWhat the user wants, including the latest request.\n"
+    "## Goal\nWhat the user wants overall.\n"
     "## Constraints\nRules, preferences and limits the user or the instructions set.\n"
     "## Decisions\nChoices made so far and why.\n"
     "## Files and commands\nPaths read or changed and commands run, with what each showed.\n"
@@ -737,8 +744,19 @@ STRUCTURED_SUMMARY_INSTRUCTIONS = (
     "## Next\nWhat remains, in order, and any open question.\n"
     "Merge the previous summary, if given, with the new messages into one summary. Copy "
     "identifiers, paths, numbers and error text exactly. Do not invent anything, do not "
-    "address the user, and do not call tools."
+    "address the user, and do not call tools. The user's latest message stays in the "
+    "context beside your summary: do not quote it and do not say what it lacks or what "
+    "has not been provided yet."
 )
+
+TIGHTEN_INSTRUCTIONS = (
+    "You shorten a summary of an agent's conversation. Keep its sections and their order, "
+    "and keep exact identifiers, paths, numbers and error text. Drop repetition and detail "
+    "that later work no longer needs. Do not add anything. Reply with the shorter summary only."
+)
+
+SUMMARY_CHARS_PER_TOKEN = 4  # how a summary's size limit in tokens is counted in characters
+SUMMARY_SHARE_OF_RANGE = 0.15  # a summary may be this fraction of the text it replaces
 
 SUMMARY_STYLES = {"prose": SUMMARY_INSTRUCTIONS, "structured": STRUCTURED_SUMMARY_INSTRUCTIONS}
 
@@ -763,6 +781,12 @@ class ContextSummarizer:
     The transcript is bounded by ``input_chars(profile)`` characters (or
     ``max_input_chars`` when no lookup is given): each message is capped, and
     if the whole transcript is still too long its middle is dropped.
+
+    Two sizes, kept apart. ``summary_tokens`` is how long the summary text may be: at
+    least ``max_output_tokens``, more for a long range or a long previous summary, at most
+    ``max_share`` of the profile's input budget (known through ``limits``). The request's
+    output room is for the summary *and* the model's thinking, which the server counts
+    together; ``output_ceiling`` is how far that room may grow when a reply is cut off.
     """
 
     def __init__(
@@ -775,9 +799,13 @@ class ContextSummarizer:
         input_chars: Callable[[str], int | None] | None = None,
         instructions: str = SUMMARY_INSTRUCTIONS,
         parameters: Mapping[str, Any] | None = None,
+        limits: Callable[[str], ContextLimits | None] | None = None,
+        max_share: float = 0.06,
     ) -> None:
         if max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be greater than zero")
+        if not 0 < max_share <= 0.5:
+            raise ValueError("max_share must be greater than 0 and at most 0.5")
         if max_input_chars < 1_000:
             raise ValueError("max_input_chars must be at least 1000")
         if max_message_chars < 200:
@@ -789,12 +817,60 @@ class ContextSummarizer:
         self._max_message_chars = max_message_chars
         self._input_chars = input_chars
         self._instructions = instructions
+        self._limits = limits
+        self._max_share = max_share
 
     def input_limit(self, profile: str) -> int:
         derived = self._input_chars(profile) if self._input_chars is not None else None
         if derived is None:
             return self._max_input_chars
         return max(1_000, min(self._max_input_chars, derived))
+
+    def summary_ceiling(self, profile: str) -> int:
+        """The most tokens a summary for this profile may ever be.
+
+        ``max_share`` of the input budget, and never more than a third of one summary
+        request (the previous summary is sent whole with the next one). Without a known
+        window it is ``max_output_tokens``.
+        """
+
+        found = self._limits(profile) if self._limits is not None else None
+        if found is None:
+            return self.max_output_tokens
+        budget = found.context_window - found.output_reserve_tokens
+        share = math.floor(budget * self._max_share)
+        third = self.input_limit(profile) // (3 * SUMMARY_CHARS_PER_TOKEN)
+        return max(self.max_output_tokens, min(share, third))
+
+    def summary_tokens(self, previous: str | None, messages: Sequence[Message], *, profile: str) -> int:
+        """How long the summary of ``previous`` plus ``messages`` may be, in tokens."""
+
+        replaced = sum(len(self._render(message)) + 2 for message in messages)
+        wanted = (len(previous or "") + replaced * SUMMARY_SHARE_OF_RANGE) / SUMMARY_CHARS_PER_TOKEN
+        return min(self.summary_ceiling(profile), max(self.max_output_tokens, math.ceil(wanted)))
+
+    def output_ceiling(self, profile: str) -> int | None:
+        """The most output one summary request may ask for (None: not known for the profile)."""
+
+        found = self._limits(profile) if self._limits is not None else None
+        return found.output_reserve_tokens if found is not None else None
+
+    def tighten_request(
+        self, summary: str, limit_chars: int, *, metadata: Mapping[str, str] | None = None
+    ) -> ModelRequest:
+        """Ask for a summary that came back over its size limit to be rewritten shorter."""
+
+        return ModelRequest(
+            messages=(
+                Message(role=Role.SYSTEM, content=TIGHTEN_INSTRUCTIONS),
+                Message(role=Role.USER, content=(
+                    f"Rewrite this summary in at most {limit_chars} characters "
+                    f"(it has {len(summary)}):\n\n{summary}")),
+            ),
+            max_output_tokens=math.ceil(limit_chars / SUMMARY_CHARS_PER_TOKEN),
+            metadata=dict(metadata or {}),
+            extra_body=dict(self.parameters) or None,
+        )
 
     def chunks(
         self, messages: Sequence[Message], start: int, end: int, *, profile: str
@@ -832,15 +908,20 @@ class ContextSummarizer:
         it the summarizer cannot tell what matters and reports that there is no goal."""
 
         text, _ = self._compose(previous, messages, profile, task)
+        allowed = self.summary_tokens(previous, messages, profile=profile)
+        text += (f"\n\nLength: at most {allowed * SUMMARY_CHARS_PER_TOKEN} characters "
+                 "for the whole summary.")
         return ModelRequest(
             messages=(
                 Message(role=Role.SYSTEM, content=self._instructions),
                 Message(role=Role.USER, content=text),
             ),
-            max_output_tokens=self.max_output_tokens,
+            # The size of the summary. The caller sends the request through
+            # ``complete_whole``, which adds room when the model's thinking used it up.
+            max_output_tokens=allowed,
             metadata=dict(metadata or {}),
-            # e.g. chat_template_kwargs = {enable_thinking = false}: a thinking model would
-            # otherwise spend the output allowance thinking and return an empty summary.
+            # e.g. chat_template_kwargs = {enable_thinking = false}, for the servers that
+            # honour it; one that does not is handled by the added room.
             extra_body=dict(self.parameters) or None,
         )
 
@@ -898,7 +979,7 @@ class ContextSummarizer:
         previous summary and the labels."""
 
         return max(1_000, self.input_limit(profile) - self._max_message_chars
-                   - self.max_output_tokens * 4 - 200)
+                   - self.summary_ceiling(profile) * SUMMARY_CHARS_PER_TOKEN - 200)
 
     def _render(self, message: Message) -> str:
         label = message.role.value.upper()

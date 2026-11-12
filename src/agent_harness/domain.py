@@ -415,6 +415,7 @@ class ApprovalRequest:
     arguments: Mapping[str, Any]
     requested_at: datetime
     kind: str = "tool"  # "tool" or "plan" (an exit_plan request)
+    reason: str | None = None  # why the harness asks (a permission rule, taint mode)
 
 
 class PlanStepStatus(StrEnum):

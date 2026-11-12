@@ -33,6 +33,7 @@ from agent_harness.orchestration.handoff import (
     linked_block,
 )
 from agent_harness.server.access import Grant, Quota, decide_admission, quota_for, usage_over_limit
+from agent_harness.orchestration.side_call import OutputRoom
 from agent_harness.orchestration.context import (
     written_by_user,
     ContextPolicy,
@@ -227,6 +228,8 @@ class AgentOrchestrator:
     _compaction_range = _model_step._compaction_range
     _summarize = _model_step._summarize
     _summarize_range = _model_step._summarize_range
+    _summary_text = _model_step._summary_text
+    _summary_within_limit = _model_step._summary_within_limit
     _record_summary = _model_step._record_summary
     _pre_model_hook = _model_step._pre_model_hook
     _handle_model_error = _model_step._handle_model_error
@@ -401,8 +404,12 @@ class AgentOrchestrator:
         if isinstance(summarizer, _NoSummarizer):
             summarizer = None
         elif summarizer is None and getattr(self._context, "native_caps", False):
-            summarizer = ContextSummarizer(input_chars=getattr(self._context, "summary_input_chars", None))
+            summarizer = ContextSummarizer(
+                input_chars=getattr(self._context, "summary_input_chars", None),
+                limits=getattr(self._context, "limits_for", None))
         self._summarizer: ContextSummarizer | None = summarizer
+        # The output room the harness's own calls (summaries) needed on each profile.
+        self._output_room = OutputRoom()
         # When and what to summarize (only used with a summarizer); see orchestration/compaction.py.
         # The default summarizes before anything is omitted (DefaultCompactionPolicy, which
         # summarized only what a view had already dropped, is no longer the default).
@@ -847,6 +854,11 @@ class AgentOrchestrator:
             return
         if self._budget_reason(run) is not None:
             return  # the turn used its token or cost budget: no further model call is made for it
+        for event in reversed(events):
+            if event.type is EventType.GUARDRAIL_REFUSED:
+                return  # the guardrails refused this turn: there is nothing of it to remember
+            if event.type in {EventType.USER_MESSAGE_ADDED, EventType.RUN_CREATED}:
+                break
         start = 0
         for index in range(len(run.messages) - 1, -1, -1):
             message = run.messages[index]
@@ -856,19 +868,30 @@ class AgentOrchestrator:
         who = RunScope(run_id=run.id, tenant=run.tenant, end_user=run.end_user,
                        tainted=_holds_untrusted(run.messages))
         try:
-            notes, usage = await memory.save_from_turn(
+            found = await memory.save_from_turn(
                 self._models, run.messages[start:], profile=run.model_profile, who=who)
         except Exception:  # noqa: BLE001 - saving notes is a convenience
             _LOG.warning("could not save notes from run %s", run.id, exc_info=True)
             return
-        if not notes and usage.total_tokens is None:
+        notes = found.notes
+        if not notes and not any(usage.total_tokens is not None for usage in found.usages):
             return
-        self._charge(run, usage)
+        for usage in found.usages:
+            self._charge(run, usage)
+        payload: dict[str, Any] = {
+            "ids": [note.item.id for note in notes], "scopes": [note.scope for note in notes],
+            "count": len(notes),
+            "input_tokens": _model_step._total([u.input_tokens for u in found.usages]),
+            "output_tokens": _model_step._total([u.output_tokens for u in found.usages]),
+            "cost_usd": _model_step._total([u.cost_usd for u in found.usages]),
+        }
+        if len(found.usages) > 1:
+            payload["requests"] = len(found.usages)
+        if found.cut_off:
+            payload["cut_off"] = True  # no notes because the reply was never whole, not because none were worth keeping
         event = RunEvent(
             run_id=run.id, type=EventType.MEMORY_SAVED, step=run.step_count, created_at=self._clock(),
-            payload={"ids": [note.item.id for note in notes], "scopes": [note.scope for note in notes],
-                     "count": len(notes), "input_tokens": usage.input_tokens,
-                     "output_tokens": usage.output_tokens, "cost_usd": usage.cost_usd})
+            payload=payload)
         expected = run.version
         try:
             # Not _checkpoint: that would run the terminal work (and this) again.
@@ -1321,6 +1344,7 @@ class AgentOrchestrator:
             arguments=arguments,
             requested_at=pending.created_at,
             kind=str(pending.payload.get("kind", "tool")),
+            reason=(str(pending.payload["reason"]) if pending.payload.get("reason") else None),
         )
 
     async def expire_pending_input(self, *, now: datetime | None = None, limit: int = 200) -> list[str]:

@@ -11,11 +11,17 @@ import asyncio
 import contextlib
 import math
 import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import uuid4
-from agent_harness.orchestration.context import written_by_user, estimate_tokens, fit_to_tokens
+from agent_harness.orchestration.context import (
+    SUMMARY_CHARS_PER_TOKEN,
+    estimate_tokens,
+    fit_to_tokens,
+    written_by_user,
+)
+from agent_harness.orchestration.side_call import complete_whole
 from agent_harness.extensions.hooks import HookEvent, HookInput, HookResult
 from agent_harness.orchestration.versioning import tools_sha256
 from agent_harness.orchestration.structured_output import SUBMIT_RESULT_TOOL
@@ -427,8 +433,9 @@ async def _summarize(
     The summary is a model call: its usage counts against the run budget,
     and the result is stored on the run and in a ``context_summarized``
     event, so a resumed run reuses it instead of regenerating it. Failures
-    never fail the run: the view falls back to plain omission, and the same
-    range is not retried until the trim point moves.
+    never fail the run: the view falls back to plain omission. A range that failed is
+    asked for again only after a wait that doubles with each failure in a row, so a
+    summary that cannot be written does not cost a model call every few steps.
     """
 
     assert self._summarizer is not None
@@ -436,15 +443,21 @@ async def _summarize(
     if start is None or target is None or target <= start:
         return False
     early = not isinstance(self._compaction, DefaultCompactionPolicy)
+    failures, last_failure = 0, None
     for event in reversed(events):
         if event.type is EventType.CONTEXT_SUMMARIZED:
-            if event.payload.get("ok") is False and (
-                    event.payload.get("covers") == target
-                    # A policy that compacts early has a new target at every step: after
-                    # a failure it waits a few steps instead of calling the model each time.
-                    or (early and run.step_count - event.step < _SUMMARY_RETRY_STEPS)):
-                return False
-            break
+            if event.payload.get("ok") is not False:
+                break
+            failures += 1
+            last_failure = last_failure or event
+    if last_failure is not None:
+        if last_failure.payload.get("covers") == target:
+            return False
+        # A policy that compacts early has a new target at every step: after a failure it
+        # waits instead of calling the model each time (3 steps, then 6, 12, ...).
+        wait = _SUMMARY_RETRY_STEPS * 2 ** min(failures - 1, 6)
+        if early and run.step_count - last_failure.step < wait:
+            return False
     # A range too long for one request is summarized in several, each continuing the
     # last (a summarizer without chunks(), e.g. a custom one, gets one request).
     if hasattr(self._summarizer, "chunks"):
@@ -494,45 +507,142 @@ async def _summarize_range(
     pieces = split(run.messages[start:target], profile=profile) if split is not None else [
         run.messages[start:target]]
     content = previous.content if previous is not None else None
-    used: list[Any] = []  # each request's usage (one, unless the range was split)
-    truncated = 0
-    measure = getattr(self._summarizer, "truncated_chars", None)
+    work = _SummaryWork()
     try:
         for piece in pieces:
-            task = _summary_task(run.messages)
-            if measure is not None:
-                truncated += measure(content, piece, profile=profile, task=task)
-            request = self._summarizer.request(
-                content, piece, profile=profile, task=task,
-                metadata={"run_id": run.id, "step": str(run.step_count), "purpose": "summary"},
-            )
-            response = await self._models.resolve(profile).complete(request)
-            self._charge(run, response.usage)
-            used.append(response.usage)
-            content = response.content.strip()
-            if not content:
-                raise ValueError("the model returned an empty summary")
+            content = await self._summary_text(run, content, piece, profile, work)
+        assert content is not None
+        content = await self._summary_within_limit(run, content, previous, run.messages[start:target],
+                                                   profile, work)
     except Exception as exc:
-        await self._record_summary(run, events, {**payload, "ok": False, "error": _safe_error(exc)})
+        failed = {**payload, "ok": False, "error": _safe_error(exc), **work.usage_payload()}
+        await self._record_summary(run, events, failed)
         return False
-    assert content is not None
+    used, truncated = work.used, work.truncated
     run.context_summary = ContextSummary(covers=target, content=content)
     done: dict[str, Any] = {
         **payload,
         "ok": True,
         "content": content,
-        "input_tokens": _total([u.input_tokens for u in used]),
-        "output_tokens": _total([u.output_tokens for u in used]),
-        "cost_usd": _total([u.cost_usd for u in used]),
+        **work.usage_payload(),
     }
-    if len(pieces) > 1:
-        done["requests"] = len(pieces)
+    if len(used) > 1:
+        done["requests"] = len(used)
+    if work.room:
+        # The output room the last request needed (more than the summary's own size when
+        # the model's thinking is counted against it).
+        done["output_room_tokens"] = work.room
+    if work.shortened:
+        done["shortened"] = True
     if truncated:
         # Characters of the transcript the summarizer never saw (it says so in the text
         # it was given); the tool-call ledger still lists every call of the range.
         done["truncated_chars"] = truncated
     await self._record_summary(run, events, done)
     return True
+
+
+@dataclass(slots=True)
+class _SummaryWork:
+    """What the requests of one summary cost and left out."""
+
+    used: list[Any] = field(default_factory=list)  # each request's usage
+    truncated: int = 0  # transcript characters the summarizer never saw
+    room: int = 0  # output room of the last request, when it had to grow
+    shortened: bool = False  # the kept text was cut to its size limit
+
+    def usage_payload(self) -> dict[str, Any]:
+        if not self.used:
+            return {}
+        return {
+            "input_tokens": _total([u.input_tokens for u in self.used]),
+            "output_tokens": _total([u.output_tokens for u in self.used]),
+            "cost_usd": _total([u.cost_usd for u in self.used]),
+        }
+
+
+async def _summary_text(
+    self: AgentOrchestrator, run: RunRecord, previous: str | None, messages: Sequence[Message],
+    profile: str, work: _SummaryWork, depth: int = 0,
+) -> str:
+    """The summary of ``previous`` plus ``messages``: whole, or an exception.
+
+    A reply that ends at the output limit is not a summary. It is asked for again with
+    more room (``complete_whole``); if it is still cut off, the messages are summarized in
+    two halves, the second continuing the first.
+    """
+
+    assert self._summarizer is not None
+    task = _summary_task(run.messages)
+    measure = getattr(self._summarizer, "truncated_chars", None)
+    request = self._summarizer.request(
+        previous, messages, profile=profile, task=task,
+        metadata={"run_id": run.id, "step": str(run.step_count), "purpose": "summary"},
+    )
+    ceiling = getattr(self._summarizer, "output_ceiling", None)
+    reply = await complete_whole(
+        self._models.resolve(profile), request,
+        answer_tokens=request.max_output_tokens or 1024,
+        ceiling=ceiling(profile) if ceiling is not None else None,
+        room=self._output_room, key=(profile, "summary"),
+    )
+    for usage in reply.usages:
+        self._charge(run, usage)
+        work.used.append(usage)
+    if reply.attempts > 1:
+        work.room = reply.room
+    content = reply.response.content.strip()
+    if content and not reply.cut_off:
+        if measure is not None:
+            work.truncated += measure(previous, messages, profile=profile, task=task)
+        return content
+    if len(messages) > 1 and depth < 2:
+        half = len(messages) // 2
+        first = await self._summary_text(run, previous, messages[:half], profile, work, depth + 1)
+        return await self._summary_text(run, first, messages[half:], profile, work, depth + 1)
+    if reply.cut_off:
+        raise ValueError(f"the summary was cut off at {reply.room} output tokens")
+    raise ValueError("the model returned an empty summary")
+
+
+async def _summary_within_limit(
+    self: AgentOrchestrator, run: RunRecord, content: str, previous: ContextSummary | None,
+    messages: Sequence[Message], profile: str, work: _SummaryWork,
+) -> str:
+    """``content``, rewritten shorter once if it is over the summary's size limit.
+
+    The limit is on the text that is kept, separate from the request's output room. A
+    rewrite that fails or is still too long is cut at a line end, so the summary cannot
+    grow without bound.
+    """
+
+    assert self._summarizer is not None
+    size = getattr(self._summarizer, "summary_tokens", None)
+    tighten = getattr(self._summarizer, "tighten_request", None)
+    if size is None or tighten is None:
+        return content
+    limit = size(previous.content if previous is not None else None, messages,
+                 profile=profile) * SUMMARY_CHARS_PER_TOKEN
+    if len(content) <= limit * 1.25:
+        return content
+    request = tighten(content, limit, metadata={"run_id": run.id, "step": str(run.step_count),
+                                                "purpose": "summary"})
+    ceiling = getattr(self._summarizer, "output_ceiling", None)
+    reply = await complete_whole(
+        self._models.resolve(profile), request,
+        answer_tokens=request.max_output_tokens or 1024,
+        ceiling=ceiling(profile) if ceiling is not None else None,
+        room=self._output_room, key=(profile, "summary"),
+    )
+    for usage in reply.usages:
+        self._charge(run, usage)
+        work.used.append(usage)
+    shorter = reply.response.content.strip()
+    if shorter and not reply.cut_off and len(shorter) <= limit * 1.25:
+        return shorter
+    work.shortened = True
+    cut = content[:limit]
+    return cut[: cut.rfind("\n")] if "\n" in cut[limit // 2:] else cut
 
 
 def _total(values: Sequence[Any]) -> Any:

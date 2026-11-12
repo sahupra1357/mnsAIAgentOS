@@ -23,6 +23,14 @@ Read `docs/GUARDRAILS.md` first: it is the user-facing contract.
 
 ## Invariants
 - Off by default: with `guardrails=None` nothing changes (no canary, no streaming change).
+- **A refused input message is withheld (Phase 42).** `_refuse` replaces what the user sent in the
+  refused turn with `WITHHELD_NOTE` (a `[Guard]` harness message) and moves the original to
+  `archived_messages`; before, the next message that passed carried the refused text to the model.
+  `explain_refusal` (off in code, on in the root config) names the detector in the reply.
+- **Flooding is `redact` by default (Phase 42).** Only a fragment with a letter or digit counts as a
+  repeat; a repeat is collapsed to one copy and a count, and a message over `max_chars` loses its
+  middle. Eleven pasted logs were refused in one live chat for their rule lines and padding.
+- **The guard pause doubles** (60 s, 120 s, … 15 min) while the guard keeps missing its deadline.
 - A refusal is a `GUARDRAIL_REFUSED` *state* event plus an assistant message; the phase becomes `answer`
   (`phase_after`), and `_advance_answer` completes the run without output-schema checks or planning.
 - Stored text the harness adds as a message (recalled `[Memory]` notes, an `[Earlier run` handoff) is

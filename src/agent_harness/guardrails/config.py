@@ -3,14 +3,15 @@
     [guardrails]
     enabled = true
     refusal_message = "I can't help with that request."
+    explain_refusal = false       # add which check refused ("Blocked by the input guard: injection.")
 
     [guardrails.input]            # user text: prompts, follow-ups, steers, ask_user answers
     injection = "block"           # instruction overrides, role-play jailbreaks, role tags
     prompt_extraction = "block"   # "reveal your system prompt"
     hidden_characters = "redact"  # zero-width, bidi, Unicode tag characters (removed)
     encoded_payloads = "block"    # base64/hex that decodes to an injection
-    flooding = "block"            # longer than max_chars, or long repetitions
-    max_chars = 20000
+    flooding = "redact"           # repeated text is collapsed to one copy and a count; a message
+    max_chars = 20000             # longer than max_chars loses its middle ("block" refuses both)
     pii = "allow"                 # email, phone, card (Luhn), SSN, IBAN
     denylist = []                 # regexes; action set by denylist_action
     denylist_action = "block"
@@ -58,7 +59,9 @@ class InputGuardConfig:
     prompt_extraction: str = "block"
     hidden_characters: str = "redact"
     encoded_payloads: str = "block"
-    flooding: str = "block"
+    # "redact": a pasted log is not an attack. Its repeats are collapsed, and a message over
+    # max_chars loses its middle. "block" is for a deployment that refuses long input.
+    flooding: str = "redact"
     max_chars: int = 20_000
     pii: str = "allow"
     denylist: tuple[str, ...] = ()
@@ -94,7 +97,8 @@ class ModelGuardConfig:
     # Seconds one guard check may take before it counts as a guard failure (``on_error``
     # decides). 0: the guard profile's own timeouts, which wait for a server scaled to zero;
     # with ``action = "flag"`` that can hold a turn for minutes for a verdict that cannot
-    # stop it. After a failed check the guard is not asked again for a minute.
+    # stop it. After a failed check the guard is not asked again for a minute, and
+    # for twice as long after each further failure in a row (at most 15 minutes).
     timeout_seconds: int = 0
 
 
@@ -102,6 +106,9 @@ class ModelGuardConfig:
 class GuardrailsConfig:
     enabled: bool = False
     refusal_message: str = "I can't help with that request."
+    # Name the check that refused in the reply (never the matched text). Off in code: a
+    # public API may not want to tell a caller which detector to work around.
+    explain_refusal: bool = False
     input: InputGuardConfig = field(default_factory=InputGuardConfig)
     output: OutputGuardConfig = field(default_factory=OutputGuardConfig)
     tools: ToolGuardConfig = field(default_factory=ToolGuardConfig)
@@ -115,12 +122,14 @@ class GuardrailsConfig:
             raise GuardrailsConfigError("guardrails must be a TOML table")
         sections = {"input": InputGuardConfig, "output": OutputGuardConfig,
                     "tools": ToolGuardConfig, "model": ModelGuardConfig}
-        unknown = set(raw) - {"enabled", "refusal_message", *sections}
+        unknown = set(raw) - {"enabled", "refusal_message", "explain_refusal", *sections}
         if unknown:
             raise GuardrailsConfigError(f"unknown fields in guardrails: {', '.join(sorted(unknown))}")
         values: dict[str, Any] = {}
         if "enabled" in raw:
             values["enabled"] = _bool(raw["enabled"], "guardrails.enabled")
+        if "explain_refusal" in raw:
+            values["explain_refusal"] = _bool(raw["explain_refusal"], "guardrails.explain_refusal")
         if "refusal_message" in raw:
             message = raw["refusal_message"]
             if not isinstance(message, str) or not message.strip():

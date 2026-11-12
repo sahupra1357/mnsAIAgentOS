@@ -221,6 +221,18 @@ PYTHONPATH=src python3 -m agent_harness approve --config models.toml RUN_ID --al
   last event of a finished run; scripted models must answer it. Notes that were in per-project run databases are
   not moved automatically: `agent-harness memory migrate --from sqlite:PATH` copies them (they stay readable as
   scope `legacy`). Details: `skills/harness-operations/SKILL.md`.
+- **The harness's own model calls (Phase 42).** A summary or note extraction is sent through
+  `complete_whole` (`orchestration/side_call.py`): the server counts thinking against `max_tokens`, and
+  GLM-5.3-Flash on `modal_shared` thinks whatever the request says (`enable_thinking = false` and six other
+  switches were ignored, checked live 2026-11-12). A reply with `finish_reason = length` is asked for again
+  with more room, up to the profile's `parameters.max_tokens`, and is never stored. The *summary's* size is
+  separate (`summary_tokens`: `max_output_tokens` up to `[summarization] max_share` of the input budget). A
+  scripted model that answers a `purpose = "summary"` or `"memory"` request with `length` gets more requests.
+- **Refused input (Phase 42).** `flooding` is `redact` in code: only a repeated fragment with a letter or digit
+  counts, and it is collapsed, not refused; a message over `max_chars` (20,000 in code, 100,000 in the root
+  config) loses its middle. A refused message is replaced in `run.messages` by a `[Guard]` note (a harness
+  prefix) and the original goes to `archived_messages`: do not read "the message the user sent" from a refused
+  turn's `run.messages`. `[guardrails] explain_refusal` is off in code and on in the root config.
 - **Stored text is data (Phase 41).** Recalled notes and a linked run's handoff are **user-role** harness
   messages (`[Memory]`, `[Earlier run `) before the user's first message, never system messages: the adapters
   merge leading system messages into the system prompt. The pinned head runs to the first message the user
@@ -1081,6 +1093,27 @@ A second static audit (2026-11-11) of Phases 25–40 found seams that were only 
 8. **Handoffs and plans.** A linked handoff is a user-role `[Earlier run ` message, scanned like tool output;
    `RunHandoff.tainted`; `previous_runs` results are stored data. `update_plan` refuses a step whose
    dependencies are open; delegation checks the run's limits between rounds of children.
+
+**Phase 42 – Live-run fixes** [guardrails, context-management, harness-operations, planning-delegation, interactive-extensibility] — on `phase-42-live-run-fixes`
+From the first long live chat (run `58cf397f`, 2026-11-11, 36 turns on `modal_shared`), analysed from its events:
+1. **Pasted logs were refused.** 11 of 35 messages were blocked as `flooding` (rule lines, padding, a table).
+   Flooding now collapses real repeats and shortens an over-long message; it refuses only with `flooding = "block"`.
+2. **A refused message was readable one turn later.** It is now a `[Guard]` note in the conversation, with the
+   original archived; `explain_refusal` names the check in the reply.
+3. **Summaries came back empty or cut off** (9 of 11 failed; the two stored were cut mid-sentence; 53 messages
+   were then omitted unsummarized). The request's output room grows until the reply is whole; the summary's
+   size follows the range; a cut-off reply is never stored; failures in a row wait 3, 6, 12… steps.
+4. **Note extraction returned nothing** (25 of 33 calls ended at the 512-token cap). Same call; `memory_saved`
+   has `cut_off`; a refused turn is not mined for notes.
+5. **The guard model was down** and every turn waited 20 s for it: the pause doubles up to 15 minutes.
+6. **The plan reminder** was sent 11 times and never followed: at most twice per run.
+7. **Taint prompts:** `/ui` shows the reason and an "Approve for this turn" button (`rest_of_turn`);
+   `ApprovalRequest.reason`.
+8. **Root config:** `modal.com` and `huggingface.co` in `allowed_hosts`.
+
+Not fixed, measured: the endpoint drops its prompt cache within a minute of idle time (the same 38,634-token
+prompt reused 38,592 tokens after 10 s and none after 60 s, with the affinity header). That is why 20 of 25
+turns started with no cached tokens; the harness sends the same prefix. Not run against a live model yet.
 
 Left open, on purpose: `phase_after` still reads the open calls of the newest reply (a fact about one message,
 not history); a steer during a plan made only of delegated steps waits for the next model turn; handoffs and

@@ -296,12 +296,14 @@ search_limit = 8
 [guardrails]
 enabled = true
 refusal_message = "I can't help with that request."
+explain_refusal = true   # the refusal names the check that refused, never the matched text
 
 [guardrails.input]
 injection = "block"
 prompt_extraction = "block"
 hidden_characters = "redact"
 encoded_payloads = "block"
+max_chars = 100000   # a longer message loses its middle (pasted logs run to tens of thousands)
 pii = "allow"
 
 [guardrails.output]
@@ -323,7 +325,8 @@ restrict_egress = true
 allowed_hosts = ["api.tavily.com", "api.github.com", "github.com", "raw.githubusercontent.com",
                  "docs.python.org", "pypi.org", "en.wikipedia.org", "mcp.excalidraw.com",
                  "wttr.in", "*.open-meteo.com", "*.weather.gov", "*.weatherapi.com",
-                 "*.timeanddate.com", "mausam.imd.gov.in"]
+                 "*.timeanddate.com", "mausam.imd.gov.in",
+                 "modal.com", "*.modal.com", "huggingface.co", "*.huggingface.co"]
 
 [redaction]
 enabled = true

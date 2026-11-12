@@ -381,13 +381,19 @@ function pendingCard(pending) {
         el("button", { onclick: () => act(() => api("POST", `/runs/${state.runId}/approval`, { call_id: pending.call_id, decision: "deny" })) }, "Decline")));
   }
   const feedback = el("input", { placeholder: pending.kind === "plan" ? "What to change (when rejecting)" : "Reason (optional, sent to the model)" });
-  const decide = (decision) => act(() => api("POST", `/runs/${state.runId}/approval`,
-    { call_id: pending.call_id, decision, ...(feedback.value.trim() ? { feedback: feedback.value.trim() } : {}) }));
+  const decide = (decision, extra = {}) => act(() => api("POST", `/runs/${state.runId}/approval`,
+    { call_id: pending.call_id, decision, ...extra, ...(feedback.value.trim() ? { feedback: feedback.value.trim() } : {}) }));
+  // Taint mode asks before every side-effect call once untrusted output (a web search) is in
+  // the turn. "Approve for this turn" answers them all until the next message, like "a" in the chat.
+  const tainted = pending.kind !== "plan" && /taint mode/.test(pending.reason || "");
   return el("div", { class: "card" },
     el("h4", {}, pending.kind === "plan" ? "Plan ready for approval" : `Approval needed: ${pending.tool} (${pending.risk})`),
+    pending.reason ? el("div", { class: "notice" }, pending.reason) : "",
     pending.kind === "plan" ? el("div", { style: "white-space:pre-wrap" }, pending.arguments.plan || "") : el("pre", {}, JSON.stringify(pending.arguments, null, 2)),
     el("div", { class: "row" }, feedback,
       el("button", { class: "primary", onclick: () => decide("allow") }, "Approve"),
+      tainted ? el("button", { title: "Approve this call and stop asking because of untrusted output until your next message",
+        onclick: () => decide("allow", { rest_of_turn: true }) }, "Approve for this turn") : "",
       el("button", { class: "danger", onclick: () => decide("deny") }, "Deny")));
 }
 

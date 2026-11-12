@@ -44,6 +44,7 @@ from agent_harness.domain import (
 )
 from agent_harness.knowledge.memory import EXPIRES_AT, MAX_MEMORY_CHARS
 from agent_harness.orchestration.runcontext import RunScope, current_run_scope
+from agent_harness.orchestration.side_call import OutputRoom, complete_whole
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ class MemoryService:
         self._store = store
         self.project = project
         self.settings = settings or MemorySettings()
+        self._output_room = OutputRoom()  # what the extraction call needed on each profile
 
     @property
     def store(self) -> Any:
@@ -331,14 +333,27 @@ class MemoryService:
 
     async def save_from_turn(
         self, models: ModelResolver, messages: Sequence[Message], *, profile: str, who: RunScope,
-    ) -> tuple[list[ScopedNote], Usage]:
-        """Ask the model which facts of this turn are worth keeping, and save the new ones."""
+    ) -> TurnNotes:
+        """Ask the model which facts of this turn are worth keeping, and save the new ones.
+
+        The reply's size is ``auto_save_max_output_tokens``; the request gets more room
+        when the model's thinking uses that up (``complete_whole``). A reply that is still
+        cut off is not parsed: half a JSON document holds no notes, and ``cut_off`` says so.
+        """
 
         existing = [note.item.text for note in await self.list_notes(limit=30, who=who)]
         request = self.extraction_request(messages, run_id=who.run_id, existing=existing[:15])
         if request is None:
-            return [], Usage()
-        response = await models.resolve(self.settings.auto_save_profile or profile).complete(request)
+            return TurnNotes()
+        name = self.settings.auto_save_profile or profile
+        reply = await complete_whole(
+            models.resolve(name), request,
+            answer_tokens=self.settings.auto_save_max_output_tokens, ceiling=None,
+            room=self._output_room, key=(name, "memory"),
+        )
+        if reply.cut_off:
+            return TurnNotes(usages=reply.usages, cut_off=True)
+        response = reply.response
         saved: list[ScopedNote] = []
         known = [distinctive_terms(text) for text in existing]
         for proposed in parse_notes(response.content)[: self.settings.auto_save_max_notes]:
@@ -348,7 +363,16 @@ class MemoryService:
             known.append(terms)
             saved.append(await self.save(proposed["text"], scope=proposed["scope"], kind=proposed["kind"],
                                          who=who, source="auto"))
-        return saved, response.usage
+        return TurnNotes(notes=tuple(saved), usages=reply.usages)
+
+
+@dataclass(frozen=True, slots=True)
+class TurnNotes:
+    """What :meth:`MemoryService.save_from_turn` saved and what its model calls used."""
+
+    notes: tuple[ScopedNote, ...] = ()
+    usages: tuple[Usage, ...] = ()  # one per request (more than one when the reply was cut off)
+    cut_off: bool = False  # the reply never came back whole: nothing was read from it
 
 
 EXTRACTION_INSTRUCTIONS = (
