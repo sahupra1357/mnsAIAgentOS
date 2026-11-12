@@ -768,6 +768,7 @@ class HarnessAPI:
             "risk": pending.risk.value,
             "arguments": dict(pending.arguments),
             "requested_at": pending.requested_at.isoformat(),
+            "reason": pending.reason,
         }
 
     async def _send_approval(self, send: Send, run_id: str) -> None:

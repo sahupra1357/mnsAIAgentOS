@@ -68,6 +68,15 @@ class WebUiTests(unittest.TestCase):
         self.assertIn('el("div", { class: "reasoning" }, liveReasoning)', source)  # a text node
 
 
+    def test_taint_approvals_can_be_answered_for_the_whole_turn(self) -> None:
+        # Live run, 2026-11-11: twelve approvals, one per patch, after a web search; the chat's
+        # "a" answer had no button on the page.
+        source = PAGE.read_text(encoding="utf-8")
+        self.assertIn('/taint mode/.test(pending.reason || "")', source)
+        self.assertIn('decide("allow", { rest_of_turn: true })', source)
+        self.assertIn('"Approve for this turn"', source)
+        self.assertIn('el("div", { class: "notice" }, pending.reason)', source)  # the reason, as a text node
+
     def test_images_can_be_attached_pasted_or_dropped(self) -> None:
         source = PAGE.read_text(encoding="utf-8")
         self.assertIn('id="image-file" accept="image/png,image/jpeg,image/gif,image/webp"', source)
