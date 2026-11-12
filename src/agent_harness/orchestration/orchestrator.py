@@ -135,8 +135,7 @@ from agent_harness.orchestration.state import (  # noqa: F401
     _flagged_untrusted,
     _holds_untrusted,
     _guarded_input,
-    _has_accepted_final_response,
-    _has_pending_model_attempt,
+    _answer_kind,
     _has_pending_tool_request,
     _identical_prior_calls,
     _latest_state_event,
@@ -150,7 +149,6 @@ from agent_harness.orchestration.state import (  # noqa: F401
     _recall_payload,
     _refused,
     _restore_action,
-    _result_submitted,
     _retry_details,
     _rewind_count,
     _safe_error,
@@ -1067,44 +1065,72 @@ class AgentOrchestrator:
         return stored, list(await self._store.list_events(run.id))
 
     async def _advance(self, run: RunRecord, events: list[RunEvent]) -> bool:
-        """Perform one boundary-to-boundary transition; return True once settled."""
+        """Perform one boundary-to-boundary transition; return True once settled.
 
-        # The phase stored with the last checkpoint says which branch applies; without it
-        # (a run stored before Phase 28) each predicate is evaluated.
-        phase = run.phase
-        if phase not in (PHASE_TOOLS, PHASE_ANSWER, PHASE_MODEL, PHASE_MODEL_REQUEST):
-            phase = ""
+        The phase stored with the last checkpoint is the dispatch key: each phase has one
+        branch, and no branch is reached by testing the history for the others.
+        """
+
         if self._settings.verify_phase and run.phase:
             derived = derive_phase(run, events)
             if derived != run.phase:
                 raise AssertionError(f"run {run.id}: stored phase {run.phase!r}, derived {derived!r}")
+        phase = self._loop_phase(run, events)
+        if phase == PHASE_TOOLS:
+            return await self._advance_tools(run, events)
+        if phase == PHASE_ANSWER:
+            return await self._advance_answer(run, events)
+        return await self._advance_model(run, events, retry=phase == PHASE_MODEL_REQUEST)
+
+    def _loop_phase(self, run: RunRecord, events: Sequence[RunEvent]) -> str:
+        """The stored phase, or the derived one for a run that has none the loop can act on.
+
+        That is a run stored before the phase existed, or one saved outside ``_checkpoint``
+        with a phase its messages no longer support (reported, then derived once: the next
+        checkpoint stores a phase from the transition table again).
+        """
+
+        phase = run.phase
+        if phase == PHASE_TOOLS and _pending_tool_calls(run.messages):
+            return phase
+        if phase == PHASE_ANSWER and _answer_kind(run) is not None:
+            return phase
+        if phase in (PHASE_MODEL, PHASE_MODEL_REQUEST):
+            return phase
+        derived = derive_phase(run, events)
+        if phase in (PHASE_TOOLS, PHASE_ANSWER):
+            _LOG.warning("run %s: stored phase %r does not match its messages; continuing as %r",
+                         run.id, phase, derived)
+        return derived
+
+    async def _advance_tools(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Phase ``tools``: run the calls of the latest reply that have no result yet."""
+
+        pending = _pending_tool_calls(run.messages)
         budget_reason = self._budget_reason(run)
-        pending = _pending_tool_calls(run.messages) if phase in ("", PHASE_TOOLS) else ()
-        if budget_reason is not None and pending and budget_reason != "step limit":
+        if budget_reason is not None and budget_reason != "step limit":
             await self._exhaust_budget(run, events, budget_reason)
             return True
+        if await self._refuse_oversized_turn(run, events, pending):
+            return run.status.is_terminal
+        self._set_run_scope(run)  # tools started from here inherit it (taint as of this reply)
+        prefetched = await self._prefetch_parallel(run, events, pending)
+        for index, call in enumerate(pending):
+            if self._wall_limit_reached(run):
+                await self._exhaust_budget(run, events, "wall-clock limit")
+                return True
+            settled = await self._between_tool_calls(run, events, pending[index:], first=index == 0)
+            if settled is not None:
+                return settled
+            await self._execute_tool(run, events, call, prefetched=prefetched.get(call.id))
+            if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
+                return True
+        return False
 
-        if pending:
-            if await self._refuse_oversized_turn(run, events, pending):
-                return run.status.is_terminal
-            self._set_run_scope(run)  # tools started from here inherit it (taint as of this reply)
-            prefetched = await self._prefetch_parallel(run, events, pending)
-            for index, call in enumerate(pending):
-                if self._wall_limit_reached(run):
-                    await self._exhaust_budget(run, events, "wall-clock limit")
-                    return True
-                settled = await self._between_tool_calls(run, events, pending[index:], first=index == 0)
-                if settled is not None:
-                    return settled
-                await self._execute_tool(run, events, call, prefetched=prefetched.get(call.id))
-                if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
-                    return True
-            return False
+    async def _advance_answer(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Phase ``answer``: check the reply (or the submitted result) and finish the turn."""
 
-        if phase in (PHASE_MODEL, PHASE_MODEL_REQUEST):
-            return await self._advance_model(run, events, retry=phase == PHASE_MODEL_REQUEST)
-
-        if run.output_schema is not None and _result_submitted(run, events):
+        if _answer_kind(run) == "result":
             # A valid submit_result ends the run without another model turn,
             # unless a steer or stop hook adds a message for the model.
             if await self._apply_steers(run, events):
@@ -1114,29 +1140,26 @@ class AgentOrchestrator:
             await self._complete(run, events)
             return True
 
-        if _has_accepted_final_response(run.messages, events):
-            # A steer that arrived while the model was answering reopens the turn.
-            if await self._apply_steers(run, events):
-                return False
-            if _refused(events):
-                await self._complete(run, events)  # a guardrail refusal ends the turn as it is
-                return True
-            retried = await self._retry_empty_cut_off(run, events)
-            if retried is not None:
-                return retried
-            if await self._continue_cut_answer(run, events):
-                return False
-            if run.output_schema is not None and run.output is None:
-                if await self._check_final_output(run, events):
-                    return run.status.is_terminal
-            if run.planning and await self._plan_on_final(run, events):
-                return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
-            if await self._stop_hook_continues(run, events):
-                return False
-            await self._complete(run, events, answer_truncated=_answer_cut_off(events))
+        # A steer that arrived while the model was answering reopens the turn.
+        if await self._apply_steers(run, events):
+            return False
+        if _refused(events):
+            await self._complete(run, events)  # a guardrail refusal ends the turn as it is
             return True
-
-        return await self._advance_model(run, events, retry=_has_pending_model_attempt(events, run.step_count))
+        retried = await self._retry_empty_cut_off(run, events)
+        if retried is not None:
+            return retried
+        if await self._continue_cut_answer(run, events):
+            return False
+        if run.output_schema is not None and run.output is None:
+            if await self._check_final_output(run, events):
+                return run.status.is_terminal
+        if run.planning and await self._plan_on_final(run, events):
+            return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
+        if await self._stop_hook_continues(run, events):
+            return False
+        await self._complete(run, events, answer_truncated=_answer_cut_off(events))
+        return True
 
     async def _advance_model(self, run: RunRecord, events: list[RunEvent], *, retry: bool) -> bool:
         """The model-turn transitions: an unfinished attempt is repeated, or a new turn starts."""

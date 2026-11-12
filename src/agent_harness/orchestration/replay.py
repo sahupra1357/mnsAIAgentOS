@@ -31,6 +31,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from agent_harness.domain import EventType, Message, Role, RunEvent
+from agent_harness.orchestration.state import annotation_adds_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,17 +69,10 @@ def derive_message_skeleton(events: Sequence[RunEvent]) -> list[MessageShape]:
             shapes = [MessageShape(str(role)) for role in roles]
         elif kind in {EventType.USER_MESSAGE_ADDED, EventType.STEER_APPLIED, EventType.OUTPUT_REJECTED}:
             shapes.append(user)
-        elif kind in {EventType.PLAN_STEP_UPDATED, EventType.MEMORY_RECALLED}:
-            # memory_recalled: notes recalled for a follow-up message are a message of their own
-            # (for a new run they are in run_created's message_roles).
-            if payload.get("message") is True:
-                shapes.append(user)
-        elif kind is EventType.HOOK_DECIDED:
-            hook_event = payload.get("hook_event")
-            decision = payload.get("decision")
-            if (hook_event == "session_start" and payload.get("context") and decision != "deny") or (
-                hook_event == "stop" and decision == "continue"
-            ):
+        elif kind in {EventType.PLAN_STEP_UPDATED, EventType.MEMORY_RECALLED, EventType.HOOK_DECIDED}:
+            # One rule for "this annotation added a message", shared with the phase table.
+            # (Notes recalled for a new run are in run_created's message_roles instead.)
+            if annotation_adds_message(event):
                 shapes.append(user)
         elif kind is EventType.MODEL_RESPONDED:
             if payload.get("ok") is not True:

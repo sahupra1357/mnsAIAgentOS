@@ -76,7 +76,7 @@ import tomllib
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import timedelta
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -326,6 +326,10 @@ async def scenario_application(
             # Never the user's own note store (the root config keeps it under ~/.agent-harness).
             "memory": {"database": str(root / "memory.sqlite3")},
         })
+        if models is not None:
+            # Scripted: every boundary checks the stored phase against the run's history, so
+            # a wrong row of the transition table fails a scenario instead of passing unseen.
+            overrides = merge_tables(overrides, {"orchestrator": {"verify_phase": True}})
         app = build_application(
             config_path=scenario.config or default_config,
             database_path=root / "runs.sqlite3",
@@ -512,9 +516,13 @@ async def run_scenario(
     guardrails = (Guardrails(scenario.guardrails, models=models)
                   if scenario.guardrails is not None and scenario.guardrails.enabled else None)
     now = [utc_now()]  # scenario time: wait_seconds moves it forward while a run is paused
+    chosen = scenario.settings or settings
+    if not live:
+        # As in scenario_application: scripted scenarios verify the phase at every boundary.
+        chosen = replace(chosen or OrchestratorSettings(), verify_phase=True)
     orchestrator = AgentOrchestrator(
         models=models, tools=tools, store=store, context=context,
-        settings=scenario.settings or settings, clock=lambda: now[0],
+        settings=chosen, clock=lambda: now[0],
         ask_user=bool(scenario.answers) or scenario.ask_user, guardrails=guardrails,
         **scenario.interaction,
     )

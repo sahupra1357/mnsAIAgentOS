@@ -154,11 +154,26 @@ class TransitionTableTests(unittest.TestCase):
         self.assertEqual(self.at(EventType.TOOL_RESPONDED, [TASK, two, answer]), "tools")  # b is still open
         self.assertEqual(self.at(EventType.USER_MESSAGE_ADDED, [TASK, reply, TASK], previous="done"), "model")
 
-    def test_annotations_do_not_move_the_phase_unless_a_message_followed_the_reply(self) -> None:
+    def test_annotations_do_not_move_the_phase_unless_one_added_a_message_to_the_reply(self) -> None:
         reply = Message(role=Role.ASSISTANT, content="done")
         note = Message(role=Role.USER, content="[Plan] Execute step s2 (2/2): write")
         self.assertEqual(self.at(EventType.USAGE_RECORDED, [TASK, reply], previous="answer"), "answer")
-        self.assertEqual(self.at(EventType.PLAN_STEP_UPDATED, [TASK, reply, note], previous="answer"), "model")
+        # The event says a message was added; the table does not look at the messages for it.
+        self.assertEqual(self.at(EventType.PLAN_STEP_UPDATED, [TASK, reply, note], previous="answer",
+                                 message=True), "model")
+        self.assertEqual(self.at(EventType.PLAN_STEP_UPDATED, [TASK, reply], previous="answer",
+                                 step_id="s1", status="completed"), "answer")
+        self.assertEqual(self.at(EventType.HOOK_DECIDED, [TASK, reply, note], previous="answer",
+                                 hook_event="stop", decision="continue"), "model")
+        self.assertEqual(self.at(EventType.HOOK_DECIDED, [TASK, reply], previous="answer",
+                                 hook_event="stop", decision="allow"), "answer")
+
+    def test_a_submitted_result_stays_in_answer_through_annotations(self) -> None:
+        """Before, any annotation recorded after submit_result moved the phase to ``model``."""
+
+        asking = Message(role=Role.ASSISTANT, content="", tool_calls=(ToolCall("a", "submit_result", {}),))
+        result = Message(role=Role.TOOL, content="ok", tool_call_id="a", name="submit_result")
+        self.assertEqual(self.at(EventType.USAGE_RECORDED, [TASK, asking, result], previous="answer"), "answer")
 
     def test_status_wins(self) -> None:
         from agent_harness.orchestration.state import phase_after
@@ -226,6 +241,37 @@ class PhaseTests(unittest.TestCase):
                 await orchestrator.run(created.id)
 
         run(scenario())
+
+
+    def test_a_stale_phase_is_logged_and_derived_once_without_verification(self) -> None:
+        """A run saved around ``_checkpoint`` with a phase its messages do not support goes on."""
+
+        async def scenario() -> None:
+            store = RecordingStore()
+            orchestrator = AgentOrchestrator(models=Model([say()]), tools=Tools(), store=store)
+            created = await orchestrator.create_run(model_profile="p", messages=[TASK])
+            stored = await store.get_run(created.id)
+            stored.status, stored.phase = RunStatus.RUNNING, "tools"
+            await store.save_checkpoint(stored, (), expected_version=stored.version)
+            with self.assertLogs("agent_harness.orchestration.orchestrator", level="WARNING") as logs:
+                done = await orchestrator.run(created.id)
+            self.assertIn("stored phase 'tools'", logs.output[0])
+            self.assertIs(done.status, RunStatus.COMPLETED)
+            self.assertEqual(store.phases[-3:], ["model_request", "answer", "done"])  # the table again
+
+        run(scenario())
+
+    def test_the_loop_has_one_branch_per_phase_and_no_history_predicates(self) -> None:
+        """``_advance`` dispatches on the stored phase; the old predicate chain is gone."""
+
+        import inspect
+
+        source = inspect.getsource(AgentOrchestrator._advance)
+        for name in ("_has_accepted_final_response", "_has_pending_model_attempt", "_result_submitted",
+                     "_pending_tool_calls"):
+            self.assertNotIn(name, source)
+        for branch in ("_advance_tools", "_advance_answer", "_advance_model"):
+            self.assertIn(branch, source)
 
 
 class ApprovalTools(Tools):
