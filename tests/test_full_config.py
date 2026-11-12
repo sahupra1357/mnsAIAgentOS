@@ -59,6 +59,11 @@ class FullConfigTests(unittest.TestCase):
         on = {
             "guardrails": c.guardrails.enabled,
             "guardrails taint": c.guardrails.tools.taint,
+            "refusals name the check": c.guardrails.explain_refusal,
+            "pasted logs are not refused": (c.guardrails.input.flooding == "redact"
+                                            and c.guardrails.input.max_chars >= 100_000),
+            "modal and hugging face docs are reachable": {"modal.com", "huggingface.co"} <= set(
+                c.network.allowed_hosts),
             "hooks": len(c.hooks) == 2,
             "permission rules": bool(c.permissions.allow and c.permissions.ask and c.permissions.deny),
             "agents": len(c.agents) == 3,
