@@ -512,7 +512,12 @@ class SummarizationConfig:
 
     enabled: bool = True
     profile: str = ""
+    # The least a summary may be, in tokens. A summary of a long range, or one that
+    # continues a long summary, may be longer, up to ``max_share`` of the profile's input
+    # budget. The request's own output room is separate: it grows when the model's
+    # thinking uses it up, to the profile's ``parameters.max_tokens``.
     max_output_tokens: int = 1024
+    max_share: float = 0.06
     max_input_chars: int = 0
     # Extra request fields sent with summary calls only, e.g.
     # parameters = { chat_template_kwargs = { enable_thinking = false } }
@@ -530,6 +535,8 @@ class SummarizationConfig:
     def __post_init__(self) -> None:
         if not 0 < self.keep_ratio < self.trigger_ratio <= 1:
             raise ConfigError("summarization: require 0 < keep_ratio < trigger_ratio <= 1")
+        if not 0 < self.max_share <= 0.5:
+            raise ConfigError("summarization.max_share must be greater than 0 and at most 0.5")
         if self.style not in {"prose", "structured"}:
             raise ConfigError("summarization.style must be 'prose' or 'structured'")
         if self.max_message_chars < 200:

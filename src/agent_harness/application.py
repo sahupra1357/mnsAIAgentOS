@@ -792,6 +792,8 @@ def _summarizer(
             input_chars=None if section.max_input_chars else summary_input_chars(limits, policy),
             max_message_chars=section.max_message_chars,
             instructions=SUMMARY_STYLES[section.style],
+            limits=limits.get,
+            max_share=section.max_share,
         )
     except ValueError as exc:
         raise ConfigError(f"summarization: {exc}") from exc
