@@ -223,6 +223,59 @@ class BudgetedContextBuilderTests(unittest.TestCase):
         self.assertNotIn("unsized", limits)
 
 
+class ReserveAndHeadTests(unittest.TestCase):
+    """What a request carries beside the view is counted, and an oversized request degrades."""
+
+    def test_the_view_leaves_room_for_what_the_request_adds(self) -> None:
+        messages = history(12)
+        status = Message(role=Role.USER, content="[State - written by the harness, not a request]\n" + "s" * 900)
+        plain = builder().build(messages, (LOOKUP,), model_profile="small")
+        view = builder().build(messages, (LOOKUP,), model_profile="small", reserve=(status,))
+        cost = builder()._message_tokens(status)
+        assert view.estimated_tokens is not None and view.budget_tokens is not None
+        self.assertLessEqual(view.estimated_tokens, view.budget_tokens)  # the view plus the status
+        self.assertGreaterEqual(view.estimated_tokens, cost)
+        self.assertEqual(view.budget_tokens, plain.budget_tokens)
+        self.assertNotIn(status, view.messages)  # counted, not added: the caller appends it
+        assert_tool_pairs_intact(self, view.messages)
+
+    def test_a_small_reserve_does_not_move_the_trim_points(self) -> None:
+        # The status block comes and goes; the kept turns (the cached prefix) must not follow it.
+        messages = history(12)
+        note = Message(role=Role.USER, content="[State - written by the harness, not a request]\nSteps left: 2.")
+        self.assertEqual(builder().build(messages, (LOOKUP,), model_profile="small", reserve=(note,)).messages,
+                         builder().build(messages, (LOOKUP,), model_profile="small").messages)
+
+    def test_a_request_longer_than_the_window_loses_its_middle_not_the_run(self) -> None:
+        long = Message(role=Role.USER, content="START " + "word " * 4_000 + " END")
+        view = builder().build([SYSTEM, long, *tool_turn(0)], (LOOKUP,), model_profile="small")
+        shown = view.messages[1].content
+        self.assertTrue(shown.startswith("START ") and shown.endswith(" END"))
+        self.assertIn("characters of this message are not shown", shown)
+        self.assertGreater(view.shortened_request_chars, 10_000)
+        self.assertTrue(view.modified)
+        assert view.estimated_tokens is not None and view.budget_tokens is not None
+        self.assertLessEqual(view.estimated_tokens, view.budget_tokens)
+        self.assertEqual(view.messages[0], SYSTEM)  # system messages are never shortened
+        self.assertEqual(len(view.messages), 4)  # and the newest turn is still sent
+
+    def test_system_messages_that_do_not_fit_still_fail(self) -> None:
+        huge = Message(role=Role.SYSTEM, content="rule " * 4_000)
+        with self.assertRaises(ContextWindowExceededError):
+            builder().build([huge, TASK], (LOOKUP,), model_profile="small")
+
+    def test_recalled_notes_before_the_request_are_pinned_with_it(self) -> None:
+        from agent_harness.orchestration.context import pinned_head_end
+
+        notes = Message(role=Role.USER, content="[Memory] Notes saved in earlier sessions.\n- (user) Be brief.")
+        self.assertEqual(pinned_head_end([SYSTEM, notes, TASK, *tool_turn(0)]), 3)
+        self.assertEqual(pinned_head_end([SYSTEM, TASK, *tool_turn(0)]), 2)
+        self.assertEqual(pinned_head_end([SYSTEM, notes, *tool_turn(0)]), 2)  # no request: as before
+        view = builder().build([SYSTEM, notes, TASK, *history(12)[2:]], (LOOKUP,), model_profile="small")
+        self.assertEqual(view.messages[:3], (SYSTEM, notes, TASK))
+        self.assertGreater(view.omitted_messages, 0)
+
+
 class ScriptedModel:
     def __init__(self, outcomes: Sequence[ModelResponse | BaseException]) -> None:
         self.outcomes = deque(outcomes)
@@ -320,6 +373,28 @@ class OrchestratorContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(e.type is EventType.CONTEXT_SUMMARIZED and e.payload.get("ok") for e in events))
         # A builder that never trims needs no summarizer.
         self.assertIsNone(AgentOrchestrator(models=model, tools=BulkyTools(), store=store)._summarizer)
+
+    async def test_the_status_block_is_counted_in_every_request(self) -> None:
+        """Near the step limit a status message is added to each request; it used to be uncounted."""
+
+        from agent_harness.orchestration.context import estimate_tokens
+
+        model = ScriptedModel([call(i) for i in range(15)] + [ModelResponse(content="done")])
+        store = InMemoryRunStore()
+        orchestrator = AgentOrchestrator(
+            models=model, tools=BulkyTools(), store=store, context=builder(), summarizer=NO_SUMMARIZER)
+        run = await orchestrator.create_run(
+            model_profile="small", messages=[SYSTEM, TASK], budget=RunBudget(max_steps=16))
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        with_status = [r for r in model.requests if any(m.content.startswith("[State -") for m in r.messages)]
+        self.assertTrue(with_status)
+        for request in model.requests:
+            self.assertLessEqual(estimate_tokens(request.messages, (LOOKUP,), ContextPolicy()), 2000 - 200)
+        recorded = [e.payload["context"]["estimated_tokens"] for e in await store.list_events(run.id)
+                    if e.type is EventType.MODEL_RESPONDED and "context" in e.payload]
+        sent = estimate_tokens(with_status[-1].messages, (), ContextPolicy())
+        self.assertEqual(recorded[-1], sent)  # the recorded estimate is what was sent
 
     async def test_retried_model_call_sends_identical_view(self) -> None:
         model = ScriptedModel(
