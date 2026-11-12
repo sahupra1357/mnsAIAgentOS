@@ -89,6 +89,11 @@ result. `run()` watches for a cancel itself (`cancel_poll_seconds`, 2.0; workers
 Options that remain: `state_block` (root config), `max_tool_calls_per_run`, and `verify_phase` for tests.
 CLAUDE.md, "Fix or feature", says when something may be an option at all.
 
+Phases 32–36: the status block is always sent (before a trailing harness directive); `written_by_user()` decides
+what the user wrote; the phase is set by `phase_after()` (a transition table; `derive_phase()` is the cross-check);
+usage is added only by `_charge()` / `_charge_child()`; and the class's methods live in `model_step.py`,
+`tool_step.py`, `plan_steps.py`, `guard_steps.py` and `child_runs.py` (functions taking `self`, bound in the class).
+
 - **Phase.** `RunRecord.phase` is written by `_checkpoint` from `derive_phase(run, events)`
   (`orchestration/state.py`): `queued`, `model`, `model_request`, `tools`, `answer`,
   `awaiting_input`, `done`. `_advance` picks its branch from the stored
