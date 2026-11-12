@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+import contextlib
 from dataclasses import dataclass
+import http.client
 import json
 import socket
 import threading
@@ -73,8 +75,70 @@ class HttpTransportTimeout(HttpTransportError):
     """The HTTP exchange exceeded its deadline."""
 
 
+class _Exchange:
+    """The connection of one request, so that a cancelled caller can close it.
+
+    ``urllib`` runs in a thread that cannot be cancelled: when the awaiting task was
+    cancelled (a run stopped by the user), the thread went on waiting for the reply, up
+    to the timeout, and the server went on generating it. Closing the socket ends both.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self.closed = False
+
+    def opener(self) -> request.OpenerDirector:
+        exchange = self
+
+        class Http(request.HTTPHandler):
+            def http_open(self, req: request.Request) -> Any:
+                return self.do_open(exchange._factory(http.client.HTTPConnection), req)
+
+        class Https(request.HTTPSHandler):
+            def https_open(self, req: request.Request) -> Any:
+                return self.do_open(exchange._factory(http.client.HTTPSConnection), req,
+                                    context=self._context)  # type: ignore[attr-defined]
+
+        return request.build_opener(Http, Https)
+
+    def _factory(self, kind: Callable[..., http.client.HTTPConnection]) -> Callable[..., Any]:
+        def create(host: str, **options: Any) -> http.client.HTTPConnection:
+            connection = kind(host, **options)
+            connect = connection.connect
+
+            def connect_and_keep() -> None:
+                connect()
+                # The socket itself is kept: once a response is being read, the connection
+                # object has let go of it (``Connection: close``), and it is still the
+                # one thing that can interrupt the reading thread.
+                with self._lock:
+                    if connection.sock is not None:
+                        self._sockets.append(connection.sock)
+                    closed = self.closed
+                if closed:
+                    self.close()
+                    raise OSError("the request was cancelled")
+
+            connection.connect = connect_and_keep  # type: ignore[method-assign]
+            return connection
+
+        return create
+
+    def close(self) -> None:
+        with self._lock:
+            self.closed = True
+            sockets = list(self._sockets)
+        for sock in sockets:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)  # wakes a thread blocked in recv; the server sees EOF
+
+
 class StdlibHttpTransport:
-    """Dependency-free async transport backed by ``urllib`` in a thread."""
+    """Dependency-free async transport backed by ``urllib`` in a thread.
+
+    A cancelled call closes its connection (see ``_Exchange``).
+    """
 
     async def post_json(
         self,
@@ -83,9 +147,8 @@ class StdlibHttpTransport:
         headers: Mapping[str, str],
         timeout_seconds: float,
     ) -> HttpResponse:
-        return await asyncio.to_thread(
-            self._post_json, url, payload, headers, timeout_seconds
-        )
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return await self._exchange(url, body, headers, timeout_seconds, "POST")
 
     async def get(
         self,
@@ -93,7 +156,17 @@ class StdlibHttpTransport:
         headers: Mapping[str, str],
         timeout_seconds: float,
     ) -> HttpResponse:
-        return await asyncio.to_thread(self._send, url, None, headers, timeout_seconds, "GET")
+        return await self._exchange(url, None, headers, timeout_seconds, "GET")
+
+    async def _exchange(
+        self, url: str, body: bytes | None, headers: Mapping[str, str], timeout_seconds: float, method: str,
+    ) -> HttpResponse:
+        exchange = _Exchange()
+        try:
+            return await asyncio.to_thread(self._send, url, body, headers, timeout_seconds, method, exchange)
+        except asyncio.CancelledError:
+            exchange.close()
+            raise
 
     async def post_stream(
         self,
@@ -115,11 +188,13 @@ class StdlibHttpTransport:
         def put(*item: Any) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, item)
 
+        exchange = _Exchange()
+
         def worker() -> None:
             http_request = request.Request(url, data=body, headers=dict(headers), method="POST")
             try:
                 try:
-                    response = request.urlopen(http_request, timeout=timeout_seconds)
+                    response = exchange.opener().open(http_request, timeout=timeout_seconds)
                 except error.HTTPError as exc:
                     put("status", exc.code, dict(exc.headers.items()) if exc.headers else {}, exc.read())
                     put("end")
@@ -137,22 +212,37 @@ class StdlibHttpTransport:
                     put("error", HttpTransportTimeout(str(reason)))
                 else:
                     put("error", HttpTransportError(str(exc)))
+            except (http.client.HTTPException, ValueError) as exc:
+                if not exchange.closed:
+                    raise
+                put("error", HttpTransportError(str(exc)))  # the socket was closed under the reader
 
         threading.Thread(target=worker, name="agent-harness-stream", daemon=True).start()
-        first = await queue.get()
+        try:
+            first = await queue.get()
+        except asyncio.CancelledError:
+            exchange.close()
+            raise
         if first[0] == "error":
             raise first[1]
         _, status, response_headers, error_body = first
 
         async def lines() -> AsyncIterator[bytes]:
-            while True:
-                item = await queue.get()
-                if item[0] == "line":
-                    yield item[1]
-                elif item[0] == "end":
-                    return
-                else:
-                    raise item[1]
+            finished = False
+            try:
+                while True:
+                    item = await queue.get()
+                    if item[0] == "line":
+                        yield item[1]
+                    elif item[0] == "end":
+                        finished = True
+                        return
+                    else:
+                        finished = True
+                        raise item[1]
+            finally:
+                if not finished:
+                    exchange.close()  # cancelled or abandoned mid-stream: stop the server's work
 
         return HttpStreamResponse(status, response_headers, error_body, lines())
 
@@ -173,10 +263,12 @@ class StdlibHttpTransport:
         headers: Mapping[str, str],
         timeout_seconds: float,
         method: str,
+        exchange: _Exchange | None = None,
     ) -> HttpResponse:
         http_request = request.Request(url, data=body, headers=dict(headers), method=method)
+        opener = exchange.opener() if exchange is not None else request.build_opener()
         try:
-            with request.urlopen(http_request, timeout=timeout_seconds) as response:
+            with opener.open(http_request, timeout=timeout_seconds) as response:
                 return HttpResponse(
                     status=response.status,
                     headers=dict(response.headers.items()),
@@ -195,3 +287,7 @@ class StdlibHttpTransport:
             if isinstance(reason, (TimeoutError, socket.timeout)):
                 raise HttpTransportTimeout(str(reason)) from exc
             raise HttpTransportError(str(exc)) from exc
+        except (http.client.HTTPException, ValueError) as exc:
+            if exchange is None or not exchange.closed:
+                raise
+            raise HttpTransportError(str(exc)) from exc  # the socket was closed under the reader

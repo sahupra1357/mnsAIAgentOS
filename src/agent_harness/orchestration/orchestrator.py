@@ -1172,9 +1172,17 @@ class AgentOrchestrator:
         """The model-turn transitions: an unfinished attempt is repeated, or a new turn starts."""
 
         if retry:
-            if self._wall_limit_reached(run):
-                await self._exhaust_budget(run, events, "wall-clock limit")
+            # The step is already counted, so the step limit does not apply to asking again;
+            # every other limit does (a retry used to check the wall clock only, so a run
+            # past its token, cost or tenant budget kept calling the model).
+            reason = self._budget_reason(run)
+            if reason in (None, "step limit"):
+                reason = await self._quota_reason(run)
+            if reason is not None:
+                await self._exhaust_budget(run, events, reason)
                 return True
+            if not _continuing_answer(run.messages) and await self._apply_steers(run, events):
+                return False  # the user wrote meanwhile: a new turn that includes the message
             await self._perform_model_turn(run, events)
             return run.status.is_terminal
 
@@ -2079,6 +2087,13 @@ class AgentOrchestrator:
         if run.started_at is None:
             return False
         return (self._clock() - run.started_at).total_seconds() >= run.budget.max_wall_seconds
+
+    def _wall_seconds_left(self, run: RunRecord) -> float | None:
+        """Seconds until the run's wall-clock limit (0 when it has passed); None before it started."""
+
+        if run.started_at is None:
+            return None
+        return max(0.0, run.budget.max_wall_seconds - (self._clock() - run.started_at).total_seconds())
 
     async def _checkpoint(
         self, run: RunRecord, event_log: list[RunEvent], *events: RunEvent

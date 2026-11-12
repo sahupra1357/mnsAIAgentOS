@@ -85,7 +85,10 @@ class Model:
         except asyncio.CancelledError:
             self.cancelled = True
             raise
-        return self.replies.popleft()
+        reply = self.replies.popleft()
+        if isinstance(reply, BaseException):
+            raise reply  # a scripted failure
+        return reply
 
 
 class Tools:
@@ -323,6 +326,103 @@ class OrphanTests(unittest.TestCase):
             self.assertEqual(tools.ran, [])
             self.assertEqual([m.role for m in done.messages][-4:],
                              [Role.ASSISTANT, Role.TOOL, Role.USER, Role.ASSISTANT])
+
+        run(scenario())
+
+
+class RetryChecksTests(unittest.TestCase):
+    """A model request that is asked again passes the same checks as a new turn."""
+
+    def test_a_retry_stops_at_the_token_limit(self) -> None:
+        async def scenario() -> None:
+            store = InMemoryRunStore()
+            model = Model([say()])
+            orchestrator = AgentOrchestrator(models=model, tools=Tools(), store=store, settings=ON)
+            created = await orchestrator.create_run(
+                model_profile="p", messages=[TASK], budget=RunBudget(max_steps=5, max_tokens=100))
+            # As after a crash: a request of step 1 is recorded without a response, and the
+            # run has meanwhile used its tokens (a guard or summary call was charged).
+            stored = await store.get_run(created.id)
+            stored.status, stored.started_at, stored.step_count = RunStatus.RUNNING, utc_now(), 1
+            stored.consumed_tokens, stored.phase = 500, "model_request"
+            await store.save_checkpoint(stored, (RunEvent(
+                run_id=created.id, type=EventType.MODEL_REQUESTED, step=1, created_at=utc_now(),
+                payload={"attempt": 1, "model_profile": "p"}),), expected_version=stored.version)
+            done = await orchestrator.run(created.id)
+            self.assertIs(done.status, RunStatus.BUDGET_EXHAUSTED)
+            self.assertEqual(model.requests, [])  # it used to call the model again
+
+        run(scenario())
+
+    def test_the_last_step_may_still_be_asked_again(self) -> None:
+        from agent_harness.domain import RetryableModelError
+
+        async def scenario() -> None:
+            model = Model([RetryableModelError("busy"), say()])
+            orchestrator = AgentOrchestrator(
+                models=model, tools=Tools(), store=InMemoryRunStore(), settings=ON)
+            created = await orchestrator.create_run(
+                model_profile="p", messages=[TASK], budget=RunBudget(max_steps=1))
+            done = await orchestrator.run(created.id)
+            self.assertIs(done.status, RunStatus.COMPLETED)  # the step limit does not stop a retry
+            self.assertEqual(len(model.requests), 2)
+
+        run(scenario())
+
+    def test_a_steer_sent_during_a_failing_request_reaches_the_retry(self) -> None:
+        from agent_harness.domain import RetryableModelError
+
+        async def scenario() -> None:
+            store = InMemoryRunStore()
+            holder: dict[str, object] = {}
+
+            class Failing(Model):
+                async def complete(self, request: ModelRequest) -> ModelResponse:
+                    if not self.requests:
+                        await holder["o"].steer(holder["run"], "Use the staging server.")  # type: ignore[attr-defined]
+                    return await super().complete(request)
+
+            model = Failing([RetryableModelError("busy"), say("ok")])
+            orchestrator = AgentOrchestrator(models=model, tools=Tools(), store=store, settings=ON, steering=store)
+            holder["o"] = orchestrator
+            created = await orchestrator.create_run(model_profile="p", messages=[TASK])
+            holder["run"] = created.id
+            done = await orchestrator.run(created.id)
+            self.assertIs(done.status, RunStatus.COMPLETED)
+            self.assertIn("Use the staging server.", [m.content for m in model.requests[1].messages])
+            events = list(await store.list_events(created.id))
+            self.assertEqual(derive_message_skeleton(events), message_skeleton(done.messages))
+
+        run(scenario())
+
+
+class PrefetchLimitTests(unittest.TestCase):
+    def test_a_read_batch_does_not_outlive_the_runs_time(self) -> None:
+        """Concurrent reads ran to their own timeouts before the loop looked at the clock."""
+
+        async def scenario() -> None:
+            store = InMemoryRunStore()
+            started: list[str] = []
+            stopped: list[str] = []
+
+            async def during(call: ToolCall) -> None:
+                started.append(call.id)
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    stopped.append(call.id)
+                    raise
+
+            orchestrator = AgentOrchestrator(
+                models=Model([calls(("a", "lookup"), ("b", "lookup"))]), tools=Tools(during), store=store)
+            created = await orchestrator.create_run(
+                model_profile="p", messages=[TASK], budget=RunBudget(max_steps=5, max_wall_seconds=0.3))
+            done = await asyncio.wait_for(orchestrator.run(created.id), 10)
+            self.assertIs(done.status, RunStatus.BUDGET_EXHAUSTED)
+            self.assertEqual(sorted(started), ["a", "b"])
+            self.assertEqual(sorted(stopped), ["a", "b"])
+            # Both calls have a result message, so the history stays well formed.
+            self.assertEqual([m.role for m in done.messages][-2:], [Role.TOOL, Role.TOOL])
 
         run(scenario())
 

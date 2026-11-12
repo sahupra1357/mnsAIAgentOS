@@ -368,5 +368,104 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             gateway.resolve("missing")
 
 
+class SlowServer:
+    """A loopback HTTP server that answers only when told to, and notes when the client leaves."""
+
+    def __init__(self, *, stream: bool = False) -> None:
+        import socket
+        import threading
+
+        self.stream = stream
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.url = f"http://127.0.0.1:{self.listener.getsockname()[1]}/v1/chat/completions"
+        self.requested = threading.Event()
+        self.client_left = threading.Event()
+        self.answer = threading.Event()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        connection, _ = self.listener.accept()
+        with connection:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += connection.recv(65536)
+            self.requested.set()
+            if self.stream:
+                connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                   b"Connection: close\r\n\r\ndata: one\n\n")
+            connection.settimeout(0.05)
+            while not self.answer.is_set():
+                try:
+                    if connection.recv(65536) == b"":
+                        self.client_left.set()  # the client closed its side
+                        return
+                except TimeoutError:
+                    continue
+                except OSError:
+                    self.client_left.set()
+                    return
+            body = b'{"ok": true}'
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                               + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+
+    def close(self) -> None:
+        self.answer.set()
+        self.listener.close()
+        self.thread.join(timeout=2)
+
+
+class TransportCancellationTests(unittest.IsolatedAsyncioTestCase):
+    """A cancelled call closes its connection: the thread and the server do not work on."""
+
+    async def test_a_cancelled_request_closes_the_connection(self) -> None:
+        import asyncio
+
+        from agent_harness.model_gateway.transport import StdlibHttpTransport
+
+        server = SlowServer()
+        self.addCleanup(server.close)
+        task = asyncio.ensure_future(StdlibHttpTransport().post_json(server.url, {"a": 1}, {}, 30.0))
+        self.assertTrue(await asyncio.to_thread(server.requested.wait, 5))
+        self.assertFalse(server.client_left.is_set())
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        # Before, the socket stayed open until the 30-second timeout.
+        self.assertTrue(await asyncio.to_thread(server.client_left.wait, 5))
+
+    async def test_an_answered_request_still_returns(self) -> None:
+        import asyncio
+
+        from agent_harness.model_gateway.transport import StdlibHttpTransport
+
+        server = SlowServer()
+        self.addCleanup(server.close)
+        task = asyncio.ensure_future(StdlibHttpTransport().post_json(server.url, {"a": 1}, {}, 30.0))
+        self.assertTrue(await asyncio.to_thread(server.requested.wait, 5))
+        server.answer.set()
+        response = await task
+        self.assertEqual((response.status, response.body), (200, b'{"ok": true}'))
+
+    async def test_an_abandoned_stream_closes_the_connection(self) -> None:
+        import asyncio
+
+        from agent_harness.model_gateway.transport import StdlibHttpTransport
+
+        server = SlowServer(stream=True)
+        self.addCleanup(server.close)
+        response = await StdlibHttpTransport().post_stream(server.url, {"a": 1}, {}, 30.0)
+        lines = response.lines
+        self.assertEqual(await anext(lines), b"data: one\n")
+        await lines.aclose()  # what a cancelled consumer does to the generator
+        self.assertTrue(await asyncio.to_thread(server.client_left.wait, 5))
+
+    async def test_an_invalid_url_is_still_a_value_error(self) -> None:
+        from agent_harness.model_gateway.transport import StdlibHttpTransport
+
+        with self.assertRaises(ValueError):
+            await StdlibHttpTransport().post_json("not a url", {}, {}, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
