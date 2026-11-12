@@ -38,6 +38,7 @@ from agent_harness.orchestration.context import (
     ContextPolicy,
     ContextSummarizer,
     FullHistoryContextBuilder,
+    _NoSummarizer,
 )
 from agent_harness.orchestration.date_note import date_note, last_noted_date, with_date_note
 from agent_harness.orchestration.planning import (
@@ -335,7 +336,7 @@ class AgentOrchestrator:
         guardrails: Guardrails | None = None,
         system_context: Callable[[], SystemContext] | None = None,
         snapshots: FileSnapshotter | None = None,
-        summarizer: ContextSummarizer | None = None,
+        summarizer: ContextSummarizer | _NoSummarizer | None = None,
         tool_loading: ToolLoadingPolicy | None = None,
         planning: PlanningPolicy | None = None,
         quotas: Mapping[str, Quota] | None = None,
@@ -395,7 +396,13 @@ class AgentOrchestrator:
         self._tool_guard_events: dict[tuple[str, str], list[RunEvent]] = {}
         self._system_context = system_context
         self._snapshots = snapshots
-        self._summarizer = summarizer
+        # Left out with a builder that trims: summarize with a default summarizer sized from
+        # the builder's windows, so history is not dropped unsummarized. NO_SUMMARIZER opts out.
+        if isinstance(summarizer, _NoSummarizer):
+            summarizer = None
+        elif summarizer is None and getattr(self._context, "native_caps", False):
+            summarizer = ContextSummarizer(input_chars=getattr(self._context, "summary_input_chars", None))
+        self._summarizer: ContextSummarizer | None = summarizer
         # When and what to summarize (only used with a summarizer); see orchestration/compaction.py.
         # The default summarizes before anything is omitted (DefaultCompactionPolicy, which
         # summarized only what a view had already dropped, is no longer the default).

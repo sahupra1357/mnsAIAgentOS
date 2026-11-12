@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 from agent_harness.config.loader import ModelProfile
 from agent_harness.orchestration.context import (
+    NO_SUMMARIZER,
     STATE_HEADER,
     BudgetedContextBuilder,
     ContextLimits,
@@ -262,10 +263,11 @@ def call(index: int) -> ModelResponse:
 
 class OrchestratorContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_long_run_sends_bounded_views_and_keeps_full_history(self) -> None:
+        # NO_SUMMARIZER: this is the trimming itself, as with [summarization] enabled = false.
         model = ScriptedModel([call(i) for i in range(15)] + [ModelResponse(content="done")])
         store = InMemoryRunStore()
         orchestrator = AgentOrchestrator(
-            models=model, tools=BulkyTools(), store=store, context=builder()
+            models=model, tools=BulkyTools(), store=store, context=builder(), summarizer=NO_SUMMARIZER
         )
         run = await orchestrator.create_run(
             model_profile="small", messages=[SYSTEM, TASK], budget=RunBudget(max_steps=30)
@@ -288,13 +290,45 @@ class OrchestratorContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stats)
         self.assertGreater(stats[-1]["omitted_messages"], 0)
 
+    async def test_a_trimming_builder_without_a_summarizer_still_summarizes(self) -> None:
+        """Composed directly (no config), history is summarized before it is dropped."""
+
+        class Summarizing(ScriptedModel):
+            summaries = 0
+
+            async def complete(self, request: ModelRequest) -> ModelResponse:
+                if request.metadata.get("purpose") == "summary":
+                    type(self).summaries += 1
+                    # The transcript is sized from the builder's window, not the 48,000 default.
+                    assert len(request.messages[-1].content) <= int((2000 - 200 - 256) * 3.5 * 0.75)
+                    return ModelResponse(content="Looked up 0 to 5.")
+                return await super().complete(request)
+
+        model = Summarizing([call(i) for i in range(15)] + [ModelResponse(content="done")])
+        store = InMemoryRunStore()
+        orchestrator = AgentOrchestrator(models=model, tools=BulkyTools(), store=store, context=builder())
+        run = await orchestrator.create_run(
+            model_profile="small", messages=[SYSTEM, TASK], budget=RunBudget(max_steps=30)
+        )
+
+        finished = await orchestrator.run(run.id)
+
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        self.assertGreater(Summarizing.summaries, 0)
+        self.assertIsNotNone(finished.context_summary)
+        events = await store.list_events(run.id)
+        self.assertTrue(any(e.type is EventType.CONTEXT_SUMMARIZED and e.payload.get("ok") for e in events))
+        # A builder that never trims needs no summarizer.
+        self.assertIsNone(AgentOrchestrator(models=model, tools=BulkyTools(), store=store)._summarizer)
+
     async def test_retried_model_call_sends_identical_view(self) -> None:
         model = ScriptedModel(
             [call(i) for i in range(10)]
             + [RetryableModelError("temporary"), ModelResponse(content="done")]
         )
         orchestrator = AgentOrchestrator(
-            models=model, tools=BulkyTools(), store=InMemoryRunStore(), context=builder()
+            models=model, tools=BulkyTools(), store=InMemoryRunStore(), context=builder(),
+            summarizer=NO_SUMMARIZER,
         )
         run = await orchestrator.create_run(
             model_profile="small", messages=[SYSTEM, TASK], budget=RunBudget(max_steps=30)

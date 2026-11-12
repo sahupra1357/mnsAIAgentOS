@@ -190,6 +190,14 @@ class BudgetedContextBuilder:
     def policy(self) -> ContextPolicy:
         return self._policy
 
+    def summary_input_chars(self, model_profile: str) -> int | None:
+        """Transcript characters a summary request for this profile may hold (None: no window)."""
+
+        limits = self._lookup(model_profile)
+        if limits is None:
+            return None
+        return summary_input_chars({model_profile: limits}, self._policy)(model_profile)
+
     def _build_anchored(
         self,
         prepared: list[Message],
@@ -678,6 +686,19 @@ STRUCTURED_SUMMARY_INSTRUCTIONS = (
 )
 
 SUMMARY_STYLES = {"prose": SUMMARY_INSTRUCTIONS, "structured": STRUCTURED_SUMMARY_INSTRUCTIONS}
+
+
+class _NoSummarizer:
+    """The value of ``AgentOrchestrator(summarizer=NO_SUMMARIZER)``."""
+
+    def __repr__(self) -> str:
+        return "NO_SUMMARIZER"
+
+
+NO_SUMMARIZER = _NoSummarizer()
+"""Pass it as ``summarizer`` for an orchestrator that omits old turns without summarizing
+them (``[summarization] enabled = false``). Leaving ``summarizer`` out is not that: with a
+context builder that trims, the orchestrator then summarizes with a default summarizer."""
 
 
 class ContextSummarizer:

@@ -551,9 +551,12 @@ class OrchestratorMemoryTests(unittest.TestCase):
 
         run(scenario())
 
-    def test_off_by_default(self) -> None:
+    def test_recall_and_saving_are_on_unless_turned_off(self) -> None:
+        # A service composed without a config behaves like a configured one (MemoryConfig).
+        self.assertTrue(MemorySettings().recall and MemorySettings().auto_save)
+
         async def scenario() -> None:
-            memory = service()
+            memory = service(recall=False, auto_save=False)
             await memory.save("The deploy target is falcon-prod.")
             model = RoutingModel([say("ok")])
             store = InMemoryRunStore()

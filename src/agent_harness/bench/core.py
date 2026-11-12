@@ -27,6 +27,7 @@ from agent_harness.domain import (
     ToolExecutor,
     utc_now,
 )
+from agent_harness.orchestration.context import NO_SUMMARIZER
 from agent_harness.orchestration.orchestrator import AgentOrchestrator, OrchestratorSettings
 from agent_harness.persistence import InMemoryRunStore
 
@@ -106,6 +107,9 @@ class BenchContext:
     models: ModelResolver
     profile: str
     context: ContextBuilder | None = None
+    # Suites measure the loop and the trimming, one model call per step: no summary calls
+    # unless a caller passes a ContextSummarizer (the ``tasks`` suite builds the full app).
+    summarizer: Any = NO_SUMMARIZER
     settings: OrchestratorSettings | None = None
     budget: RunBudget = field(default_factory=lambda: RunBudget(max_steps=8, max_wall_seconds=300))
     telemetry: TelemetrySink | None = None
@@ -137,6 +141,7 @@ class BenchContext:
             store=store,
             settings=self.settings,
             context=self.context,
+            summarizer=self.summarizer,
             telemetry=self.telemetry,
             subagents=subagents,
         )

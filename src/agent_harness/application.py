@@ -43,6 +43,7 @@ from .orchestration.context import (
     ContextLimits,
     ContextPolicy,
     context_policy_from_config,
+    NO_SUMMARIZER,
     ContextSummarizer,
     limits_from_profiles,
     summary_input_chars,
@@ -352,7 +353,7 @@ def build_application(
                 if config.coding.enabled
                 else None
             ),
-            summarizer=summarizer,
+            summarizer=summarizer if summarizer is not None else NO_SUMMARIZER,
             compaction=ThresholdCompactionPolicy(context_policy,
                                                  trigger_ratio=config.summarization.trigger_ratio,
                                                  keep_ratio=config.summarization.keep_ratio),

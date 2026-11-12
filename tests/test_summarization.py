@@ -515,17 +515,23 @@ class ConfigTests(unittest.TestCase):
             )
             bad = root / "bad.toml"
             bad.write_text(MODEL + '[summarization]\nenabled = true\nprofile = "nope"\n', encoding="utf-8")
+            disabled = root / "off.toml"
+            disabled.write_text(MODEL + "[summarization]\nenabled = false\n", encoding="utf-8")
             parsed = load_config(enabled)
             plain_enabled = load_config(plain).summarization.enabled
             with mock.patch.dict(os.environ, HERMETIC):
-                off = build_application(config_path=plain, database_path=root / "a.sqlite3")
+                off = build_application(config_path=disabled, database_path=root / "a.sqlite3")
+                default = build_application(config_path=plain, database_path=root / "d.sqlite3")
                 on = build_application(config_path=enabled, database_path=root / "b.sqlite3")
                 with self.assertRaises(ConfigError):
                     build_application(config_path=bad, database_path=root / "c.sqlite3")
             summarizer = on.orchestrator._summarizer
             asyncio.run(off.close())
+            asyncio.run(default.close())
             asyncio.run(on.close())
-        self.assertFalse(plain_enabled)
+        # On in code: a config that says nothing summarizes; "enabled = false" opts out.
+        self.assertTrue(plain_enabled)
+        self.assertIsNotNone(default.orchestrator._summarizer)
         self.assertTrue(parsed.summarization.enabled)
         self.assertEqual(parsed.summarization.max_output_tokens, 256)
         self.assertIsNone(off.orchestrator._summarizer)

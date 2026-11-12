@@ -95,12 +95,13 @@ class ScopedNote:
 
 @dataclass(frozen=True, slots=True)
 class MemorySettings:
-    """``[memory]`` options of the scoped service (see ``MemoryConfig``)."""
+    """``[memory]`` options of the scoped service (see ``MemoryConfig``, whose defaults these
+    match: a service composed without a config recalls and saves like a configured one)."""
 
-    recall: bool = False
+    recall: bool = True
     recall_limit: int = 5
     recall_max_chars: int = 2_000
-    auto_save: bool = False
+    auto_save: bool = True
     auto_save_profile: str | None = None  # None: the run's own profile
     auto_save_max_notes: int = 4
     auto_save_max_output_tokens: int = 512
