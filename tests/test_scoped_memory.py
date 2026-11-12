@@ -119,6 +119,47 @@ class StoreLifecycleTests(unittest.TestCase):
 
         run(scenario())
 
+    def test_purge_deletes_what_was_forgotten_or_expired_long_enough_ago(self) -> None:
+        async def scenario() -> None:
+            store = SQLiteMemoryStore(":memory:")
+            other = store.scoped("user")
+            old = await store.put("Deploys went to condor-prod.")
+            recent = await store.put("The linter was flake8.")
+            expired = await other.put("The freeze ends on Friday.")
+            kept = await store.put("Deploys go to falcon-prod.")
+            await store.forget(old.id)
+            await store.forget(recent.id)
+            long_ago = (utc_now() - timedelta(days=90)).isoformat()
+            await store.set_metadata(old.id, {"forgotten_at": long_ago})
+            await other.set_metadata(expired.id, {"expires_at": long_ago})
+            cutoff = utc_now() - timedelta(days=30)
+            self.assertEqual(len(await store.purge(cutoff, dry_run=True)), 2)
+            self.assertIsNotNone(await store.get(old.id))  # a dry run deletes nothing
+            gone = await store.purge(cutoff)
+            self.assertEqual(sorted(gone), sorted([("default", old.id), ("user", expired.id)]))
+            self.assertIsNone(await store.get(old.id))
+            self.assertIsNone(await other.get(expired.id))
+            self.assertIsNotNone(await store.get(recent.id))  # forgotten, but not long enough ago
+            self.assertEqual([item.id for item in await store.list_items()], [kept.id])
+            self.assertEqual(await store.purge(cutoff), [])
+
+        run(scenario())
+
+    def test_saving_an_expired_note_again_makes_it_live(self) -> None:
+        async def scenario() -> None:
+            store = SQLiteMemoryStore(":memory:")
+            note = await store.put("The freeze ends on Friday.")
+            await store.set_metadata(note.id, {"expires_at": (utc_now() - timedelta(days=1)).isoformat()})
+            again = await store.put("The freeze ends on Friday.", {"kind": "fact"})
+            self.assertNotIn("expires_at", again.metadata)
+            self.assertEqual(len(await store.search("freeze Friday")), 1)
+            ahead = (utc_now() + timedelta(days=5)).isoformat()
+            await store.set_metadata(note.id, {"expires_at": ahead})
+            kept = await store.put("The freeze ends on Friday.", {"kind": "decision"})
+            self.assertEqual(kept.metadata["expires_at"], ahead)  # an expiry still ahead stays
+
+        run(scenario())
+
     def test_scoped_views_share_the_file_and_not_the_notes(self) -> None:
         async def scenario() -> None:
             store = SQLiteMemoryStore(":memory:")
@@ -134,6 +175,20 @@ class StoreLifecycleTests(unittest.TestCase):
 
 
 class SemanticLifecycleTests(unittest.TestCase):
+    def test_purge_removes_the_vectors_too(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                index = VectorIndex(Path(directory, "vectors.sqlite3"))
+                store = SemanticMemoryStore(SQLiteMemoryStore(":memory:"), embed, index, model="m")
+                note = await store.put("The freeze ends on Friday.")
+                self.assertEqual(len(await index.known(store.namespace, "m")), 1)
+                await store.set_metadata(note.id, {"expires_at": (utc_now() - timedelta(days=40)).isoformat()})
+                self.assertEqual(len(await store.purge(utc_now() - timedelta(days=30))), 1)
+                self.assertEqual(len(await index.known(store.namespace, "m")), 0)
+                self.assertIsNone(await store.get(note.id))
+
+        run(scenario())
+
     def test_forget_removes_the_vector_and_failed_embeddings_are_retried(self) -> None:
         async def scenario() -> None:
             failing = {"on": True}
@@ -344,6 +399,42 @@ class RecallTests(unittest.TestCase):
             self.assertIs(found["stored_data"], True)  # wrapped as data, without tainting the turn
             self.assertNotIn("untrusted", found)
             self.assertIs((await tools["memory_list"]({"scope": "project"}))["stored_data"], True)
+
+        run(scenario())
+
+    def test_many_preferences_do_not_crowd_out_the_note_the_message_is_about(self) -> None:
+        async def scenario() -> None:
+            memory = service(recall_limit=4)
+            for index in range(8):
+                await memory.save(f"Standing preference number {index}.", scope="user", kind="preference")
+            await memory.save("The deploy target of this project is falcon-prod.")
+            recalled = await memory.recall("Which deploy target do we use?")
+            self.assertEqual(len(recalled), 4)
+            # Preferences first; the match kept its place although eight preferences exist.
+            self.assertEqual([n.kind for n in recalled], ["preference", "preference", "preference", "fact"])
+            self.assertIn("falcon-prod", recalled[-1].item.text)
+            # With no match, the preferences take every place.
+            self.assertEqual(len(await memory.recall("Tell me about the weather today.")), 4)
+
+        run(scenario())
+
+    def test_a_note_can_expire_and_is_purged_through_the_service(self) -> None:
+        async def scenario() -> None:
+            memory = service()
+            tools = dict((spec.name, handler) for spec, handler in scoped_memory_tools(memory))
+            saved = await tools["memory_write"]({"text": "The release freeze is on.", "expires_in_days": 3})
+            self.assertEqual(saved["expires"], (utc_now() + timedelta(days=3)).date().isoformat())
+            (listed,) = (await tools["memory_list"]({}))["results"]
+            self.assertEqual(listed["expires"], saved["expires"])
+            updated = await memory.update(saved["id"], "The release freeze is on until Friday.")
+            assert updated is not None
+            self.assertIn("expires_at", updated.item.metadata)  # a correction keeps the expiry
+            with self.assertRaises(ValueError):
+                await memory.save("x y z", expires_in_days=0)
+            # The corrected note's predecessor was forgotten just now: not old enough to purge.
+            self.assertEqual(await memory.purge(utc_now() - timedelta(days=30)), 0)
+            self.assertEqual(await memory.purge(utc_now() + timedelta(days=4)), 2)
+            self.assertEqual(await memory.list_notes(include_forgotten=True), [])
 
         run(scenario())
 
@@ -635,6 +726,36 @@ class ApplicationTests(unittest.TestCase):
             self.assertIn("no notes", call("memory", "list", *base)[1])
             self.assertIn("[forgotten]", call("memory", "list", "--all", *base)[1])
             self.assertEqual(call("memory", "forget", "ffffffff", *base)[0], 1)
+
+    def test_cli_update_expiry_and_purge(self) -> None:
+        def call(*arguments: str) -> tuple[int, str]:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = cli.main(list(arguments))
+            return code, out.getvalue()
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict("os.environ", HERMETIC):
+            config = Path(directory, "models.toml")
+            config.write_text(CONFIG.format(database=Path(directory, "memory.sqlite3")))
+            base = ["--config", str(config), "--database", str(Path(directory, "runs.sqlite3"))]
+            code, out = call("memory", "add", "The linter is flake8.", *base)
+            note_id = out.split()[1]
+            code, out = call("memory", "update", note_id, "The linter is ruff.", *base)
+            self.assertEqual(code, 0, out)
+            self.assertIn("replacing " + note_id, out)
+            listing = call("memory", "list", *base)[1]
+            self.assertIn("The linter is ruff.", listing)
+            self.assertNotIn("flake8", listing)
+            self.assertEqual(call("memory", "update", "ffffffff", "x", *base)[0], 1)
+            code, out = call("memory", "add", "The freeze is on.", "--expires-in-days", "2", *base)
+            self.assertIn("expires ", out)
+            self.assertIn("[expires ", call("memory", "list", *base)[1])
+            # The replaced note was forgotten a moment ago: only "older than 0 days" reaches it.
+            self.assertIn("would delete 0 notes", call("memory", "purge", *base)[1])
+            self.assertIn("would delete 1 notes", call("memory", "purge", "--older-than-days", "0", *base)[1])
+            self.assertIn("flake8", call("memory", "list", "--all", *base)[1])
+            self.assertIn("deleted 1 notes", call("memory", "purge", "--older-than-days", "0", "--yes", *base)[1])
+            self.assertNotIn("flake8", call("memory", "list", "--all", *base)[1])
 
 
 if __name__ == "__main__":

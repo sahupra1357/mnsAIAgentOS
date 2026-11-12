@@ -226,6 +226,30 @@ class SQLiteMemoryStore:
                 raise
         return True
 
+    async def purge(self, before: datetime, *, dry_run: bool = False) -> list[tuple[str, str]]:
+        """Delete, in every namespace, the notes forgotten or expired before ``before``.
+
+        This is the only place a note's row is removed (``forget`` only marks it). Returns
+        the ``(namespace, id)`` of each note; with ``dry_run`` nothing is deleted.
+        """
+
+        async with self._lock:
+            rows = self._connection.execute("SELECT * FROM memory_items").fetchall()
+            gone = [(row["namespace"], row["id"]) for row in rows if purgeable(_item(row), before)]
+            if gone and not dry_run:
+                try:
+                    self._connection.execute("BEGIN IMMEDIATE")
+                    for _, item_id in gone:
+                        self._connection.execute("DELETE FROM memory_items WHERE id = ?", (item_id,))
+                        if self.full_text:
+                            self._connection.execute("DELETE FROM memory_fts WHERE item_id = ?", (item_id,))
+                    self._connection.execute("COMMIT")
+                except BaseException:
+                    if self._connection.in_transaction:
+                        self._connection.execute("ROLLBACK")
+                    raise
+        return gone
+
     async def export_items(self) -> list[tuple[str, MemoryItem]]:
         """Every note in every namespace, oldest first (for migration)."""
 
@@ -280,14 +304,32 @@ def is_live(item: MemoryItem, now: datetime | None = None) -> bool:
         return True
 
 
+def purgeable(item: MemoryItem, before: datetime) -> bool:
+    """Whether the note was forgotten, or expired, before ``before`` (so ``purge`` removes it)."""
+
+    for key in (FORGOTTEN_AT, EXPIRES_AT):
+        stamp = item.metadata.get(key)
+        if not stamp:
+            continue
+        try:
+            if datetime.fromisoformat(stamp) < before:
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
 def merge_metadata(stored: Mapping[str, str], new: Mapping[str, str], *, now: datetime) -> dict[str, str]:
-    """Metadata of a note saved again: new values win, tags are joined, and it is live again.
+    """Metadata of a note saved again: new values win, tags are joined, and it is live again
+    (an expiry that has passed is dropped, like the forgotten mark; one still ahead is kept).
 
     Unchanged metadata is returned as it was (no ``updated_at``), so replaying the same
     write (the tool runtime's idempotency) changes nothing.
     """
 
     merged = {key: value for key, value in stored.items() if key not in (FORGOTTEN_AT, "superseded_by")}
+    if EXPIRES_AT in merged and not is_live(MemoryItem(id="", text="", metadata={EXPIRES_AT: merged[EXPIRES_AT]}), now):
+        del merged[EXPIRES_AT]
     for key, value in new.items():
         if key == "tags" and merged.get("tags"):
             tags = [tag for tag in merged["tags"].split(",") if tag]

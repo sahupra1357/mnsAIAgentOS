@@ -315,7 +315,18 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("text")
     add.add_argument("--scope", choices=["project", "user"], default="project")
     add.add_argument("--kind", choices=["preference", "fact", "convention", "decision"], default="fact")
+    add.add_argument("--expires-in-days", type=int, default=None,
+                     help="the note stops being found after this many days (default: never)")
     _common_runtime_arguments(add)
+    update = memory_sub.add_parser("update", help="correct a note: the new text replaces it")
+    update.add_argument("id", help="a note id or its unique start")
+    update.add_argument("text")
+    _common_runtime_arguments(update)
+    purge = memory_sub.add_parser(
+        "purge", help="delete notes forgotten or expired more than N days ago (dry run by default)")
+    purge.add_argument("--older-than-days", type=int, default=30)
+    purge.add_argument("--yes", action="store_true", help="actually delete (otherwise only report)")
+    _common_runtime_arguments(purge)
     forget = memory_sub.add_parser("forget", help="stop using a note (it is marked, not deleted)")
     forget.add_argument("id", help="a note id or its unique start")
     _common_runtime_arguments(forget)
@@ -991,7 +1002,7 @@ async def _memory_command(args: argparse.Namespace) -> int:
             await store.close()
         print(f"embedded {embedded} notes")
         return 0
-    if args.memory_command in {"where", "list", "add", "forget"}:
+    if args.memory_command in {"where", "list", "add", "forget", "update", "purge"}:
         return await _scoped_memory_command(args)
     source = _open_memory_spec(args.source, args.config)
     try:
@@ -1012,7 +1023,7 @@ async def _memory_command(args: argparse.Namespace) -> int:
 
 
 async def _scoped_memory_command(args: argparse.Namespace) -> int:
-    """``memory where|list|add|forget``: the user's view of the scoped notes."""
+    """``memory where|list|add|forget|update|purge``: the user's view of the scoped notes."""
 
     from ..application import memory_service_from_config
     from ..knowledge.scoped_memory import _resolve_id
@@ -1033,8 +1044,27 @@ async def _scoped_memory_command(args: argparse.Namespace) -> int:
                   f"auto_save: {config.memory.auto_save}")
             return 0
         if args.memory_command == "add":
-            note = await service.save(args.text, scope=args.scope, kind=args.kind, source="user")
-            print(f"saved {note.item.id[:12]} ({note.scope})")
+            note = await service.save(args.text, scope=args.scope, kind=args.kind, source="user",
+                                      expires_in_days=args.expires_in_days)
+            until = note.item.metadata.get("expires_at", "")[:10]
+            print(f"saved {note.item.id[:12]} ({note.scope})" + (f", expires {until}" if until else ""))
+            return 0
+        if args.memory_command == "update":
+            note_id = await _resolve_id(service, args.id)
+            updated = await service.update(note_id, args.text) if note_id else None
+            if updated is None:
+                print(f"no note has the id {args.id!r} (or several start with it)", file=sys.stderr)
+                return 1
+            print(f"updated {updated.item.id[:12]} ({updated.scope}), replacing {str(note_id)[:12]}")
+            return 0
+        if args.memory_command == "purge":
+            if args.older_than_days < 0:
+                raise ValueError("--older-than-days must not be negative")
+            cutoff = utc_now() - timedelta(days=args.older_than_days)
+            count = await service.purge(cutoff, dry_run=not args.yes)
+            verb = "deleted" if args.yes else "would delete"
+            print(f"{verb} {count} notes forgotten or expired before {cutoff.date()}"
+                  + ("" if args.yes or not count else " (re-run with --yes to delete them)"))
             return 0
         if args.memory_command == "forget":
             note_id = await _resolve_id(service, args.id)
@@ -1045,8 +1075,10 @@ async def _scoped_memory_command(args: argparse.Namespace) -> int:
             return 0
         notes = await service.list_notes(scope=args.scope, limit=args.limit, include_forgotten=args.all)
         for note in notes:
+            expires = note.item.metadata.get("expires_at", "")[:10]
             flags = "".join(f" [{flag}]" for flag, on in (
-                ("forgotten", "forgotten_at" in note.item.metadata), ("tainted", note.tainted)) if on)
+                ("forgotten", "forgotten_at" in note.item.metadata), ("tainted", note.tainted),
+                (f"expires {expires}", bool(expires))) if on)
             saved = note.item.created_at.date().isoformat() if note.item.created_at else "-"
             print(f"{note.item.id[:12]}  {note.scope:<7} {note.kind:<10} {saved}{flags}  {note.item.text}")
         if not notes:
@@ -1067,11 +1099,16 @@ async def _gc_command(args: argparse.Namespace) -> int:
         if args.yes:
             for store, artifact_id in unreferenced:
                 await store.delete(artifact_id)
+        # Notes are only marked when forgotten, and hidden when expired: this is where they go.
+        purge_notes = getattr(app.memory, "purge", None)
+        notes = len(await purge_notes(cutoff, dry_run=not args.yes)) if purge_notes is not None else 0
     verb = "deleted" if args.yes else "would delete"
     print(f"{verb} {len(ids)} finished runs last updated before {cutoff.date()}")
+    if notes:
+        print(f"{verb} {notes} memory notes forgotten or expired before {cutoff.date()}")
     if unreferenced:
         print(f"{verb} {len(unreferenced)} artifacts and file snapshots that no remaining run references")
-    if (ids or unreferenced) and not args.yes:
+    if (ids or unreferenced or notes) and not args.yes:
         print("re-run with --yes to delete them (events, queue, steering, idempotency rows, "
               "artifacts)", file=sys.stderr)
     return 0

@@ -212,6 +212,15 @@ class SemanticMemoryStore:
             await self._index.delete(self.namespace, item_id)
         return done
 
+    async def purge(self, before: datetime, *, dry_run: bool = False) -> list[tuple[str, str]]:
+        """Delete notes forgotten or expired before ``before``, and their vectors."""
+
+        gone: list[tuple[str, str]] = await self._inner.purge(before, dry_run=dry_run)
+        if not dry_run:
+            for namespace, item_id in gone:
+                await self._index.delete(namespace, item_id)
+        return gone
+
     async def _embed_now(self, texts: list[str]) -> list[list[float]]:
         """Embed with the short deadline; after a failure, fail at once for a while."""
 

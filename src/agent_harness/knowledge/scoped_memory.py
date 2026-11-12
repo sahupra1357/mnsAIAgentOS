@@ -27,7 +27,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from agent_harness.domain import (
@@ -42,7 +42,7 @@ from agent_harness.domain import (
     Usage,
     utc_now,
 )
-from agent_harness.knowledge.memory import MAX_MEMORY_CHARS
+from agent_harness.knowledge.memory import EXPIRES_AT, MAX_MEMORY_CHARS
 from agent_harness.orchestration.runcontext import RunScope, current_run_scope
 
 logger = logging.getLogger(__name__)
@@ -156,12 +156,19 @@ class MemoryService:
 
     async def save(
         self, text: str, *, scope: str = "project", kind: str = "fact", tags: Sequence[str] = (),
-        who: RunScope | None = None, source: str = "model",
+        who: RunScope | None = None, source: str = "model", expires_in_days: int | None = None,
     ) -> ScopedNote:
+        """``expires_in_days``: the note stops being found after that many days (a freeze,
+        a temporary address); ``purge`` later deletes it. None: it does not expire."""
+
         who = who or current_run_scope()
         if kind not in KINDS:
             kind = "fact"
         metadata = {"kind": kind, "scope": scope, "source": source}
+        if expires_in_days is not None:
+            if expires_in_days < 1:
+                raise ValueError("expires_in_days must be at least 1")
+            metadata[EXPIRES_AT] = (utc_now() + timedelta(days=expires_in_days)).isoformat()
         if tags:
             metadata["tags"] = ",".join(str(tag) for tag in tags)
         if who.run_id:
@@ -224,7 +231,7 @@ class MemoryService:
             return None
         name, view, old = found
         kept = {key: value for key, value in old.metadata.items()
-                if key in ("kind", "scope", "tags", "source", "source_user")}
+                if key in ("kind", "scope", "tags", "source", "source_user", EXPIRES_AT)}
         kept["supersedes"] = old.id
         if who.run_id:
             kept["source_run"] = who.run_id
@@ -234,6 +241,12 @@ class MemoryService:
         if item.id != old.id:
             await view.forget(old.id, superseded_by=item.id)
         return ScopedNote(name, item)
+
+    async def purge(self, before: datetime, *, dry_run: bool = False) -> int:
+        """Delete notes forgotten or expired before ``before`` (every scope and owner of the
+        store); returns how many. ``forget`` and an expiry only hide a note."""
+
+        return len(await self._store.purge(before, dry_run=dry_run))
 
     # -- recall -----------------------------------------------------------------------
 
@@ -246,30 +259,44 @@ class MemoryService:
         who = who or current_run_scope()
         settings = self.settings
         skip = set(exclude)
-        chosen: list[ScopedNote] = []
+        seen: set[str] = set()
+
+        def fresh(candidates: Sequence[ScopedNote]) -> list[ScopedNote]:
+            kept = []
+            for note in candidates:
+                if not (note.tainted or note.item.id in skip or note.item.id in seen):
+                    seen.add(note.item.id)
+                    kept.append(note)
+            return kept
+
         user_view = self._store.scoped(self.namespace("user", who))
-        for item in await user_view.list_items(50):
-            if item.metadata.get("kind") == "preference":
-                chosen.append(ScopedNote("user", item))
+        preferences = fresh([ScopedNote("user", item) for item in await user_view.list_items(50)
+                             if item.metadata.get("kind") == "preference"])
+        matches: list[ScopedNote] = []
         wanted = distinctive_terms(query)
         if wanted:
             need = min(2, len(wanted))
-            for note in await self.search(query, limit=settings.recall_limit * 2, who=who):
-                tags = note.item.metadata.get("tags", "")
-                if len(wanted & distinctive_terms(note.item.text + " " + tags)) >= need:
-                    chosen.append(note)
-        notes: list[ScopedNote] = []
-        seen: set[str] = set()
+            matches = fresh([
+                note for note in await self.search(query, limit=settings.recall_limit * 2, who=who)
+                if len(wanted & distinctive_terms(
+                    note.item.text + " " + note.item.metadata.get("tags", ""))) >= need])
+        # Standing preferences may take half of the places (the newest ones); the notes that
+        # match this message get the rest, so a long list of preferences cannot crowd out
+        # the one note the message is about. Places nobody claims go to the other group.
+        limit = settings.recall_limit
+        share = max(1, limit // 2)
+        first, late = preferences[:share], preferences[share:]
+        matched = matches[: limit - len(first)]
+        late = late[: limit - len(first) - len(matched)]
+        chosen: list[ScopedNote] = []
         used = 0
-        for note in chosen:
-            if note.tainted or note.item.id in skip or note.item.id in seen:
-                continue
-            if len(notes) >= settings.recall_limit or used + len(note.item.text) > settings.recall_max_chars:
+        for note in (*first, *matched, *late):  # in this order when the characters run out
+            if used + len(note.item.text) > settings.recall_max_chars:
                 break
-            seen.add(note.item.id)
             used += len(note.item.text)
-            notes.append(note)
-        return notes
+            chosen.append(note)
+        picked = {note.item.id for note in chosen}
+        return [note for note in (*preferences, *matches) if note.item.id in picked]
 
     # -- saving at the end of a turn --------------------------------------------------
 
@@ -432,7 +459,8 @@ SCOPED_WRITE_SPEC = ToolSpec(
         "to remember something, when you learn a durable fact about the project (a command "
         "that works, where something lives, a convention), or when a decision is made. One "
         "self-contained sentence per note. scope \"user\": true of the user in every project; "
-        "\"project\" (default): true of this project. Never store secrets."
+        "\"project\" (default): true of this project. Give expires_in_days for something that is "
+        "only true for a while (a freeze, a temporary address). Never store secrets."
     ),
     input_schema={
         "type": "object",
@@ -441,6 +469,7 @@ SCOPED_WRITE_SPEC = ToolSpec(
             "tags": {"type": "array", "items": {"type": "string", "maxLength": 64}, "maxItems": 8},
             "scope": _SCOPE,
             "kind": {"type": "string", "enum": list(KINDS)},
+            "expires_in_days": {"type": "integer", "minimum": 1, "maximum": 3650},
         },
         "required": ["text"],
         "additionalProperties": False,
@@ -508,6 +537,8 @@ def _note(note: ScopedNote) -> JsonObject:
         note.item.created_at.isoformat() if note.item.created_at else None)
     if saved:
         entry["saved"] = saved[:10]
+    if note.item.metadata.get(EXPIRES_AT):
+        entry["expires"] = note.item.metadata[EXPIRES_AT][:10]
     return entry
 
 
@@ -539,8 +570,12 @@ def scoped_memory_tools(service: MemoryService) -> list[tuple[ToolSpec, Any]]:
         note = await service.save(
             str(arguments["text"]), scope=str(arguments.get("scope", "project")),
             kind=str(arguments.get("kind", "fact")), tags=[str(tag) for tag in arguments.get("tags", [])],
+            expires_in_days=int(arguments["expires_in_days"]) if "expires_in_days" in arguments else None,
         )
-        return {"id": note.item.id, "saved": True, "scope": note.scope}
+        saved: JsonObject = {"id": note.item.id, "saved": True, "scope": note.scope}
+        if EXPIRES_AT in note.item.metadata:
+            saved["expires"] = note.item.metadata[EXPIRES_AT][:10]
+        return saved
 
     async def memory_update(arguments: JsonObject) -> JsonObject:
         note_id = await _resolve_id(service, str(arguments["id"]))

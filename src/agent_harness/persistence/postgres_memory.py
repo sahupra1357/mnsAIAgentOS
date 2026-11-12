@@ -12,10 +12,12 @@ import asyncio
 import json
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from agent_harness.domain import MemoryItem, utc_now
 from agent_harness.knowledge.memory import (
+    purgeable,
     FORGOTTEN_AT,
     MAX_MEMORY_CHARS,
     is_live,
@@ -146,6 +148,21 @@ class PostgresMemoryStore:
 
         row = await self._run(work)
         return _item(row) if row is not None else None
+
+    async def purge(self, before: datetime, *, dry_run: bool = False) -> list[tuple[str, str]]:
+        """Delete, in every namespace, the notes forgotten or expired before ``before``."""
+
+        def work() -> list[tuple[str, str]]:
+            rows = self._connection.execute(
+                "SELECT id, namespace, text, metadata_json, created_at FROM memory_items").fetchall()
+            gone = [(str(row["namespace"]), str(row["id"])) for row in rows if purgeable(_item(row), before)]
+            if not dry_run:
+                for _, item_id in gone:
+                    self._connection.execute("DELETE FROM memory_items WHERE id = %s", (item_id,))
+            return gone
+
+        found: list[tuple[str, str]] = await self._run(work)
+        return found
 
     async def forget(self, item_id: str, *, superseded_by: str | None = None) -> bool:
         """Mark a note forgotten (search skips it; nothing is deleted)."""
