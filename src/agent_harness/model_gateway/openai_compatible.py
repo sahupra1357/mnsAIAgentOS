@@ -485,7 +485,12 @@ class OpenAICompatibleClient:
                     "type": "function",
                     "function": {
                         "name": call.name,
-                        "arguments": json.dumps(call.arguments, separators=(",", ":")),
+                        # Sorted keys: a run reloaded from the store has its arguments in
+                        # sorted order, and the same call must be sent as the same text in
+                        # every request, or the server's prompt cache is lost from this
+                        # message on (seen live 2026-11-11: each new process re-read the
+                        # conversation from the first tool call).
+                        "arguments": json.dumps(call.arguments, separators=(",", ":"), sort_keys=True),
                     },
                 }
                 for call in message.tool_calls

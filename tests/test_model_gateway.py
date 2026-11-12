@@ -276,6 +276,33 @@ class OpenAICompatibleClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(transport.calls), 1)
 
 
+class StableToolCallTextTests(unittest.TestCase):
+    """Live run, 2026-11-11: a run reloaded from the store has its tool-call arguments in sorted
+    key order, so the first request of every new process sent an earlier call as different
+    text, and the server's prompt cache was lost from that message on."""
+
+    def test_the_same_call_is_the_same_text_before_and_after_a_reload(self) -> None:
+        import json
+
+        from agent_harness.domain import ToolCall
+        from agent_harness.model_gateway.ollama import _native_message
+
+        as_the_model_wrote_it = {"kind": "preference", "scope": "user", "text": "short answers",
+                                 "tags": ["style"], "nested": {"b": 1, "a": 2}}
+        as_reloaded = json.loads(json.dumps(as_the_model_wrote_it, sort_keys=True))
+        self.assertNotEqual(list(as_the_model_wrote_it), list(as_reloaded))  # the key order differs
+
+        def message(arguments: dict[str, object]) -> Message:
+            return Message(role=Role.ASSISTANT, content="", tool_calls=(ToolCall("c1", "memory_write", arguments),))
+
+        first = OpenAICompatibleClient._message_payload(message(as_the_model_wrote_it))
+        later = OpenAICompatibleClient._message_payload(message(as_reloaded))
+        self.assertEqual(json.dumps(first), json.dumps(later))
+        native_first = _native_message(message(as_the_model_wrote_it))
+        native_later = _native_message(message(as_reloaded))
+        self.assertEqual(json.dumps(native_first), json.dumps(native_later))
+
+
 class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolves_and_caches_configured_client(self) -> None:
         transport = FakeTransport([])
