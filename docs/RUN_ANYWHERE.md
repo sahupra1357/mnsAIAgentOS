@@ -71,8 +71,12 @@ Every run of a project is kept in its `runs.sqlite3`. Three ways to build on the
   - **What is never linked:** a message with no such terms, and a run that left nothing
     (no answer, task list, summary or files).
   - **Turning it off:** `--no-link` for one run or chat.
+  - **How the model sees it:** as reference data in a message of its own before yours, never as
+    part of the system prompt. If guardrails are on it is scanned like tool output. A run that
+    read external content (web pages, tool servers) says so in its handoff.
 - **`previous_runs` tool.** The model can list recent runs, search them (`query`), or read one
-  run's handoff (`run_id`, 8+ characters).
+  run's handoff (`run_id`, 8+ characters). Reading the handoff of a run that read external
+  content counts as untrusted output (taint mode asks before the next side-effect tool).
 - **Resuming a whole conversation.**
   - `agent-harness chat --continue` reopens the conversation used last.
   - `chat --resume RUN_ID` reopens a given one.

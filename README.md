@@ -1238,7 +1238,7 @@ compose setup with Postgres, the API, and two workers.
 | **Quotas** | `[[quotas]]` limits runs, tokens, and cost per tenant over 24 hours, plus concurrent runs. `[user_quotas]` adds the same limits per end user. Admission **reserves** budget atomically and caps the run's budget to the grant. The orchestrator re-checks at every step. Refusals are HTTP 429 or CLI exit 2. |
 | **Rate limits** | `[api] rate_limit_per_minute` / `rate_limit_burst` per API key: HTTP 429 with `Retry-After`. |
 | **Deadlines** | `[interaction] approval_timeout_seconds` / `question_timeout_seconds` with `on_timeout`: workers (or `agent-harness expire`) resolve paused runs that waited too long. |
-| **Memory** | `[memory] backend = "sqlite"` (FTS5) or `"postgres"` (full-text search). `agent-harness memory migrate --from sqlite:memory.sqlite3` copies every note. |
+| **Memory** | `[memory] backend = "sqlite"` (FTS5) or `"postgres"` (full-text search). `agent-harness memory migrate --from sqlite:memory.sqlite3` copies every note. `memory list / add / update / forget` look at and correct notes; `memory purge` (and `gc`) delete notes forgotten or expired long enough ago. |
 | **Sandboxing** | `[coding.docker] mode = "per_run"` keeps one warm container per run for coding commands. Sandboxed Python tools run in the run's container. The container is removed when the run ends. |
 | **Secrets** | Credential fields accept `NAME`, `env:NAME`, or `file:/run/secrets/name`. |
 | **Egress** | With `[network] restrict_egress = true`, HTTP tools, web search, and MCP over HTTP may only reach `allowed_hosts`. |
@@ -1317,12 +1317,12 @@ records a smaller cap and the request is rebuilt to fit, the same way as after a
 overflow. A failed count is ignored, so the estimate and overflow recovery still apply.
 It costs one or two extra local HTTP calls on large turns.
 
-**Summarization (optional).** Instead of dropping the omitted turns, a model can summarize
-them:
+**Summarization (on by default).** Instead of dropping the omitted turns, a model summarizes
+them. `enabled = false` turns it off (omitted turns are then dropped with a note):
 
 ```toml
 [summarization]
-enabled = true
+enabled = true            # the default
 profile = "fast"          # profile or route that writes summaries; empty = the run's own
 max_output_tokens = 1024  # keep well below the smallest context_window
 max_input_chars = 0       # 0 = size the transcript from the summarizing profile's window

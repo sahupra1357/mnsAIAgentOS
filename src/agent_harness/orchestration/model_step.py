@@ -116,34 +116,35 @@ async def _perform_model_turn(
     try:
         client = self._models.resolve(run.model_profile)
         specs = self._specs_for(run)
-        view = self._build_view(run, specs, events)
+        # What this request carries beside the view, never stored: hook context, and the
+        # plan, the task list and a low budget as one status message (the stored
+        # [Plan]/[Budget] messages are the turns of the conversation; the status is where
+        # the model reads the current state). They are made before the view, so the
+        # view leaves room for them and counts them (they used to be added uncounted).
+        hook_context = (Message(role=Role.USER, content="[Context from hooks]\n" + pre_model.context)
+                        if pre_model is not None and pre_model.context else None)
+        status = "" if _continuing_answer(run.messages) else state_block(run, self._clock())
+        status_block = Message(role=Role.USER, content=status) if status else None
+        reserve = tuple(m for m in (hook_context, status_block) if m is not None)
+        view = self._build_view(run, specs, events, reserve)
         if self._summarizer is not None and self._compaction.should_compact(run, view):
             span = self._compaction_range(run, view)
             if span is not None and await self._summarize(run, events, view, span=span):
-                view = self._build_view(run, specs, events)
+                view = self._build_view(run, specs, events, reserve)
         def make_request(view: ContextView) -> ModelRequest:
             request_messages = view.messages
-            if pre_model is not None and pre_model.context:
-                # Ephemeral: appended to this request only, so history (and the
-                # cached prompt prefix) is unchanged.
-                request_messages += (
-                    Message(role=Role.USER, content="[Context from hooks]\n" + pre_model.context),
-                )
-            # The plan, the task list and a low budget as one status message, rendered
-            # from the run's records for this request and never stored. The stored
-            # [Plan]/[Budget] messages are the turns of the conversation; this is where
-            # the model reads the current state.
-            if not _continuing_answer(run.messages):
-                status = state_block(run, self._clock())
-                if status:
-                    block = Message(role=Role.USER, content=status)
-                    last = request_messages[-1] if request_messages else None
-                    if last is not None and last.role is Role.USER and not written_by_user(last):
-                        # Before a harness directive (a plan step, "answer now"), so
-                        # the directive stays the last thing the model reads.
-                        request_messages = (*request_messages[:-1], block, request_messages[-1])
-                    else:
-                        request_messages += (block,)
+            if hook_context is not None:
+                # Appended to this request only, so history (and the cached prompt
+                # prefix) is unchanged.
+                request_messages += (hook_context,)
+            if status_block is not None:
+                last = request_messages[-1] if request_messages else None
+                if last is not None and last.role is Role.USER and not written_by_user(last):
+                    # Before a harness directive (a plan step, "answer now"), so
+                    # the directive stays the last thing the model reads.
+                    request_messages = (*request_messages[:-1], status_block, request_messages[-1])
+                else:
+                    request_messages += (status_block,)
             return ModelRequest(
                 messages=request_messages,
                 tools=specs,
@@ -161,7 +162,7 @@ async def _perform_model_turn(
 
         request = make_request(view)
         if await self._cap_by_server_count(run, events, client, request, view, specs):
-            view = self._build_view(run, specs, events)
+            view = self._build_view(run, specs, events, reserve)
             request = make_request(view)
         streamed = parallel_guard is None and self._should_stream(client)
         if parallel_guard is not None:
@@ -219,10 +220,14 @@ async def _perform_model_turn(
 
 
 def _build_view(
-    self: AgentOrchestrator, run: RunRecord, specs: Sequence[ToolSpec], events: Sequence[RunEvent] = ()
+    self: AgentOrchestrator, run: RunRecord, specs: Sequence[ToolSpec], events: Sequence[RunEvent] = (),
+    reserve: Sequence[Message] = (),
 ) -> ContextView:
+    """``reserve``: messages the request will carry after the view (see ``build``); only
+    builders with ``native_caps`` leave room for them."""
+
     if getattr(self._context, "native_caps", False):
-        return self._native_view(run, specs, events, _overflow_cap(events, run.model_profile))
+        return self._native_view(run, specs, events, _overflow_cap(events, run.model_profile), reserve)
     if run.context_summary is None:
         # Builders without summary support never see the keyword.
         view = self._context.build(run.messages, specs, model_profile=run.model_profile)
@@ -241,14 +246,15 @@ def _build_view(
 
 def _native_view(
     self: AgentOrchestrator, run: RunRecord, specs: Sequence[ToolSpec], events: Sequence[RunEvent],
-    cap: int | None,
+    cap: int | None, reserve: Sequence[Message] = (),
 ) -> ContextView:
     """A view from a builder that applies the cap and the estimate scale itself."""
 
     build: Any = self._context.build
+    extra: dict[str, Any] = {"reserve": reserve} if reserve else {}  # older native builders have no such keyword
     return build(
         run.messages, specs, model_profile=run.model_profile, summary=run.context_summary,
-        max_input_tokens=cap, scale=_estimate_scale(events, run.model_profile),
+        max_input_tokens=cap, scale=_estimate_scale(events, run.model_profile), **extra,
     )
 
 
@@ -480,36 +486,60 @@ async def _summarize_range(
     if hook is not None and hook.decision == "deny":
         await self._record_summary(run, events, {**payload, "ok": False, "error": "denied by pre_compact hook"})
         return False
-    request = self._summarizer.request(
-        previous.content if previous is not None else None,
-        run.messages[start:target],
-        profile=profile,
-        metadata={"run_id": run.id, "step": str(run.step_count), "purpose": "summary"},
-        task=_summary_task(run.messages),
-    )
+    # One turn can be longer than a request holds (many large parallel results). Its
+    # messages are then summarized in several requests, each continuing the last; the
+    # stored summary and ``covers`` change only once the whole range is done, because a
+    # summary may not end between a call and its results.
+    split = getattr(self._summarizer, "pieces", None)
+    pieces = split(run.messages[start:target], profile=profile) if split is not None else [
+        run.messages[start:target]]
+    content = previous.content if previous is not None else None
+    used: list[Any] = []  # each request's usage (one, unless the range was split)
+    truncated = 0
+    measure = getattr(self._summarizer, "truncated_chars", None)
     try:
-        response = await self._models.resolve(profile).complete(request)
-        content = response.content.strip()
-        if not content:
-            raise ValueError("the model returned an empty summary")
+        for piece in pieces:
+            task = _summary_task(run.messages)
+            if measure is not None:
+                truncated += measure(content, piece, profile=profile, task=task)
+            request = self._summarizer.request(
+                content, piece, profile=profile, task=task,
+                metadata={"run_id": run.id, "step": str(run.step_count), "purpose": "summary"},
+            )
+            response = await self._models.resolve(profile).complete(request)
+            self._charge(run, response.usage)
+            used.append(response.usage)
+            content = response.content.strip()
+            if not content:
+                raise ValueError("the model returned an empty summary")
     except Exception as exc:
         await self._record_summary(run, events, {**payload, "ok": False, "error": _safe_error(exc)})
         return False
-    self._charge(run, response.usage)
+    assert content is not None
     run.context_summary = ContextSummary(covers=target, content=content)
-    await self._record_summary(
-        run,
-        events,
-        {
-            **payload,
-            "ok": True,
-            "content": content,
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
-            "cost_usd": response.usage.cost_usd,
-        },
-    )
+    done: dict[str, Any] = {
+        **payload,
+        "ok": True,
+        "content": content,
+        "input_tokens": _total([u.input_tokens for u in used]),
+        "output_tokens": _total([u.output_tokens for u in used]),
+        "cost_usd": _total([u.cost_usd for u in used]),
+    }
+    if len(pieces) > 1:
+        done["requests"] = len(pieces)
+    if truncated:
+        # Characters of the transcript the summarizer never saw (it says so in the text
+        # it was given); the tool-call ledger still lists every call of the range.
+        done["truncated_chars"] = truncated
+    await self._record_summary(run, events, done)
     return True
+
+
+def _total(values: Sequence[Any]) -> Any:
+    """The sum of the reported values; None when none was reported."""
+
+    known = [value for value in values if value is not None]
+    return sum(known) if known else None
 
 
 async def _record_summary(
@@ -635,6 +665,8 @@ async def _accept_model_response(
         }
         if view.summarized_messages:
             payload["context"]["summarized_messages"] = view.summarized_messages
+        if view.shortened_request_chars:
+            payload["context"]["shortened_request_chars"] = view.shortened_request_chars
     if response.metadata.get("guardrail"):
         payload["guardrail"] = response.metadata["guardrail"]
     ratio = self._calibrated_ratio(run, events, view, response)

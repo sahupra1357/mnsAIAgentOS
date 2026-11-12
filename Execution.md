@@ -312,7 +312,7 @@ provider-specific format; all supported servers use OpenAI-compatible `/chat/com
   chunks (85% → 60% of the input budget) and keeps the system prompt, the first user
   message, and tool-call pairs. If the newest user-written message falls inside the
   summary or the omitted range, its text follows the summary as
-  `[Latest user message - answer this one]`. With `[summarization] enabled = true`, the omitted turns are
+  `[Latest user message - answer this one]`. With `[summarization]` on (the code default; `enabled = false` turns it off), the omitted turns are
   replaced by a persisted summary (`CONTEXT_SUMMARIZED`) instead of being dropped. If even
   the minimum view does not fit, the run fails with `ContextWindowExceededError`.
 - **Context overflow:** the view is built from an estimate, so a server can still reject

@@ -504,9 +504,13 @@ class SummarizationConfig:
     Applies only to profiles with ``context_window``. ``profile`` (a profile or
     route name) writes the summaries; empty means the run's own profile.
     ``max_input_chars = 0`` sizes the transcript from that profile's window.
+
+    On in code: history that is dropped without a summary is the reported symptom, so a
+    config that says nothing gets summaries. ``enabled = false`` is for a benchmark or a
+    deployment that will not spend the model call.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     profile: str = ""
     max_output_tokens: int = 1024
     max_input_chars: int = 0

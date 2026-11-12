@@ -8,6 +8,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -15,6 +16,7 @@ from unittest import mock
 import agent_harness.cli.main as cli
 from agent_harness.application import build_application, memory_postgres_url
 from agent_harness.config.loader import ConfigError, load_config
+from agent_harness.domain import utc_now
 from agent_harness.knowledge.memory import SQLiteMemoryStore
 
 POSTGRES_DSN = os.environ.get("AGENT_HARNESS_TEST_POSTGRES_DSN")
@@ -97,6 +99,35 @@ class MemoryContract:
                 self.assertEqual(len(await store.search("freeze Friday")), 1)
             finally:
                 await store.close()
+        asyncio.run(body())
+
+    def test_purge_deletes_notes_forgotten_or_expired_before_the_cutoff(self) -> None:
+        async def body() -> None:
+            store = self.make("purge")
+            other = store.scoped("purge-user")
+            try:
+                old = await store.put("Deploys went to condor-prod.")
+                recent = await store.put("The linter was flake8.")
+                expired = await other.put("The freeze ends on Friday.")
+                kept = await store.put("Deploys go to falcon-prod.")
+                await store.forget(old.id)
+                await store.forget(recent.id)
+                long_ago = (utc_now() - timedelta(days=90)).isoformat()
+                await store.set_metadata(old.id, {"forgotten_at": long_ago})
+                await other.set_metadata(expired.id, {"expires_at": long_ago})
+                cutoff = utc_now() - timedelta(days=30)
+                self.assertEqual(len(await store.purge(cutoff, dry_run=True)), 2)
+                self.assertIsNotNone(await store.get(old.id))
+                self.assertEqual(sorted(await store.purge(cutoff)),
+                                 sorted([("purge", old.id), ("purge-user", expired.id)]))
+                self.assertIsNone(await store.get(old.id))
+                self.assertIsNone(await other.get(expired.id))
+                self.assertIsNotNone(await store.get(recent.id))
+                self.assertEqual([item.id for item in await store.list_items()], [kept.id])
+                self.assertEqual(list(await store.purge(cutoff)), [])
+            finally:
+                await store.close()
+
         asyncio.run(body())
 
     def test_scoped_views_share_the_store_and_not_the_notes(self) -> None:

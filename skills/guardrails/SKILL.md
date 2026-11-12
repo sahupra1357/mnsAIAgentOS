@@ -23,8 +23,13 @@ Read `docs/GUARDRAILS.md` first: it is the user-facing contract.
 
 ## Invariants
 - Off by default: with `guardrails=None` nothing changes (no canary, no streaming change).
-- A refusal is a `GUARDRAIL_REFUSED` *state* event plus an assistant message; `_has_accepted_final_response`
-  accepts it, and `_advance` completes the run without output-schema checks or planning.
+- A refusal is a `GUARDRAIL_REFUSED` *state* event plus an assistant message; the phase becomes `answer`
+  (`phase_after`), and `_advance_answer` completes the run without output-schema checks or planning.
+- Stored text the harness adds as a message (recalled `[Memory]` notes, an `[Earlier run` handoff) is
+  scanned with `check_tool_output` when it is added (`guardrail_decided` with `stored: true`) and is not
+  input: `_guarded_input` skips it, so a quoted e-mail address in a note cannot get the user's turn refused.
+- Taint for prompts is per turn (`_tainted`); taint for what a run *stores* (memory notes, its handoff) is
+  the whole run (`_holds_untrusted`). `<stored-data>` wraps notes and handoffs a tool returns without tainting.
 - `GUARDRAIL_DECIDED` is an annotation event and **never contains matched text**: only detector, category,
   action, count, and location.
 - `guarded_through` makes input checks (and guard-model calls) happen once per message across resumes.

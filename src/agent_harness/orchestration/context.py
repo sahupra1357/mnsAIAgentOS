@@ -121,6 +121,12 @@ class FullHistoryContextBuilder:
 
 LimitsLookup = Callable[[str], ContextLimits | None]
 
+# When the pinned head (system messages and the user's first message) is larger than this
+# share of the input budget, the first message's middle is left out of the view.
+_HEAD_SHARE = 0.75
+_MIN_REQUEST_CHARS = 400
+_REQUEST_MARKER_ROOM = 200
+
 # The newest turn's tool outputs are never shortened below this (characters).
 _MIN_FITTED_OUTPUT = 200
 
@@ -153,11 +159,18 @@ class BudgetedContextBuilder:
         summary: ContextSummary | None = None,
         max_input_tokens: int | None = None,
         scale: float = 1.0,
+        reserve: Sequence[Message] = (),
     ) -> ContextView:
         """``max_input_tokens`` (a cap a provider overflow set) and ``scale`` (how far the
         estimate is under the provider's count) are passed by the orchestrator to builders
         with ``native_caps`` (this one); other builders' views are capped afterwards with
-        :func:`fit_to_tokens`."""
+        :func:`fit_to_tokens`.
+
+        ``reserve``: messages the caller adds to this request after the view (hook context,
+        the status block). They are not part of the view, but the view leaves room for
+        them and counts them in ``estimated_tokens``. They do not move the trim points
+        (the high and low water marks), so a status block that comes and goes does not
+        change which turns are kept."""
 
         limits = self._lookup(model_profile)
         if limits is None:
@@ -168,7 +181,7 @@ class BudgetedContextBuilder:
             scaled = replace(self._policy, chars_per_token=self._policy.chars_per_token / scale)
             return BudgetedContextBuilder(self._lookup, policy=scaled).build(
                 messages, tools, model_profile=model_profile, summary=summary,
-                max_input_tokens=max_input_tokens)
+                max_input_tokens=max_input_tokens, reserve=reserve)
 
         prepared: list[Message] = []
         trimmed_outputs = 0
@@ -178,7 +191,7 @@ class BudgetedContextBuilder:
             prepared.append(shortened)
 
         return self._build_anchored(prepared, tools, limits, summary, trimmed_outputs,
-                                    model_profile, max_input_tokens)
+                                    model_profile, max_input_tokens, reserve)
 
     @property
     def native_caps(self) -> bool:
@@ -190,6 +203,14 @@ class BudgetedContextBuilder:
     def policy(self) -> ContextPolicy:
         return self._policy
 
+    def summary_input_chars(self, model_profile: str) -> int | None:
+        """Transcript characters a summary request for this profile may hold (None: no window)."""
+
+        limits = self._lookup(model_profile)
+        if limits is None:
+            return None
+        return summary_input_chars({model_profile: limits}, self._policy)(model_profile)
+
     def _build_anchored(
         self,
         prepared: list[Message],
@@ -199,6 +220,7 @@ class BudgetedContextBuilder:
         trimmed_outputs: int,
         model_profile: str,
         max_input_tokens: int | None,
+        reserve: Sequence[Message] = (),
     ) -> ContextView:
         """The Phase 26 layout: pinned head, one state message, the latest request, kept turns.
 
@@ -224,8 +246,20 @@ class BudgetedContextBuilder:
         budget = limits.context_window - limits.output_reserve_tokens - tools_tokens
         if max_input_tokens is not None:
             budget = min(budget, max_input_tokens - tools_tokens)
+        reserve_tokens = sum(self._message_tokens(message, reasoning) for message in reserve)
+        # What the view itself may take: the budget less what the caller appends.
+        hard = budget - reserve_tokens
         head_tokens = sum(self._message_tokens(message, reasoning) for message in head)
-        if budget <= 0 or head_tokens > budget:
+        shortened_request = 0
+        if hard > 0 and head_tokens > hard * _HEAD_SHARE:
+            # The request alone is larger than the window (a pasted file, a long brief):
+            # its middle is left out of the view rather than failing the run. The system
+            # messages are never shortened; if they do not fit, nothing can be sent.
+            head, shortened_request = self._fit_head(head, math.floor(hard * _HEAD_SHARE), reasoning)
+            if shortened_request:
+                prepared = head + prepared[head_end:]
+                head_tokens = sum(self._message_tokens(message, reasoning) for message in head)
+        if hard <= 0 or head_tokens > hard:
             raise ContextWindowExceededError(
                 f"context window {limits.context_window} cannot hold the output reserve, "
                 f"tool definitions, and pinned instructions for profile {model_profile!r}"
@@ -300,27 +334,27 @@ class BudgetedContextBuilder:
         kept_tokens = sum(unit_tokens[cut:])
         extra, extra_tokens = state(cut)
         while fixed - (self._text_tokens(summary_text) if summary_text else 0) + extra_tokens \
-                + kept_tokens > budget and cut < len(units) - 1:
+                + kept_tokens > hard and cut < len(units) - 1:
             kept_tokens -= unit_tokens[cut]
             cut += 1
             extra, extra_tokens = state(cut)
         total = head_tokens + extra_tokens + kept_tokens
         for detail in (1, 0):
-            if total <= budget:
+            if total <= hard:
                 break
             extra, extra_tokens = state(cut, detail)
             total = head_tokens + extra_tokens + kept_tokens
-        if total > budget and units:
-            newest, fitted_outputs = self._fit_newest_unit(units[-1], total - budget, reasoning)
+        if total > hard and units:
+            newest, fitted_outputs = self._fit_newest_unit(units[-1], total - hard, reasoning)
             if fitted_outputs:
                 units[-1] = newest
                 trimmed_outputs += fitted_outputs
                 kept_tokens = sum(unit_tokens[cut:-1]) + sum(
                     self._message_tokens(m, reasoning) for m in newest)
                 total = head_tokens + extra_tokens + kept_tokens
-        if total > budget:
+        if total > hard:
             raise ContextWindowExceededError(
-                f"estimated {total} tokens exceed the {budget}-token input budget for "
+                f"estimated {total} tokens exceed the {hard}-token input budget for "
                 f"profile {model_profile!r} even after omitting older turns"
             )
 
@@ -328,14 +362,39 @@ class BudgetedContextBuilder:
         kept = [message for unit in units[cut:] for message in unit]
         return ContextView(
             messages=tuple(head + extra + kept),
-            estimated_tokens=total,
+            estimated_tokens=total + reserve_tokens,
             omitted_messages=omitted,
             trimmed_tool_outputs=trimmed_outputs,
             summarized_messages=rest_start - head_end,
             omitted_from=rest_start if omitted else None,
             omitted_through=rest_start + omitted if omitted else None,
             budget_tokens=budget,
+            shortened_request_chars=shortened_request,
         )
+
+    def _fit_head(
+        self, head: list[Message], room_tokens: int, reasoning: bool
+    ) -> tuple[list[Message], int]:
+        """The head with the user's first message cut to fit ``room_tokens``; (head, characters cut).
+
+        Nothing is cut when there is no user-written message in the head, or when the
+        other head messages leave it less than ``_MIN_REQUEST_CHARS``.
+        """
+
+        index = next((i for i in range(len(head) - 1, -1, -1) if written_by_user(head[i])), None)
+        if index is None:
+            return head, 0
+        request = head[index]
+        others = sum(self._message_tokens(m, reasoning) for i, m in enumerate(head) if i != index)
+        fixed = self._message_tokens(replace(request, content=""), reasoning)  # overhead, images
+        keep = math.floor((room_tokens - others - fixed) * self._policy.chars_per_token) - _REQUEST_MARKER_ROOM
+        if keep < _MIN_REQUEST_CHARS or keep >= len(request.content):
+            return head, 0
+        cut = len(request.content) - keep
+        marker = (f"\n[... {cut} characters of this message are not shown: it is longer than the "
+                  "model's context window. Ask the user for the part you need, or to put it in a file ...]\n")
+        content = request.content[: keep // 2] + marker + request.content[-(keep - keep // 2):]
+        return [*head[:index], replace(request, content=content), *head[index + 1:]], cut
 
     def unit_tokens(self, unit: Sequence[Message], reasoning: bool = False) -> int:
         """The estimate for one unit as the view would show it (tool outputs capped)."""
@@ -536,7 +595,11 @@ ORCHESTRATOR_NOTE_PREFIXES = ("[Plan]", "[Budget]", "[Memory]")
 # Every user-role message the harness writes starts with one of these. The chat format has
 # no role for them: a directive that starts a turn (a plan step, "answer now") has to be a
 # user message, or the next request would hold two assistant messages in a row.
-HARNESS_PREFIXES = (*ORCHESTRATOR_NOTE_PREFIXES, "[Context from hooks]", "[Working state", "[State -")
+HARNESS_PREFIXES = (*ORCHESTRATOR_NOTE_PREFIXES, "[Context from hooks]", "[Working state", "[State -",
+                    "[Earlier run ")
+# Of those, the ones that carry stored text into a conversation (recalled notes, an earlier
+# run's handoff). They are data: scanned like tool output, never checked as the user's input.
+STORED_DATA_PREFIXES = ("[Memory]", "[Earlier run ")
 
 
 def written_by_user(message: Message) -> bool:
@@ -570,12 +633,19 @@ def pinned_head_end(messages: Sequence[Message]) -> int:
 def _pinned_head_end(messages: Sequence[Message]) -> int:
     """Index after the leading system messages and the first user message."""
 
+    first_user: int | None = None
+    end = len(messages)
     for index, message in enumerate(messages):
         if message.role is Role.USER:
-            return index + 1
+            if written_by_user(message):
+                return index + 1
+            if first_user is None:
+                first_user = index
+            continue  # a harness message before the request (recalled notes): pinned with it
         if message.role is not Role.SYSTEM:
-            return index
-    return len(messages)
+            end = index
+            break
+    return first_user + 1 if first_user is not None else end
 
 
 def _group_units(messages: Sequence[Message]) -> list[list[Message]]:
@@ -673,6 +743,19 @@ STRUCTURED_SUMMARY_INSTRUCTIONS = (
 SUMMARY_STYLES = {"prose": SUMMARY_INSTRUCTIONS, "structured": STRUCTURED_SUMMARY_INSTRUCTIONS}
 
 
+class _NoSummarizer:
+    """The value of ``AgentOrchestrator(summarizer=NO_SUMMARIZER)``."""
+
+    def __repr__(self) -> str:
+        return "NO_SUMMARIZER"
+
+
+NO_SUMMARIZER = _NoSummarizer()
+"""Pass it as ``summarizer`` for an orchestrator that omits old turns without summarizing
+them (``[summarization] enabled = false``). Leaving ``summarizer`` out is not that: with a
+context builder that trims, the orchestrator then summarizes with a default summarizer."""
+
+
 class ContextSummarizer:
     """Build the model request that summarizes omitted history.
 
@@ -722,8 +805,7 @@ class ContextSummarizer:
         unit longer than the room is still one part (its messages are capped as before).
         """
 
-        room = max(1_000, self.input_limit(profile) - self._max_message_chars
-                   - self.max_output_tokens * 4 - 200)
+        room = self._room(profile)
         parts: list[tuple[int, int]] = []
         part_start, size, index = start, 0, start
         for unit in _group_units(messages[start:end]):
@@ -749,17 +831,7 @@ class ContextSummarizer:
         """``task`` is the user's request, which stays in the context unsummarized: without
         it the summarizer cannot tell what matters and reports that there is no goal."""
 
-        transcript = "\n\n".join(self._render(message) for message in messages)
-        parts = []
-        if task:
-            parts.append(
-                "The user's request (kept in full elsewhere; do not repeat it, use it to "
-                "decide what matters):\n" + _shorten(task.strip(), self._max_message_chars)
-            )
-        if previous:
-            parts.append("Previous summary:\n" + previous.strip())
-        parts.append("New messages:\n" + transcript)
-        text = _shorten("\n\n".join(parts), self.input_limit(profile))
+        text, _ = self._compose(previous, messages, profile, task)
         return ModelRequest(
             messages=(
                 Message(role=Role.SYSTEM, content=self._instructions),
@@ -771,6 +843,62 @@ class ContextSummarizer:
             # otherwise spend the output allowance thinking and return an empty summary.
             extra_body=dict(self.parameters) or None,
         )
+
+    def truncated_chars(
+        self, previous: str | None, messages: Sequence[Message], *, profile: str, task: str | None = None,
+    ) -> int:
+        """Characters of the transcript that :meth:`request` would leave out for these arguments."""
+
+        return self._compose(previous, messages, profile, task)[1]
+
+    def _compose(
+        self, previous: str | None, messages: Sequence[Message], profile: str, task: str | None
+    ) -> tuple[str, int]:
+        """The request text and how many transcript characters did not fit.
+
+        Only the transcript is ever shortened: the user's request and the previous summary
+        (everything known about the turns before) are sent whole.
+        """
+
+        parts = []
+        if task:
+            parts.append(
+                "The user's request (kept in full elsewhere; do not repeat it, use it to "
+                "decide what matters):\n" + _shorten(task.strip(), self._max_message_chars)
+            )
+        if previous:
+            parts.append("Previous summary:\n" + previous.strip())
+        transcript = "\n\n".join(self._render(message) for message in messages)
+        used = sum(len(part) + 2 for part in parts) + len("New messages:\n")
+        room = max(1_000, self.input_limit(profile) - used)
+        parts.append("New messages:\n" + _shorten(transcript, room))
+        return "\n\n".join(parts), max(0, len(transcript) - room)
+
+    def pieces(self, messages: Sequence[Message], *, profile: str) -> list[list[Message]]:
+        """``messages`` in parts whose transcripts each fit one request (usually one part).
+
+        Unlike :meth:`chunks` a part may end inside a turn, so the caller stores nothing
+        until every part is summarized.
+        """
+
+        room = self._room(profile)
+        parts: list[list[Message]] = [[]]
+        size = 0
+        for message in messages:
+            length = len(self._render(message)) + 2
+            if parts[-1] and size + length > room:
+                parts.append([])
+                size = 0
+            parts[-1].append(message)
+            size += length
+        return parts
+
+    def _room(self, profile: str) -> int:
+        """Transcript characters per request: room is left for the user's request, the
+        previous summary and the labels."""
+
+        return max(1_000, self.input_limit(profile) - self._max_message_chars
+                   - self.max_output_tokens * 4 - 200)
 
     def _render(self, message: Message) -> str:
         label = message.role.value.upper()

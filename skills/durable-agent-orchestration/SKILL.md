@@ -96,10 +96,12 @@ usage is added only by `_charge()` / `_charge_child()`; and the class's methods 
 
 - **Phase.** `RunRecord.phase` is written by `_checkpoint` from `derive_phase(run, events)`
   (`orchestration/state.py`): `queued`, `model`, `model_request`, `tools`, `answer`,
-  `awaiting_input`, `done`. `_advance` picks its branch from the stored
-  phase; an empty phase (older runs) falls back to the predicates. `verify_phase` raises when the
+  `awaiting_input`, `done`. `_advance` dispatches on the stored phase to `_advance_tools`,
+  `_advance_answer` or `_advance_model` (Phase 41: the predicate chain it fell through to is
+  gone). A run without a phase (stored before Phase 28), or with one its newest message does not
+  support, is derived once (`_loop_phase`, with a warning). `verify_phase` raises when the
   stored and derived phase differ: it catches a code path that changes `run.messages` without a
-  checkpoint. Scenario runs check the final phase.
+  checkpoint. Scripted eval scenarios run with it on.
 - **Events.** `ANNOTATION_EVENTS` and `STATE_EVENTS` in `domain.py` list every `EventType`; a new
   type must be added to one (a test fails otherwise).
 - **Orphans.** A budget stop answers each unrun call ("Not run: ...",
@@ -117,3 +119,21 @@ usage is added only by `_charge()` / `_charge_child()`; and the class's methods 
 - **Not done:** the phase is computed by one function, not set at each transition; only the
   state helpers left `orchestrator.py` (FIX-22 is partial).
 - Tests: `tests/test_run_phase.py`.
+
+## Phase 41: the rest of the audit
+
+- **Annotations that add a message.** `annotation_adds_message(event)` (`state.py`) is the one
+  rule for "this annotation put a message into the conversation" (`message: true`, a
+  session-start hook's context, a stop hook's "continue"). `phase_after` and
+  `derive_message_skeleton` both use it; `phase_after` no longer reads the message shape for it.
+  A new annotation that adds a message must be covered there.
+- **Retries.** A model request that is asked again checks tokens, cost and the tenant quota (not
+  the step limit: the step is already counted) and applies a queued steer first.
+- **Read batches.** `_prefetch_parallel` is bounded by `_wall_seconds_left(run)`.
+- **A cancelled model call.** `StdlibHttpTransport` closes the socket of a cancelled call or an
+  abandoned stream (`_Exchange`): the thread stops waiting and the server stops generating.
+- **Stores.** `InMemoryRunStore` has `run_state` and `list_events_since` like the SQL stores.
+  Archived messages have no retention of their own: they are deleted with their run by `gc`.
+- **Handoffs.** A linked handoff is a user-role message starting `[Earlier run ` (a harness
+  prefix), scanned as tool output. `RunHandoff.tainted` records that the run held untrusted
+  output; `previous_runs` showing such a run sets `untrusted`, and every result sets `stored_data`.

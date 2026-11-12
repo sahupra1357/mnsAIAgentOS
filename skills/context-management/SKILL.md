@@ -119,7 +119,8 @@ prefix, so the context view must keep its prefix stable:
   inconsistent is persisted.
 - **Rewind:** if `covers` is past the rewind cut, the summary is cleared
   (`summary_cleared` in `REWOUND`).
-- **Config:** `[summarization] enabled, profile, max_output_tokens, max_input_chars`.
+- **Config:** `[summarization] enabled, profile, max_output_tokens, max_input_chars`. `enabled` is
+  **on in code** since Phase 41 (it stays an option: `enabled = false` for a benchmark).
   An invalid profile is a `ConfigError`, raised before any store is opened.
 - **Size:** keep `max_output_tokens` well below the smallest window. The summary sits in
   the pinned head; if the head no longer fits, the run fails with
@@ -192,3 +193,28 @@ then a short note without the header, so it never costs more than the turns it s
   `max_identical_tool_calls`, a read-only call gets the earlier result with a note;
   `max_refused_repeats` still ends a loop.
 - `ContextView.budget_tokens` is new (default `None`). Tests: `tests/test_working_context.py`.
+
+## Phase 41: what a request really carries
+
+- **Summaries without a config.** `AgentOrchestrator(context=<a builder that trims>)` with no
+  `summarizer` builds a default `ContextSummarizer`, sized from the builder's windows
+  (`BudgetedContextBuilder.summary_input_chars`). Pass `summarizer=NO_SUMMARIZER` for omission
+  only; `build_application` does that for `[summarization] enabled = false`, and `BenchContext`
+  does it by default (suites measure the loop, one model call per step).
+- **Reserve.** Hook context and the status block are appended to a request after the view. They
+  are now built first and passed to `build(..., reserve=...)`: the view leaves room for them and
+  `estimated_tokens` includes them. They do **not** move the high and low water marks, so a
+  status block that comes and goes does not change which turns are kept (the cached prefix).
+- **A request larger than the window.** When the pinned head takes more than 75% of the input
+  budget, the middle of the user's first message is left out of the view, with a marker
+  (`ContextView.shortened_request_chars`, `context.shortened_request_chars` in `model_responded`).
+  The stored message is unchanged. System messages are never shortened: if they do not fit, the
+  run still fails with `ContextWindowExceededError`.
+- **The pinned head** ends after the first message the user wrote. A harness message before it
+  (`[Memory]` notes, an `[Earlier run` handoff) is pinned with it.
+- **Summarizer input.** Only the transcript is shortened; the user's request and the previous
+  summary are sent whole. What did not fit is recorded as `truncated_chars` in
+  `context_summarized`. One turn too long for a request (many large parallel results) is
+  summarized in several requests (`ContextSummarizer.pieces`, `requests` in the event); the stored
+  summary and `covers` change only when the whole range is done.
+- Tests: `tests/test_context.py` (`ReserveAndHeadTests`), `tests/test_summarization.py`.

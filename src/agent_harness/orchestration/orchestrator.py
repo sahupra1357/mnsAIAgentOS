@@ -38,6 +38,7 @@ from agent_harness.orchestration.context import (
     ContextPolicy,
     ContextSummarizer,
     FullHistoryContextBuilder,
+    _NoSummarizer,
 )
 from agent_harness.orchestration.date_note import date_note, last_noted_date, with_date_note
 from agent_harness.orchestration.planning import (
@@ -133,9 +134,9 @@ from agent_harness.orchestration.state import (  # noqa: F401
     _estimate_scale,
     _find_tool_call,
     _flagged_untrusted,
+    _holds_untrusted,
     _guarded_input,
-    _has_accepted_final_response,
-    _has_pending_model_attempt,
+    _answer_kind,
     _has_pending_tool_request,
     _identical_prior_calls,
     _latest_state_event,
@@ -149,7 +150,6 @@ from agent_harness.orchestration.state import (  # noqa: F401
     _recall_payload,
     _refused,
     _restore_action,
-    _result_submitted,
     _retry_details,
     _rewind_count,
     _safe_error,
@@ -336,7 +336,7 @@ class AgentOrchestrator:
         guardrails: Guardrails | None = None,
         system_context: Callable[[], SystemContext] | None = None,
         snapshots: FileSnapshotter | None = None,
-        summarizer: ContextSummarizer | None = None,
+        summarizer: ContextSummarizer | _NoSummarizer | None = None,
         tool_loading: ToolLoadingPolicy | None = None,
         planning: PlanningPolicy | None = None,
         quotas: Mapping[str, Quota] | None = None,
@@ -396,7 +396,13 @@ class AgentOrchestrator:
         self._tool_guard_events: dict[tuple[str, str], list[RunEvent]] = {}
         self._system_context = system_context
         self._snapshots = snapshots
-        self._summarizer = summarizer
+        # Left out with a builder that trims: summarize with a default summarizer sized from
+        # the builder's windows, so history is not dropped unsummarized. NO_SUMMARIZER opts out.
+        if isinstance(summarizer, _NoSummarizer):
+            summarizer = None
+        elif summarizer is None and getattr(self._context, "native_caps", False):
+            summarizer = ContextSummarizer(input_chars=getattr(self._context, "summary_input_chars", None))
+        self._summarizer: ContextSummarizer | None = summarizer
         # When and what to summarize (only used with a summarizer); see orchestration/compaction.py.
         # The default summarizes before anything is omitted (DefaultCompactionPolicy, which
         # summarized only what a view had already dropped, is no longer the default).
@@ -548,22 +554,29 @@ class AgentOrchestrator:
             head = next((i for i, m in enumerate(initial_messages) if m.role is not Role.SYSTEM),
                         len(initial_messages))
             initial_messages.insert(head, Message(role=Role.SYSTEM, content=PLANNER_INSTRUCTIONS))
+        guarded: list[Any] = []  # guard decisions on stored text, recorded once the run exists
         found = None
         if link and parent_run_id is None and not enqueue and not any(m.role is Role.ASSISTANT for m in initial_messages):
             found = await self._find_link(tenant, initial_messages)
             if found is not None:
                 first_user = next((i for i, m in enumerate(initial_messages) if m.role is Role.USER),
                                   len(initial_messages))
-                initial_messages.insert(first_user, Message(role=Role.SYSTEM, content=linked_block(found)))
+                # A user-role harness message, like recalled notes: what an earlier run
+                # wrote is data, and a system message is merged into the system prompt.
+                initial_messages.insert(first_user, Message(
+                    role=Role.USER, content=self._stored_text(linked_block(found), guarded)))
         recalled: list[Any] = []
         if (self._memory is not None and self._memory.settings.recall and parent_run_id is None
                 and not any(m.role is Role.ASSISTANT for m in initial_messages)):
             recalled = await self._recall(
                 initial_messages, RunScope(run_id=identifier, tenant=tenant, end_user=end_user))
             if recalled:
+                # A user-role harness message, as for a follow-up: notes are stored data, and
+                # a system message would be merged into the system prompt by the adapters.
                 first_user = next((i for i, m in enumerate(initial_messages) if m.role is Role.USER),
                                   len(initial_messages))
-                initial_messages.insert(first_user, Message(role=Role.SYSTEM, content=recall_block(recalled)))
+                initial_messages.insert(first_user, Message(
+                    role=Role.USER, content=self._stored_text(recall_block(recalled), guarded)))
         if self._guardrails is not None and self._guardrails.uses_canary:
             _add_canary(initial_messages)
         if self._settings.current_date_note and parent_run_id is None:
@@ -659,7 +672,22 @@ class AgentOrchestrator:
             await self._checkpoint(run, [event], RunEvent(
                 run_id=run.id, type=EventType.MEMORY_RECALLED, payload=_recall_payload(recalled),
                 created_at=now))
+        guard_events = [e for decision in guarded
+                        for e in self._guard_events(run, decision, extra={"stored": True})]
+        if guard_events:
+            await self._checkpoint(run, [event], *guard_events)
         return run
+
+    def _stored_text(self, text: str, decisions: list[Any]) -> str:
+        """Stored text on its way into a conversation (recalled notes, an earlier run's
+        handoff), scanned as tool output is: injected instructions and hidden characters are
+        handled by ``[guardrails.tools]``. The decision is appended to ``decisions``."""
+
+        if self._guardrails is None:
+            return text
+        decision = self._guardrails.check_tool_output(text)
+        decisions.append(decision)
+        return str(decision.text)
 
     async def _recall(
         self, messages: Sequence[Message], who: RunScope, exclude: Sequence[str] = ()
@@ -826,8 +854,7 @@ class AgentOrchestrator:
                 start = index
                 break
         who = RunScope(run_id=run.id, tenant=run.tenant, end_user=run.end_user,
-                       tainted=any(m.role is Role.TOOL and m.content.startswith("<untrusted-tool-output")
-                                   for m in run.messages[start:]))
+                       tainted=_holds_untrusted(run.messages))
         try:
             notes, usage = await memory.save_from_turn(
                 self._models, run.messages[start:], profile=run.model_profile, who=who)
@@ -977,7 +1004,7 @@ class AgentOrchestrator:
 
         CURRENT_RUN_SCOPE.set(RunScope(
             run_id=run.id, tenant=run.tenant, end_user=run.end_user,
-            tainted=_tainted(run.messages), top_level=run.parent_run_id is None))
+            tainted=_holds_untrusted(run.messages), top_level=run.parent_run_id is None))
 
     async def _session_start_hook(self, run: RunRecord, events: list[RunEvent]) -> bool:
         """Run session_start hooks; False if a hook blocked the run."""
@@ -1065,44 +1092,72 @@ class AgentOrchestrator:
         return stored, list(await self._store.list_events(run.id))
 
     async def _advance(self, run: RunRecord, events: list[RunEvent]) -> bool:
-        """Perform one boundary-to-boundary transition; return True once settled."""
+        """Perform one boundary-to-boundary transition; return True once settled.
 
-        # The phase stored with the last checkpoint says which branch applies; without it
-        # (a run stored before Phase 28) each predicate is evaluated.
-        phase = run.phase
-        if phase not in (PHASE_TOOLS, PHASE_ANSWER, PHASE_MODEL, PHASE_MODEL_REQUEST):
-            phase = ""
+        The phase stored with the last checkpoint is the dispatch key: each phase has one
+        branch, and no branch is reached by testing the history for the others.
+        """
+
         if self._settings.verify_phase and run.phase:
             derived = derive_phase(run, events)
             if derived != run.phase:
                 raise AssertionError(f"run {run.id}: stored phase {run.phase!r}, derived {derived!r}")
+        phase = self._loop_phase(run, events)
+        if phase == PHASE_TOOLS:
+            return await self._advance_tools(run, events)
+        if phase == PHASE_ANSWER:
+            return await self._advance_answer(run, events)
+        return await self._advance_model(run, events, retry=phase == PHASE_MODEL_REQUEST)
+
+    def _loop_phase(self, run: RunRecord, events: Sequence[RunEvent]) -> str:
+        """The stored phase, or the derived one for a run that has none the loop can act on.
+
+        That is a run stored before the phase existed, or one saved outside ``_checkpoint``
+        with a phase its messages no longer support (reported, then derived once: the next
+        checkpoint stores a phase from the transition table again).
+        """
+
+        phase = run.phase
+        if phase == PHASE_TOOLS and _pending_tool_calls(run.messages):
+            return phase
+        if phase == PHASE_ANSWER and _answer_kind(run) is not None:
+            return phase
+        if phase in (PHASE_MODEL, PHASE_MODEL_REQUEST):
+            return phase
+        derived = derive_phase(run, events)
+        if phase in (PHASE_TOOLS, PHASE_ANSWER):
+            _LOG.warning("run %s: stored phase %r does not match its messages; continuing as %r",
+                         run.id, phase, derived)
+        return derived
+
+    async def _advance_tools(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Phase ``tools``: run the calls of the latest reply that have no result yet."""
+
+        pending = _pending_tool_calls(run.messages)
         budget_reason = self._budget_reason(run)
-        pending = _pending_tool_calls(run.messages) if phase in ("", PHASE_TOOLS) else ()
-        if budget_reason is not None and pending and budget_reason != "step limit":
+        if budget_reason is not None and budget_reason != "step limit":
             await self._exhaust_budget(run, events, budget_reason)
             return True
+        if await self._refuse_oversized_turn(run, events, pending):
+            return run.status.is_terminal
+        self._set_run_scope(run)  # tools started from here inherit it (taint as of this reply)
+        prefetched = await self._prefetch_parallel(run, events, pending)
+        for index, call in enumerate(pending):
+            if self._wall_limit_reached(run):
+                await self._exhaust_budget(run, events, "wall-clock limit")
+                return True
+            settled = await self._between_tool_calls(run, events, pending[index:], first=index == 0)
+            if settled is not None:
+                return settled
+            await self._execute_tool(run, events, call, prefetched=prefetched.get(call.id))
+            if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
+                return True
+        return False
 
-        if pending:
-            if await self._refuse_oversized_turn(run, events, pending):
-                return run.status.is_terminal
-            self._set_run_scope(run)  # tools started from here inherit it (taint as of this reply)
-            prefetched = await self._prefetch_parallel(run, events, pending)
-            for index, call in enumerate(pending):
-                if self._wall_limit_reached(run):
-                    await self._exhaust_budget(run, events, "wall-clock limit")
-                    return True
-                settled = await self._between_tool_calls(run, events, pending[index:], first=index == 0)
-                if settled is not None:
-                    return settled
-                await self._execute_tool(run, events, call, prefetched=prefetched.get(call.id))
-                if run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal:
-                    return True
-            return False
+    async def _advance_answer(self, run: RunRecord, events: list[RunEvent]) -> bool:
+        """Phase ``answer``: check the reply (or the submitted result) and finish the turn."""
 
-        if phase in (PHASE_MODEL, PHASE_MODEL_REQUEST):
-            return await self._advance_model(run, events, retry=phase == PHASE_MODEL_REQUEST)
-
-        if run.output_schema is not None and _result_submitted(run, events):
+        if _answer_kind(run) == "result":
             # A valid submit_result ends the run without another model turn,
             # unless a steer or stop hook adds a message for the model.
             if await self._apply_steers(run, events):
@@ -1112,37 +1167,42 @@ class AgentOrchestrator:
             await self._complete(run, events)
             return True
 
-        if _has_accepted_final_response(run.messages, events):
-            # A steer that arrived while the model was answering reopens the turn.
-            if await self._apply_steers(run, events):
-                return False
-            if _refused(events):
-                await self._complete(run, events)  # a guardrail refusal ends the turn as it is
-                return True
-            retried = await self._retry_empty_cut_off(run, events)
-            if retried is not None:
-                return retried
-            if await self._continue_cut_answer(run, events):
-                return False
-            if run.output_schema is not None and run.output is None:
-                if await self._check_final_output(run, events):
-                    return run.status.is_terminal
-            if run.planning and await self._plan_on_final(run, events):
-                return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
-            if await self._stop_hook_continues(run, events):
-                return False
-            await self._complete(run, events, answer_truncated=_answer_cut_off(events))
+        # A steer that arrived while the model was answering reopens the turn.
+        if await self._apply_steers(run, events):
+            return False
+        if _refused(events):
+            await self._complete(run, events)  # a guardrail refusal ends the turn as it is
             return True
-
-        return await self._advance_model(run, events, retry=_has_pending_model_attempt(events, run.step_count))
+        retried = await self._retry_empty_cut_off(run, events)
+        if retried is not None:
+            return retried
+        if await self._continue_cut_answer(run, events):
+            return False
+        if run.output_schema is not None and run.output is None:
+            if await self._check_final_output(run, events):
+                return run.status.is_terminal
+        if run.planning and await self._plan_on_final(run, events):
+            return run.status is RunStatus.AWAITING_INPUT or run.status.is_terminal
+        if await self._stop_hook_continues(run, events):
+            return False
+        await self._complete(run, events, answer_truncated=_answer_cut_off(events))
+        return True
 
     async def _advance_model(self, run: RunRecord, events: list[RunEvent], *, retry: bool) -> bool:
         """The model-turn transitions: an unfinished attempt is repeated, or a new turn starts."""
 
         if retry:
-            if self._wall_limit_reached(run):
-                await self._exhaust_budget(run, events, "wall-clock limit")
+            # The step is already counted, so the step limit does not apply to asking again;
+            # every other limit does (a retry used to check the wall clock only, so a run
+            # past its token, cost or tenant budget kept calling the model).
+            reason = self._budget_reason(run)
+            if reason in (None, "step limit"):
+                reason = await self._quota_reason(run)
+            if reason is not None:
+                await self._exhaust_budget(run, events, reason)
                 return True
+            if not _continuing_answer(run.messages) and await self._apply_steers(run, events):
+                return False  # the user wrote meanwhile: a new turn that includes the message
             await self._perform_model_turn(run, events)
             return run.status.is_terminal
 
@@ -1628,10 +1688,13 @@ class AgentOrchestrator:
                 added, RunScope(run_id=run.id, tenant=run.tenant, end_user=run.end_user), exclude=shown)
             if recalled:
                 # Its own message before the user's, so the request stays the latest message.
-                added.insert(0, Message(role=Role.USER, content=recall_block(recalled)))
+                checked: list[Any] = []
+                added.insert(0, Message(role=Role.USER, content=self._stored_text(recall_block(recalled), checked)))
                 recall_events.append(RunEvent(
                     run_id=run.id, type=EventType.MEMORY_RECALLED, step=run.step_count, created_at=now,
                     payload={**_recall_payload(recalled), "message": True}))
+                recall_events += [e for decision in checked
+                                  for e in self._guard_events(run, decision, extra={"stored": True})]
         run.status = RunStatus.RUNNING
         run.completed_at = None
         run.error = None
@@ -2047,6 +2110,13 @@ class AgentOrchestrator:
         if run.started_at is None:
             return False
         return (self._clock() - run.started_at).total_seconds() >= run.budget.max_wall_seconds
+
+    def _wall_seconds_left(self, run: RunRecord) -> float | None:
+        """Seconds until the run's wall-clock limit (0 when it has passed); None before it started."""
+
+        if run.started_at is None:
+            return None
+        return max(0.0, run.budget.max_wall_seconds - (self._clock() - run.started_at).total_seconds())
 
     async def _checkpoint(
         self, run: RunRecord, event_log: list[RunEvent], *events: RunEvent

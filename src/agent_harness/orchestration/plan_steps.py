@@ -91,6 +91,13 @@ async def _plan_tool(
             if step.agent is not None or step.status.is_terminal:
                 raise ValueError(f"Step {step.id!r} is not yours to update (it is {step.status.value}"
                                  + (f", delegated to {step.agent}" if step.agent else "") + ").")
+            unmet = [other for other in step.depends_on
+                     if (found := plan.step(other)) is None or found.status is not PlanStepStatus.COMPLETED]
+            if step.status is PlanStepStatus.PENDING and unmet:
+                # The orchestrator sequences the plan; the model reports the step it was
+                # given. A step whose dependencies are open has not been handed out.
+                raise ValueError(f"Step {step.id!r} cannot be reported yet: it depends on "
+                                 f"{', '.join(unmet)}, not completed. Report the step you were asked to do.")
             status = PlanStepStatus(str(call.arguments.get("status")))
             updated = replace(step, status=status,
                               result=truncate_result(str(call.arguments.get("result", ""))))
@@ -171,6 +178,16 @@ async def _plan_next(self: AgentOrchestrator, run: RunRecord, events: list[RunEv
 
     # Delegate agent steps, several at once when they are ready together.
     while True:
+        if acted:
+            # Each round of children is charged to this run: the next round starts only
+            # while the run's own limits hold. (They were checked before the first round
+            # only, so a plan of delegated steps ran on past the budget, and the steps it
+            # could no longer afford were marked failed.) The steps stay pending: the
+            # plan resumes when the run is continued with a larger budget.
+            reason = self._budget_reason(run) or await self._quota_reason(run)
+            if reason is not None:
+                await self._exhaust_budget(run, events, reason)
+                return True
         plan = run.plan
         assert plan is not None
         ready = [s for s in ready_steps(plan) if s.agent]

@@ -67,6 +67,7 @@ from agent_harness.orchestration.state import (
     _approval_resolution,
     _call_signature,
     _decision_from_payload,
+    _flagged_stored_data,
     _flagged_untrusted,
     _identical_prior_calls,
     _output_rejections,
@@ -78,6 +79,7 @@ from agent_harness.orchestration.state import (
     _tool_call_approved,
     _tool_message_content,
     _validate_tool_result,
+    _wrap_stored_data,
     _wrap_untrusted,
 )
 from agent_harness.orchestration.loop_types import _AUTO_CREATE_PLAN, _STICKY_SPECS
@@ -932,8 +934,15 @@ async def _prefetch_parallel(
                 )
             return result, self._monotonic() - started, tuple(embeddings)
 
-        done = await asyncio.gather(*(timed(call, approved) for call, approved in reads),
-                                    return_exceptions=True)
+        batch = asyncio.gather(*(timed(call, approved) for call, approved in reads),
+                               return_exceptions=True)
+        try:
+            # The whole batch runs before the loop's per-call checks, so it is bounded by
+            # what is left of the run's time: the reads are stopped, and the loop then
+            # ends the run at the wall-clock limit as it would between two calls.
+            done = await asyncio.wait_for(batch, self._wall_seconds_left(run))
+        except TimeoutError:
+            done = [TimeoutError("the run's time limit was reached")] * len(reads)
         for (call, _), ran in zip(reads, done):
             if isinstance(ran, BaseException):
                 continue  # the sequential loop runs it again and reports the error
@@ -1118,6 +1127,8 @@ async def _append_tool_result(
             if guard_events:
                 self._tool_guard_events.setdefault((run.id, result.call_id), []).extend(guard_events)
         content = _wrap_untrusted(result.name, content)
+    elif _flagged_stored_data(result):
+        content = _wrap_stored_data(result.name, content)
     if suffix:
         content += "\n\n[Context from hooks]\n" + suffix
     encoded = content.encode("utf-8")

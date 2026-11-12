@@ -220,6 +220,32 @@ class PlanExecuteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(written), 1)  # only the call made after the plan was accepted
         self.assertEqual(finished.sticky_tools, ("create_plan", "update_plan", "revise_plan"))
 
+    async def test_a_step_with_open_dependencies_cannot_be_reported(self) -> None:
+        """The orchestrator sequences the plan; the model reports the step it was handed."""
+
+        replies = iter([
+            call("create_plan", {"goal": "g", "steps": [
+                {"id": "s1", "title": "Read"}, {"id": "s2", "title": "Write", "depends_on": ["s1"]}]}, "p1"),
+            call("update_plan", {"step_id": "s2", "status": "completed", "result": "skipped ahead"}, "u0"),
+            call("update_plan", {"step_id": "s1", "status": "completed", "result": "read"}, "u1"),
+            call("update_plan", {"step_id": "s2", "status": "completed", "result": "written"}, "u2"),
+            final("answer"),
+        ])
+
+        async def handler(request: ModelRequest) -> ModelResponse:
+            return next(replies)
+
+        orchestrator = AgentOrchestrator(models=RoutedModel(handler), tools=create_default_runtime(),
+                                         store=InMemoryRunStore())
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")], planning=True)
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        refused = next(m for m in finished.messages if m.role is Role.TOOL and m.tool_call_id == "u0")
+        self.assertIn("cannot be reported yet: it depends on s1", refused.content)
+        assert finished.plan is not None
+        self.assertEqual([(s.id, s.status.value, s.result) for s in finished.plan.steps],
+                         [("s1", "completed", "read"), ("s2", "completed", "written")])
+
     async def test_replanning_and_replan_limit(self) -> None:
         async def handler(request: ModelRequest) -> ModelResponse:
             text = last_user(request)
@@ -378,6 +404,32 @@ class DelegationTests(unittest.IsolatedAsyncioTestCase):
         children = [e.payload["child_run_id"] for e in events if e.type is EventType.SUBAGENT_STARTED]
         budgets = [(await store.get_run(child)).budget.max_tokens for child in children]  # type: ignore[union-attr]
         self.assertEqual(budgets, [500, 500])  # remaining budget split between the two
+
+    async def test_delegation_stops_between_rounds_when_the_budget_is_used(self) -> None:
+        """Round two used to start, find no budget, and mark its step failed."""
+
+        ran: list[str] = []
+
+        async def handler(request: ModelRequest) -> ModelResponse:
+            if is_child(request):
+                ran.append("researcher" if "researcher" in request.messages[0].content else "writer")
+                return final("child result", tokens=600)
+            return call("create_plan", {"goal": "report", "steps": [
+                {"id": "facts", "title": "Find facts", "agent": "researcher"},
+                {"id": "prose", "title": "Write prose", "agent": "writer", "depends_on": ["facts"]},
+            ]}, "p1")
+
+        store = InMemoryRunStore()
+        orchestrator = AgentOrchestrator(models=RoutedModel(handler), tools=create_default_runtime(),
+                                         store=store, subagents=AGENTS)
+        run = await orchestrator.create_run(model_profile="p", messages=[Message(Role.USER, "t")],
+                                            planning=True, budget=RunBudget(max_tokens=500))
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.status, RunStatus.BUDGET_EXHAUSTED)
+        self.assertEqual(ran, ["researcher"])
+        assert finished.plan is not None
+        self.assertEqual([s.status.value for s in finished.plan.steps], ["completed", "pending"])
+        self.assertEqual(finished.plan.replans, 0)  # nothing failed: the plan can be resumed
 
     async def test_ready_agent_steps_respect_max_parallel(self) -> None:
         active, peak = 0, 0

@@ -507,10 +507,14 @@ class ContextView:
     # The input budget the view was fitted to (window less output reserve and tools),
     # when the builder had one; a compaction policy compares estimated_tokens with it.
     budget_tokens: int | None = None
+    # Characters cut from the middle of the user's first message, when the pinned head
+    # alone did not fit the window (the stored message is unchanged).
+    shortened_request_chars: int = 0
 
     @property
     def modified(self) -> bool:
         return (
+            self.shortened_request_chars > 0 or
             self.omitted_messages > 0
             or self.trimmed_tool_outputs > 0
             or self.summarized_messages > 0
@@ -844,6 +848,8 @@ class RunHandoff:
     files: tuple[str, ...] = ()
     summary: str = ""
     error: str | None = None
+    # The run held untrusted tool output, so its answer and summary may repeat it.
+    tainted: bool = False
 
 
 class HandoffStore(Protocol):

@@ -267,6 +267,32 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(request.max_output_tokens, 300)
         self.assertEqual(request.metadata["purpose"], "summary")
 
+    def test_only_the_transcript_is_shortened_and_the_loss_is_reported(self) -> None:
+        summarizer = ContextSummarizer(max_input_chars=3_000, max_output_tokens=100)
+        previous = "P" * 1_500  # everything known about earlier turns: never cut
+        turns = [message for index in range(6) for message in tool_turn(index)]
+        text = summarizer.request(previous, turns, profile="p", task="Explain it.").messages[1].content
+        self.assertIn(previous, text)
+        self.assertIn("Explain it.", text)
+        self.assertIn("characters omitted", text)
+        lost = summarizer.truncated_chars(previous, turns, profile="p", task="Explain it.")
+        self.assertGreater(lost, 0)
+        self.assertEqual(summarizer.truncated_chars(None, turns[:2], profile="p"), 0)
+
+    def test_pieces_split_one_long_turn_by_message(self) -> None:
+        summarizer = ContextSummarizer(max_input_chars=4_000, max_output_tokens=100, max_message_chars=600)
+        calls = tuple(ToolCall(f"c{i}", "lookup", {"query": str(i)}) for i in range(12))
+        turn = [Message(role=Role.ASSISTANT, tool_calls=calls)] + [
+            Message(role=Role.TOOL, content=f"result {i} " + "x" * 500, name="lookup", tool_call_id=f"c{i}")
+            for i in range(12)]
+        self.assertEqual(len(summarizer.chunks([SYSTEM, TASK, *turn], 2, 15, profile="p")), 1)  # one unit
+        pieces = summarizer.pieces(turn, profile="p")
+        self.assertGreater(len(pieces), 1)
+        self.assertEqual([m for piece in pieces for m in piece], turn)
+        for piece in pieces:
+            self.assertEqual(summarizer.truncated_chars(None, piece, profile="p"), 0)
+        self.assertEqual(summarizer.pieces(turn[:2], profile="p"), [turn[:2]])
+
     def test_request_starts_with_the_users_request(self) -> None:
         # The question stays pinned outside the summarized range; without it the summarizer
         # reported "the user has not provided a goal" (Qwen 27B, tasks suite).
@@ -334,6 +360,30 @@ class OrchestratorSummaryTests(unittest.IsolatedAsyncioTestCase):
         return await orchestrator.create_run(
             model_profile="small", messages=[SYSTEM, TASK], budget=RunBudget(max_steps=40)
         )
+
+    async def test_a_turn_too_long_for_one_request_is_summarized_in_several(self) -> None:
+        """Twelve parallel results: one unit, several summary requests, one stored summary."""
+
+        calls = tuple(ToolCall(f"p{i}", "lookup", {"query": str(i)}) for i in range(12))
+        wide = ModelResponse(tool_calls=calls, finish_reason=FinishReason.TOOL_CALLS)
+        model = RoutingModel([wide, *scripted_run(8)])
+        store = InMemoryRunStore()
+        summarizer = ContextSummarizer(max_input_chars=4_000, max_output_tokens=100, max_message_chars=600)
+        orchestrator = AgentOrchestrator(
+            models=model, tools=BulkyTools(), store=store, summarizer=summarizer,
+            context=BudgetedContextBuilder({"small": ContextLimits(context_window=6000, output_reserve_tokens=200)}))
+        run = await self.start(orchestrator)
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        events = [e for e in await store.list_events(run.id) if e.type is EventType.CONTEXT_SUMMARIZED]
+        split = [e for e in events if e.payload.get("requests", 1) > 1]
+        self.assertTrue(split, [dict(e.payload) for e in events])
+        first = split[0].payload
+        self.assertTrue(first["ok"])
+        self.assertNotIn("truncated_chars", first)  # nothing was cut: that is what the split is for
+        self.assertEqual(first["input_tokens"], 100 * first["requests"])  # every request is charged
+        assert finished.context_summary is not None
+        self.assertNotEqual(finished.messages[finished.context_summary.covers].role, Role.TOOL)
 
     async def test_long_run_summarizes_instead_of_dropping(self) -> None:
         model = RoutingModel(scripted_run(15))
@@ -515,17 +565,23 @@ class ConfigTests(unittest.TestCase):
             )
             bad = root / "bad.toml"
             bad.write_text(MODEL + '[summarization]\nenabled = true\nprofile = "nope"\n', encoding="utf-8")
+            disabled = root / "off.toml"
+            disabled.write_text(MODEL + "[summarization]\nenabled = false\n", encoding="utf-8")
             parsed = load_config(enabled)
             plain_enabled = load_config(plain).summarization.enabled
             with mock.patch.dict(os.environ, HERMETIC):
-                off = build_application(config_path=plain, database_path=root / "a.sqlite3")
+                off = build_application(config_path=disabled, database_path=root / "a.sqlite3")
+                default = build_application(config_path=plain, database_path=root / "d.sqlite3")
                 on = build_application(config_path=enabled, database_path=root / "b.sqlite3")
                 with self.assertRaises(ConfigError):
                     build_application(config_path=bad, database_path=root / "c.sqlite3")
             summarizer = on.orchestrator._summarizer
             asyncio.run(off.close())
+            asyncio.run(default.close())
             asyncio.run(on.close())
-        self.assertFalse(plain_enabled)
+        # On in code: a config that says nothing summarizes; "enabled = false" opts out.
+        self.assertTrue(plain_enabled)
+        self.assertIsNotNone(default.orchestrator._summarizer)
         self.assertTrue(parsed.summarization.enabled)
         self.assertEqual(parsed.summarization.max_output_tokens, 256)
         self.assertIsNone(off.orchestrator._summarizer)
