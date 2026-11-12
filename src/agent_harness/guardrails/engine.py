@@ -25,6 +25,7 @@ from .detectors import (
     detect_pii,
     detect_prompt_extraction,
     detect_secrets,
+    repeated_runs,
 )
 
 SEVERITY = {"allow": 0, "flag": 1, "redact": 2, "block": 3}
@@ -40,7 +41,11 @@ LLAMA_GUARD_CATEGORIES = {
 }
 
 
-_GUARD_RETRY_SECONDS = 60.0  # after a guard check failed under a deadline, how long before it is asked again
+# After a guard check failed under a deadline, how long before the guard is asked again.
+# The wait doubles with each failure in a row (a guard server that is down stays down for
+# more than a minute, and every check that waits for it holds a turn), up to the maximum.
+_GUARD_RETRY_SECONDS = 60.0
+_GUARD_RETRY_MAX_SECONDS = 900.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +84,7 @@ class Guardrails:
         self.config = config
         self._models = models
         self._guard_down_until = 0.0  # after a guard check missed its deadline (model.timeout_seconds)
+        self._guard_failures = 0  # deadline failures in a row
         self._input_deny = tuple(re.compile(p, re.IGNORECASE) for p in config.input.denylist)
         self._output_deny = tuple(re.compile(p, re.IGNORECASE) for p in config.output.denylist)
 
@@ -183,8 +189,11 @@ class Guardrails:
             ))
         except HarnessError as exc:
             if deadline:
-                self._guard_down_until = time.monotonic() + _GUARD_RETRY_SECONDS
+                self._guard_failures += 1
+                self._guard_down_until = time.monotonic() + min(
+                    _GUARD_RETRY_MAX_SECONDS, _GUARD_RETRY_SECONDS * 2 ** (self._guard_failures - 1))
             return self._on_error(f"guard model failed: {exc}")
+        self._guard_failures = 0
         verdict = parse_llama_guard(response.content)
         if verdict is None and assistant_text and _prefilled(response.content, assistant_text):
             # llama.cpp continues a final assistant message by default, so Llama Guard never
@@ -235,16 +244,23 @@ def _redact(text: str, findings: list[Finding]) -> str:
         if finding.end > finding.start and (not kept or finding.start >= kept[-1].end):
             kept.append(finding)
     for finding in reversed(kept):
-        text = text[: finding.start] + _replacement(finding) + text[finding.end:]
+        text = text[: finding.start] + _replacement(finding, text) + text[finding.end:]
     return text
 
 
-def _replacement(finding: Finding) -> str:
+def _replacement(finding: Finding, text: str = "") -> str:
     if finding.detector == "hidden_characters":
         return ""
     if finding.detector in {"injection", "prompt_extraction", "encoded_payloads"}:
         return "[removed: possible prompt injection]"
+    if finding.detector == "flooding" and finding.category == "too_long":
+        return (f"\n[removed by the input guard: {finding.end - finding.start} characters "
+                "from the middle of a long message]\n")
     if finding.detector == "flooding":
+        # One copy and how often it was repeated: nothing the message said is lost.
+        runs = repeated_runs(text[finding.start:finding.end])
+        if runs and runs[0][0] == 0:
+            return f"{runs[0][2]}[repeated {runs[0][3]} times]"
         return "[removed: repeated text]"
     if finding.detector == "canary":
         return "[removed]"

@@ -27,6 +27,15 @@ from agent_harness.orchestration.state import _guarded_input
 if TYPE_CHECKING:
     from agent_harness.orchestration.orchestrator import AgentOrchestrator
 
+WITHHELD_NOTE = (
+    "[Guard] The input guard withheld the message that was here{why}. The assistant never "
+    "saw it. The reply after it is the guard's refusal, not something the assistant decided."
+)
+"""What a refused message becomes in the conversation (a harness prefix,
+``context.HARNESS_PREFIXES``). The words the guard refused must not reach the model on the
+next turn just because a later message passed, and the model must not take the canned
+refusal for its own earlier answer. The original goes to ``archived_messages``."""
+
 
 async def _guard_input(
     self: AgentOrchestrator, run: RunRecord, events: list[RunEvent]
@@ -95,8 +104,10 @@ async def _guard_output(
         verdict_events, blocked = await self._model_guard(run, "output", user_text, response.content)
         events += verdict_events
     if blocked:
+        detectors = sorted({str(e.payload.get("detector")) for e in events
+                            if e.payload.get("action") == "block"})
         return replace(
-            response, content=guard.config.refusal_message, tool_calls=(), reasoning=None,
+            response, content=_refusal_text(guard, "output", detectors), tool_calls=(), reasoning=None,
             finish_reason=FinishReason.STOP, metadata={**response.metadata, "guardrail": "blocked"},
         ), events
     if decision is not None and decision.changed:
@@ -148,10 +159,21 @@ async def _refuse(
 ) -> None:
     guard = self._guardrails
     assert guard is not None
-    run.messages.append(Message(role=Role.ASSISTANT, content=guard.config.refusal_message))
-    run.guarded_through = len(run.messages)
     detectors = sorted({str(e.payload.get("detector")) for e in annotations
                         if e.payload.get("action") == "block"})
+    withheld = 0
+    if stage == "input":
+        # Everything the user sent in the refused turn is withheld, not only the message a
+        # detector matched: none of it was answered.
+        why = f" ({', '.join(detectors)})" if detectors else ""
+        for index in range(min(run.guarded_through, len(run.messages)), len(run.messages)):
+            message = run.messages[index]
+            if _guarded_input(message):
+                run.archived_messages.append(message)
+                run.messages[index] = replace(message, content=WITHHELD_NOTE.format(why=why), parts=())
+                withheld += 1
+    run.messages.append(Message(role=Role.ASSISTANT, content=_refusal_text(guard, stage, detectors)))
+    run.guarded_through = len(run.messages)
     await self._checkpoint(
         run,
         events,
@@ -159,11 +181,19 @@ async def _refuse(
         RunEvent(
             run_id=run.id,
             type=EventType.GUARDRAIL_REFUSED,
-            payload={"stage": stage, "detectors": detectors},
+            payload={"stage": stage, "detectors": detectors, "withheld_messages": withheld},
             step=run.step_count,
             created_at=self._clock(),
         ),
     )
+
+
+def _refusal_text(guard: Guardrails, stage: str, detectors: Sequence[str]) -> str:
+    """The refusal the user reads; with ``explain_refusal`` it names the checks, never the match."""
+
+    if not guard.config.explain_refusal or not detectors:
+        return guard.config.refusal_message
+    return f"{guard.config.refusal_message} (Blocked by the {stage} guard: {', '.join(detectors)}.)"
 
 
 def _guard_events(
