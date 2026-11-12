@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -20,11 +21,13 @@ from uuid import uuid4
 
 from agent_harness.domain import (
     ConcurrencyError,
+    Message,
     RunEvent,
     RunHandoff,
     RunPage,
     RunQuery,
     RunRecord,
+    RunStatus,
     SteerMessage,
     TenantUsage,
     ToolCatalogEntry,
@@ -39,7 +42,15 @@ from .memory import _validate_identifier, _validate_run_event
 from .migrations import SchemaVersionError
 from agent_harness.orchestration.handoff import handoff_from_json, handoff_to_json
 
-from .sqlite import _decode_event, _decode_run, _decode_tool_result, _encode_run, _json_dumps, _with_event_id
+from .sqlite import (
+    _MESSAGE_CACHE_RUNS,
+    _decode_event,
+    _decode_messages,
+    _decode_run_data,
+    _decode_tool_result,
+    _json_dumps,
+    _with_event_id,
+)
 
 _TERMINAL = ("completed", "failed", "cancelled", "budget_exhausted")
 
@@ -171,6 +182,20 @@ MIGRATIONS += (
     CREATE INDEX IF NOT EXISTS run_handoffs_tenant_updated ON run_handoffs(tenant, updated_at);
     """),
 )
+# Phase 37: a run's messages as rows, as in SQLite (migration 10 there): a checkpoint writes
+# only the rows that changed instead of the whole conversation inside the snapshot.
+MIGRATIONS += (
+    (7, """
+    CREATE TABLE IF NOT EXISTS run_messages (
+        run_id TEXT NOT NULL,
+        archived INTEGER NOT NULL,
+        seq INTEGER NOT NULL,
+        body_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, archived, seq)
+    );
+    """),
+)
+
 LATEST = MIGRATIONS[-1][0]
 
 
@@ -197,6 +222,9 @@ class PostgresRunStore:
         self._catalog_connection: Any = None
         self._lease_clock = lease_clock
         self._lock = asyncio.Lock()
+        # Per run: the messages as last read or written here, and the version they belong to
+        # (what lets a checkpoint write only the rows that changed).
+        self._message_cache: OrderedDict[tuple[str, int], tuple[int, list[Message]]] = OrderedDict()
         self.dsn_host = self._connection.info.host
         self._migrate()
 
@@ -265,7 +293,7 @@ class PostgresRunStore:
         if run.version != 0:
             raise ValueError("a new run must have version 0")
         stored = _with_event_id(event)
-        snapshot = _encode_run(run)
+        snapshot = self._snapshot(run)
 
         def work() -> None:
             self._connection.execute(
@@ -277,6 +305,7 @@ class PostgresRunStore:
                 (run.id, run.version, snapshot, run.tenant, run.status.value, run.created_at,
                  run.updated_at, run.consumed_tokens, run.consumed_cost_usd, run.parent_run_id),
             )
+            self._write_messages(run, expected_version=None, new_version=run.version)
             self._insert_event(stored)
             if _enqueue:
                 self._connection.execute(
@@ -285,13 +314,109 @@ class PostgresRunStore:
         try:
             await self._run(work)
         except self._psycopg.errors.UniqueViolation as exc:
+            self._forget(run.id)
             raise ValueError(f"run or event already exists: {run.id}") from exc
+        except BaseException:
+            self._forget(run.id)
+            raise
 
     async def get_run(self, run_id: str) -> RunRecord | None:
         _validate_identifier(run_id, "run_id")
+
+        def work() -> RunRecord | None:
+            row = self._connection.execute(
+                "SELECT snapshot_json FROM runs WHERE id = %s", (run_id,)).fetchone()
+            return self._load(row["snapshot_json"]) if row is not None else None
+
+        loaded: RunRecord | None = await self._run(work)
+        return loaded
+
+    async def run_state(self, run_id: str) -> tuple[int, RunStatus] | None:
+        """The stored version and status without reading the conversation: what the loop
+        needs to notice a cancel or another writer at each boundary."""
+
         row = await self._run(lambda: self._connection.execute(
-            "SELECT snapshot_json FROM runs WHERE id = %s", (run_id,)).fetchone())
-        return _decode_run(row["snapshot_json"]) if row is not None else None
+            "SELECT version, status FROM runs WHERE id = %s", (run_id,)).fetchone())
+        return (int(row["version"]), RunStatus(row["status"])) if row is not None else None
+
+    async def list_events_since(self, run_id: str, known: int) -> Sequence[RunEvent]:
+        """The run's events after the first ``known`` ones (events are append-only)."""
+
+        rows = await self._run(lambda: self._connection.execute(
+            "SELECT event_id, run_id, type, payload_json, step, created_at FROM run_events "
+            "WHERE run_id = %s ORDER BY sequence OFFSET %s", (run_id, max(0, known))).fetchall())
+        return tuple(_decode_event(row) for row in rows)
+
+    # -- messages in their own table (Phase 37; the same scheme as the SQLite store) --------
+
+    def _snapshot(self, run: RunRecord) -> str:
+        data = asdict(replace(run, messages=[], archived_messages=[]))
+        data["messages_in_table"] = True
+        return _json_dumps(data)
+
+    def _write_messages(self, run: RunRecord, *, expected_version: int | None, new_version: int) -> None:
+        """Inside the caller's transaction: bring run_messages to ``run``'s messages.
+
+        Rows are compared with what this store last read or wrote for the version being
+        replaced; only rows from the first difference on are rewritten (a normal step appends
+        one or two). Without that knowledge (another process wrote the version) all are.
+        """
+
+        for archived, messages in ((0, run.messages), (1, run.archived_messages)):
+            key = (run.id, archived)
+            cached = self._message_cache.pop(key, None)
+            start = 0
+            if cached is not None and cached[0] == expected_version:
+                known = cached[1]
+                limit = min(len(known), len(messages))
+                while start < limit and (known[start] is messages[start] or known[start] == messages[start]):
+                    start += 1
+                if start < len(known):
+                    self._connection.execute(
+                        "DELETE FROM run_messages WHERE run_id = %s AND archived = %s AND seq >= %s",
+                        (run.id, archived, start))
+            elif expected_version is not None:
+                self._connection.execute(
+                    "DELETE FROM run_messages WHERE run_id = %s AND archived = %s", key)
+            rows = [(run.id, archived, index, _json_dumps(asdict(messages[index])))
+                    for index in range(start, len(messages))]
+            if rows:
+                with self._connection.cursor() as cursor:
+                    cursor.executemany(
+                        "INSERT INTO run_messages(run_id, archived, seq, body_json) VALUES (%s, %s, %s, %s)", rows)
+            self._remember(key, new_version, messages)
+
+    def _remember(self, key: tuple[str, int], version: int, messages: Sequence[Message]) -> None:
+        self._message_cache[key] = (version, list(messages))
+        while len(self._message_cache) > _MESSAGE_CACHE_RUNS * 2:
+            self._message_cache.popitem(last=False)
+
+    def _forget(self, run_id: str) -> None:
+        self._message_cache.pop((run_id, 0), None)
+        self._message_cache.pop((run_id, 1), None)
+
+    def _load(self, snapshot_json: str) -> RunRecord:
+        """A run from its snapshot, with its messages from the table when they are there
+        (inside the caller's transaction). A run stored before migration 7 has them in the
+        snapshot and moves to the table at its next checkpoint."""
+
+        data = json.loads(snapshot_json)
+        if data.get("messages_in_table"):
+            version = int(data.get("version", 0))
+            for archived, field_name in ((0, "messages"), (1, "archived_messages")):
+                key = (data["id"], archived)
+                cached = self._message_cache.get(key)
+                if cached is not None and cached[0] == version:
+                    self._message_cache.move_to_end(key)
+                    data[field_name] = list(cached[1])
+                    continue
+                rows = self._connection.execute(
+                    "SELECT body_json FROM run_messages WHERE run_id = %s AND archived = %s ORDER BY seq",
+                    key).fetchall()
+                decoded = _decode_messages([json.loads(row["body_json"]) for row in rows])
+                self._remember(key, version, decoded)
+                data[field_name] = list(decoded)
+        return _decode_run_data(data)
 
     async def save_checkpoint(
         self, run: RunRecord, events: Sequence[RunEvent], *, expected_version: int
@@ -311,7 +436,7 @@ class PostgresRunStore:
                     consumed_tokens = %s, consumed_cost_usd = %s
                 WHERE id = %s AND version = %s
                 """,
-                (snapshot.version, _encode_run(snapshot), snapshot.status.value, snapshot.updated_at,
+                (snapshot.version, self._snapshot(snapshot), snapshot.status.value, snapshot.updated_at,
                  snapshot.consumed_tokens, snapshot.consumed_cost_usd, run.id, expected_version),
             )
             if cursor.rowcount != 1:
@@ -319,13 +444,18 @@ class PostgresRunStore:
                 if row is None:
                     raise KeyError(f"unknown run: {run.id}")
                 raise ConcurrencyError(f"run {run.id!r} is version {row['version']}, expected {expected_version}")
+            self._write_messages(run, expected_version=expected_version, new_version=snapshot.version)
             for event in stored:
                 self._insert_event(event)
 
         try:
             await self._run(work)
         except self._psycopg.errors.UniqueViolation as exc:
+            self._forget(run.id)
             raise ValueError("event already exists") from exc
+        except BaseException:
+            self._forget(run.id)  # the transaction rolled back: what was remembered is not stored
+            raise
 
     def _insert_event(self, event: RunEvent) -> None:
         self._connection.execute(
@@ -602,10 +732,13 @@ class PostgresRunStore:
             clauses.append("(created_at, id) < (%s, %s)")
             params.extend((created_at, run_id))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = await self._run(lambda: self._connection.execute(
-            f"SELECT snapshot_json FROM runs {where} ORDER BY created_at DESC, id DESC LIMIT %s",
-            (*params, query.limit + 1)).fetchall())
-        page = [summarize_run(_decode_run(row["snapshot_json"])) for row in rows]
+        def work() -> list[Any]:
+            rows = self._connection.execute(
+                f"SELECT snapshot_json FROM runs {where} ORDER BY created_at DESC, id DESC LIMIT %s",
+                (*params, query.limit + 1)).fetchall()
+            return [summarize_run(self._load(row["snapshot_json"])) for row in rows]
+
+        page: list[Any] = await self._run(work)
         more = len(page) > query.limit
         page = page[: query.limit]
         cursor = encode_cursor(page[-1].created_at, page[-1].id) if more else None
@@ -620,7 +753,10 @@ class PostgresRunStore:
             if dry_run or not ids:
                 return ids
             self._connection.execute("SET LOCAL agent_harness.purge = 'on'")
-            for table in ("run_events", "run_queue", "steer_messages", "chat_conversations", "run_handoffs"):
+            for run_id in ids:
+                self._forget(run_id)
+            for table in ("run_events", "run_queue", "steer_messages", "chat_conversations", "run_handoffs",
+                          "run_messages"):
                 self._connection.execute(f"DELETE FROM {table} WHERE run_id = ANY(%s)", (ids,))
             for run_id in ids:
                 self._connection.execute(

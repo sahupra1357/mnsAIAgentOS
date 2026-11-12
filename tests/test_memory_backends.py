@@ -51,6 +51,70 @@ class MemoryContract:
         asyncio.run(body())
 
 
+    # The note lifecycle (Phase 27) on every backend; it was only ever run on SQLite (Phase 37).
+
+    def test_saving_again_merges_metadata_and_keeps_one_note(self) -> None:
+        async def body() -> None:
+            store = self.make("team")
+            try:
+                first = await store.put("The staging database is falcon-db.", {"tags": "staging"})
+                again = await store.put("The staging database is falcon-db.", {"tags": "db,staging", "kind": "fact"})
+                self.assertEqual(first.id, again.id)
+                self.assertEqual(again.metadata["tags"], "staging,db")
+                self.assertEqual(again.metadata["kind"], "fact")
+                self.assertIn("updated_at", again.metadata)
+                replay = await store.put("The staging database is falcon-db.", {"kind": "fact"})
+                self.assertEqual(replay.metadata, again.metadata)  # an identical write changes nothing
+                self.assertEqual(len(await store.list_items()), 1)
+                self.assertEqual((await store.get(first.id)).text, "The staging database is falcon-db.")
+                self.assertIsNone(await store.get("missing"))
+            finally:
+                await store.close()
+        asyncio.run(body())
+
+    def test_forget_hides_a_note_and_expiry_too(self) -> None:
+        from datetime import timedelta
+
+        from agent_harness.domain import utc_now
+
+        async def body() -> None:
+            store = self.make("team")
+            try:
+                note = await store.put("Deploys go to falcon-prod.")
+                self.assertTrue(await store.forget(note.id))
+                self.assertEqual(await store.search("falcon-prod deploys"), ())
+                self.assertEqual(await store.list_items(), ())
+                (kept,) = await store.list_items(include_forgotten=True)
+                self.assertIn("forgotten_at", kept.metadata)
+                self.assertFalse(await store.forget("missing"))
+                back = await store.put("Deploys go to falcon-prod.")
+                self.assertNotIn("forgotten_at", back.metadata)
+                self.assertEqual(len(await store.search("falcon-prod")), 1)
+                timed = await store.put("The freeze ends on Friday.")
+                await store.set_metadata(timed.id, {"expires_at": (utc_now() - timedelta(days=1)).isoformat()})
+                self.assertEqual(await store.search("freeze Friday"), ())
+                await store.set_metadata(timed.id, {"expires_at": None})
+                self.assertEqual(len(await store.search("freeze Friday")), 1)
+            finally:
+                await store.close()
+        asyncio.run(body())
+
+    def test_scoped_views_share_the_store_and_not_the_notes(self) -> None:
+        async def body() -> None:
+            store = self.make("team")
+            try:
+                alpha, beta = store.scoped("project:alpha"), store.scoped("project:beta")
+                await alpha.put("Tests run with make check.")
+                self.assertEqual(len(await alpha.search("tests make")), 1)
+                self.assertEqual(await beta.search("tests make"), ())
+                self.assertEqual(await store.search("tests make"), ())
+                with self.assertRaises(ValueError):
+                    store.scoped("")
+            finally:
+                await store.close()
+        asyncio.run(body())
+
+
 class SQLiteMemoryContract(MemoryContract, unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
