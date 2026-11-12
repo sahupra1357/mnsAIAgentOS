@@ -570,12 +570,19 @@ def pinned_head_end(messages: Sequence[Message]) -> int:
 def _pinned_head_end(messages: Sequence[Message]) -> int:
     """Index after the leading system messages and the first user message."""
 
+    first_user: int | None = None
+    end = len(messages)
     for index, message in enumerate(messages):
         if message.role is Role.USER:
-            return index + 1
+            if written_by_user(message):
+                return index + 1
+            if first_user is None:
+                first_user = index
+            continue  # a harness message before the request (recalled notes): pinned with it
         if message.role is not Role.SYSTEM:
-            return index
-    return len(messages)
+            end = index
+            break
+    return first_user + 1 if first_user is not None else end
 
 
 def _group_units(messages: Sequence[Message]) -> list[list[Message]]:

@@ -133,6 +133,7 @@ from agent_harness.orchestration.state import (  # noqa: F401
     _estimate_scale,
     _find_tool_call,
     _flagged_untrusted,
+    _holds_untrusted,
     _guarded_input,
     _has_accepted_final_response,
     _has_pending_model_attempt,
@@ -561,9 +562,11 @@ class AgentOrchestrator:
             recalled = await self._recall(
                 initial_messages, RunScope(run_id=identifier, tenant=tenant, end_user=end_user))
             if recalled:
+                # A user-role harness message, as for a follow-up: notes are stored data, and
+                # a system message would be merged into the system prompt by the adapters.
                 first_user = next((i for i, m in enumerate(initial_messages) if m.role is Role.USER),
                                   len(initial_messages))
-                initial_messages.insert(first_user, Message(role=Role.SYSTEM, content=recall_block(recalled)))
+                initial_messages.insert(first_user, Message(role=Role.USER, content=recall_block(recalled)))
         if self._guardrails is not None and self._guardrails.uses_canary:
             _add_canary(initial_messages)
         if self._settings.current_date_note and parent_run_id is None:
@@ -826,8 +829,7 @@ class AgentOrchestrator:
                 start = index
                 break
         who = RunScope(run_id=run.id, tenant=run.tenant, end_user=run.end_user,
-                       tainted=any(m.role is Role.TOOL and m.content.startswith("<untrusted-tool-output")
-                                   for m in run.messages[start:]))
+                       tainted=_holds_untrusted(run.messages))
         try:
             notes, usage = await memory.save_from_turn(
                 self._models, run.messages[start:], profile=run.model_profile, who=who)
@@ -977,7 +979,7 @@ class AgentOrchestrator:
 
         CURRENT_RUN_SCOPE.set(RunScope(
             run_id=run.id, tenant=run.tenant, end_user=run.end_user,
-            tainted=_tainted(run.messages), top_level=run.parent_run_id is None))
+            tainted=_holds_untrusted(run.messages), top_level=run.parent_run_id is None))
 
     async def _session_start_hook(self, run: RunRecord, events: list[RunEvent]) -> bool:
         """Run session_start hooks; False if a hook blocked the run."""

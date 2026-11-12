@@ -67,6 +67,7 @@ from agent_harness.orchestration.state import (
     _approval_resolution,
     _call_signature,
     _decision_from_payload,
+    _flagged_stored_data,
     _flagged_untrusted,
     _identical_prior_calls,
     _output_rejections,
@@ -78,6 +79,7 @@ from agent_harness.orchestration.state import (
     _tool_call_approved,
     _tool_message_content,
     _validate_tool_result,
+    _wrap_stored_data,
     _wrap_untrusted,
 )
 from agent_harness.orchestration.loop_types import _AUTO_CREATE_PLAN, _STICKY_SPECS
@@ -1118,6 +1120,8 @@ async def _append_tool_result(
             if guard_events:
                 self._tool_guard_events.setdefault((run.id, result.call_id), []).extend(guard_events)
         content = _wrap_untrusted(result.name, content)
+    elif _flagged_stored_data(result):
+        content = _wrap_stored_data(result.name, content)
     if suffix:
         content += "\n\n[Context from hooks]\n" + suffix
     encoded = content.encode("utf-8")
