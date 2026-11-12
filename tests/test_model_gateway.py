@@ -303,6 +303,26 @@ class StableToolCallTextTests(unittest.TestCase):
         self.assertEqual(json.dumps(native_first), json.dumps(native_later))
 
 
+class HardDeadlineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_hard_deadline_is_not_retried_or_extended(self) -> None:
+        from agent_harness.model_gateway.errors import ModelTimeoutError
+
+        seen: list[float] = []
+
+        class Slow:
+            async def post_json(self, url, payload, headers, timeout_seconds):
+                seen.append(timeout_seconds)
+                raise HttpTransportTimeout("no answer")
+
+        client = OpenAICompatibleClient(
+            profile(max_retries=2, timeout_seconds=180, cold_start_timeout_seconds=1200),
+            transport=Slow(), environ={})
+        with self.assertRaises(ModelTimeoutError):
+            await client.complete(ModelRequest(messages=(Message(Role.USER, "hi"),), timeout_seconds=20.0,
+                                               metadata={"timeout": "hard"}))
+        self.assertEqual(seen, [20.0])  # one attempt, at the deadline, not the cold-start wait
+
+
 class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolves_and_caches_configured_client(self) -> None:
         transport = FakeTransport([])

@@ -118,6 +118,10 @@ class OpenAICompatibleClient:
 
         timeout = self._effective_timeout(request)
         attempts = self._profile.max_retries + 1
+        if request.timeout_seconds is not None and request.metadata.get("timeout") == "hard":
+            # The caller set a deadline for the whole call (a guard check): a retry would
+            # double it. Seen live: a 20-second guard deadline held each turn for 40.
+            attempts = 1
         started = self._monotonic()
         retried: list[str] = []
         for attempt in range(attempts):
