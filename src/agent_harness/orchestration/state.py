@@ -659,6 +659,70 @@ def derive_phase(run: RunRecord, events: Sequence[RunEvent]) -> str:
     return PHASE_MODEL
 
 
+def phase_after(run: RunRecord, recorded: Sequence[RunEvent], previous: str) -> str:
+    """The phase a checkpoint moves the run to: the loop's transition table (Phase 34).
+
+    The phase is set by the transition being recorded (the run's status and the newest
+    state event of this checkpoint), not worked out again from the whole history.
+    ``derive_phase`` remains for runs stored before the phase existed, and as the
+    cross-check ``verify_phase`` applies in tests.
+
+    =====================================  =============================================
+    recorded                               next phase
+    =====================================  =============================================
+    a terminal status                      done
+    status awaiting_input / queued         awaiting_input / queued
+    nothing but annotations                unchanged (model, if a message followed a reply)
+    model_requested, model_fallback        model_request (a reply is owed for this step)
+    model_responded, failed, retryable     model_request (the same step is asked again)
+    model_responded, ok, with tool calls   tools
+    model_responded, ok, a plain reply     answer
+    guardrail_refused                      answer (the refusal is the reply)
+    tool_responded, calls still open       tools
+    tool_responded, the result submitted   answer
+    anything else (a new message, a        tools if calls are open, otherwise model
+    rejected reply, a plan change, ...)
+    =====================================  =============================================
+    """
+
+    if run.status.is_terminal:
+        return PHASE_DONE
+    if run.status is RunStatus.AWAITING_INPUT:
+        return PHASE_WAITING
+    if run.status is RunStatus.QUEUED:
+        return PHASE_QUEUED
+    latest = _latest_state_event(recorded)
+    if latest is None:
+        if previous in (PHASE_DONE, PHASE_WAITING, PHASE_QUEUED, ""):
+            # The status moved on without a state event (a run picked up again).
+            return PHASE_TOOLS if _pending_tool_calls(run.messages) else PHASE_MODEL
+        if previous == PHASE_ANSWER and not (
+                run.messages and run.messages[-1].role is Role.ASSISTANT and not run.messages[-1].tool_calls):
+            # A directive or hook context was added after the reply (recorded as an
+            # annotation with ``message``): the model is asked again.
+            return PHASE_TOOLS if _pending_tool_calls(run.messages) else PHASE_MODEL
+        return previous
+    kind, payload = latest.type, latest.payload
+    if _pending_tool_calls(run.messages):
+        return PHASE_TOOLS
+    if kind in (EventType.MODEL_REQUESTED, EventType.MODEL_FALLBACK):
+        return PHASE_MODEL_REQUEST
+    if kind is EventType.MODEL_RESPONDED:
+        if payload.get("ok") is True:
+            last = run.messages[-1] if run.messages else None
+            if last is not None and last.role is Role.ASSISTANT and not last.tool_calls:
+                return PHASE_ANSWER
+            return PHASE_MODEL
+        return PHASE_MODEL_REQUEST if payload.get("retryable") is True else PHASE_MODEL
+    if kind is EventType.GUARDRAIL_REFUSED:
+        last = run.messages[-1] if run.messages else None
+        return PHASE_ANSWER if last is not None and last.role is Role.ASSISTANT else PHASE_MODEL
+    if kind is EventType.TOOL_RESPONDED and run.output_schema is not None and _result_submitted(
+            run, recorded):
+        return PHASE_ANSWER
+    return PHASE_MODEL
+
+
 STATE_PREFIX = "[State - written by the harness, not a request]"
 
 
