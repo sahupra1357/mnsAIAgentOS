@@ -548,7 +548,11 @@ class UsagePathTests(unittest.TestCase):
         import inspect
         import re
 
-        source = inspect.getsource(loop)
+        # The loop is several modules since Phase 36; none of them may add on its own.
+        from agent_harness.orchestration import child_runs, guard_steps, model_step, plan_steps, tool_step
+
+        source = "".join(inspect.getsource(module) for module in (
+            loop, model_step, tool_step, plan_steps, guard_steps, child_runs))
         owners = inspect.getsource(AgentOrchestrator._charge) + inspect.getsource(AgentOrchestrator._charge_child)
         pattern = re.compile(r"\.consumed_(?:tokens|cost_usd) \+=")
         self.assertEqual(len(pattern.findall(source)), len(pattern.findall(owners)))
