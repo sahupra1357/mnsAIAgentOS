@@ -117,7 +117,9 @@ def _native_message(message: Message, *, keep_reasoning: bool = False) -> dict[s
         result["tool_name"] = message.name
     if message.tool_calls:
         result["tool_calls"] = [
-            {"function": {"name": call.name, "arguments": call.arguments}}
+            # Keys in sorted order, as in the OpenAI-compatible adapter: the same call is the
+            # same text before and after the run is reloaded from the store (prompt cache).
+            {"function": {"name": call.name, "arguments": json.loads(json.dumps(call.arguments, sort_keys=True))}}
             for call in message.tool_calls
         ]
     return result

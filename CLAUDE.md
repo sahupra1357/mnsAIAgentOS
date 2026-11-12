@@ -1033,6 +1033,16 @@ code paths: `[orchestrator]` `resurface_repeated_results`, `phase_dispatch`, `cl
     the preference saved in the first. Seen and not explained: one step reused only the first 3,840 of 9,240
     prompt tokens (the next reused 9,280 of 10,186), and a `config_drift` on `tools_sha256` at the follow-up turn
     (the hash covers the whole registry, which changes when an MCP server syncs; the offered tools were identical).
+- **40 Stable tool-call text** (`phase-40-stable-tool-call-args`): the "3,840 of 9,240 tokens" above was the
+  harness, not Modal routing (the same prompt sent ten times was reused in full, with and without the affinity
+  key). The stores write JSON with sorted keys, so a run reloaded in a new process (`continue`, a restarted chat,
+  a worker resume) had its tool-call arguments in sorted order, while the first process sent them in the model's
+  order. The same call was different text, and the server's cache was lost from the first tool call on. The
+  adapters now always send arguments with sorted keys. After the fix the first request of a follow-up turn reused
+  7,296 of 7,542 tokens. **Anything that is sent to the model must be the same text before and after a reload**;
+  recording the real payloads (a wrapper around `StdlibHttpTransport.post_json`) and comparing consecutive
+  requests is how this was found. Still seen once: a request that reused nothing although its messages extended
+  the previous request's.
 - **37 Postgres messages** (`phase-37-postgres-messages`): migration 7 `run_messages`, delta writes, `run_state`,
   `list_events_since`, as in SQLite. The note lifecycle tests run on both backends. Verified on a local
   PostgreSQL 14 (`initdb` in a temporary folder, `psycopg` in a scratch venv): 1,081 tests, none skipped.

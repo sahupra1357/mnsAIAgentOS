@@ -118,6 +118,10 @@ class OpenAICompatibleClient:
 
         timeout = self._effective_timeout(request)
         attempts = self._profile.max_retries + 1
+        if request.timeout_seconds is not None and request.metadata.get("timeout") == "hard":
+            # The caller set a deadline for the whole call (a guard check): a retry would
+            # double it. Seen live: a 20-second guard deadline held each turn for 40.
+            attempts = 1
         started = self._monotonic()
         retried: list[str] = []
         for attempt in range(attempts):
@@ -485,7 +489,12 @@ class OpenAICompatibleClient:
                     "type": "function",
                     "function": {
                         "name": call.name,
-                        "arguments": json.dumps(call.arguments, separators=(",", ":")),
+                        # Sorted keys: a run reloaded from the store has its arguments in
+                        # sorted order, and the same call must be sent as the same text in
+                        # every request, or the server's prompt cache is lost from this
+                        # message on (seen live 2026-11-11: each new process re-read the
+                        # conversation from the first tool call).
+                        "arguments": json.dumps(call.arguments, separators=(",", ":"), sort_keys=True),
                     },
                 }
                 for call in message.tool_calls
