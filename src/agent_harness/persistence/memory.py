@@ -377,6 +377,21 @@ class InMemoryRunStore:
         async with self._lock:
             return tuple(deepcopy(self._events.get(run_id, ())))
 
+    async def run_state(self, run_id: str) -> tuple[int, RunStatus] | None:
+        """The stored version and status without copying the conversation: what the loop
+        reads at each boundary to notice a cancel or another writer (as in the SQL stores;
+        without it every boundary deep-copied the whole run)."""
+
+        async with self._lock:
+            run = self._runs.get(run_id)
+            return (run.version, run.status) if run is not None else None
+
+    async def list_events_since(self, run_id: str, known: int) -> Sequence[RunEvent]:
+        """The run's events after the first ``known`` ones (events are append-only)."""
+
+        async with self._lock:
+            return tuple(deepcopy(self._events.get(run_id, ())[max(0, known):]))
+
 
 def _matches(run: RunRecord, query: RunQuery) -> bool:
     if query.tenant is not None and run.tenant != query.tenant:

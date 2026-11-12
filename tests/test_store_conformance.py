@@ -360,6 +360,46 @@ class StoreContract:
             self.assertEqual(sorted(r.id for r in page.runs), ["u-a1", "u-a2"])
             self.assertEqual({r.end_user for r in page.runs}, {"alice"})
         asyncio.run(body())
+    def test_state_and_new_events_are_read_without_the_conversation(self) -> None:
+        """Every store answers the loop's boundary questions cheaply (Phase 29; memory too now)."""
+
+        async def body() -> None:
+            self.assertIsNone(await self.store.run_state("missing"))
+            self.assertEqual(tuple(await self.store.list_events_since("missing", 0)), ())
+            record = run()
+            await self.store.create_run(record, created(record))
+            self.assertEqual(await self.store.run_state("r1"), (0, RunStatus.QUEUED))
+            record.status = RunStatus.RUNNING
+            await self.store.save_checkpoint(record, [
+                RunEvent(run_id="r1", type=EventType.RUN_STARTED),
+                RunEvent(run_id="r1", type=EventType.MODEL_REQUESTED, step=1),
+            ], expected_version=0)
+            self.assertEqual(await self.store.run_state("r1"), (1, RunStatus.RUNNING))
+            everything = list(await self.store.list_events("r1"))
+            self.assertEqual([e.type for e in await self.store.list_events_since("r1", 1)],
+                             [EventType.RUN_STARTED, EventType.MODEL_REQUESTED])
+            self.assertEqual(list(await self.store.list_events_since("r1", 0)), everything)
+            self.assertEqual(tuple(await self.store.list_events_since("r1", 3)), ())
+
+        asyncio.run(body())
+
+    def test_purging_a_run_removes_its_archived_messages(self) -> None:
+        """Messages set aside by a rewind live as long as their run: ``gc`` is their retention."""
+
+        async def body() -> None:
+            record = run()
+            record.archived_messages.append(Message(Role.ASSISTANT, "set aside"))
+            record.status = RunStatus.COMPLETED
+            await self.store.create_run(record, created(record))
+            self.assertEqual(len((await self.store.get_run("r1")).archived_messages), 1)
+            await self.store.purge_runs(utc_now() + timedelta(seconds=5), dry_run=False)
+            self.assertIsNone(await self.store.get_run("r1"))
+            again = run()
+            await self.store.create_run(again, created(again))  # nothing of the old run is left behind
+            self.assertEqual((await self.store.get_run("r1")).archived_messages, [])
+
+        asyncio.run(body())
+
 
 class InMemoryStoreContract(StoreContract, unittest.TestCase):
     def make_store(self, clock: Clock) -> Any:
