@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 from agent_harness.orchestration.agents import AGENT_TOOL, TODO_TOOL
-from agent_harness.orchestration.context import written_by_user
+from agent_harness.orchestration.context import STORED_DATA_PREFIXES, written_by_user
 from agent_harness.orchestration.planning import PLAN_TOOLS
 from agent_harness.tools.loading import META_TOOLS
 from agent_harness.extensions.hooks import HookResult
@@ -237,7 +237,10 @@ def _guarded_input(message: Message) -> bool:
     """User-originated text: prompts, follow-ups, steers, and ask_user answers."""
 
     if message.role is Role.USER:
-        return not message.content.startswith("[Context from hooks]")
+        # Hook context, recalled notes and an earlier run's handoff are written by the
+        # harness: they are scanned as data when they are added, not as the user's words
+        # (a note that quotes an e-mail address must not get the user's turn refused).
+        return not message.content.startswith(("[Context from hooks]", *STORED_DATA_PREFIXES))
     return (message.role is Role.TOOL and message.name == ASK_USER_TOOL
             and message.content.startswith("The user answered:"))
 

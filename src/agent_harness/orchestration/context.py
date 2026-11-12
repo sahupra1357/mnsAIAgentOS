@@ -595,7 +595,11 @@ ORCHESTRATOR_NOTE_PREFIXES = ("[Plan]", "[Budget]", "[Memory]")
 # Every user-role message the harness writes starts with one of these. The chat format has
 # no role for them: a directive that starts a turn (a plan step, "answer now") has to be a
 # user message, or the next request would hold two assistant messages in a row.
-HARNESS_PREFIXES = (*ORCHESTRATOR_NOTE_PREFIXES, "[Context from hooks]", "[Working state", "[State -")
+HARNESS_PREFIXES = (*ORCHESTRATOR_NOTE_PREFIXES, "[Context from hooks]", "[Working state", "[State -",
+                    "[Earlier run ")
+# Of those, the ones that carry stored text into a conversation (recalled notes, an earlier
+# run's handoff). They are data: scanned like tool output, never checked as the user's input.
+STORED_DATA_PREFIXES = ("[Memory]", "[Earlier run ")
 
 
 def written_by_user(message: Message) -> bool:

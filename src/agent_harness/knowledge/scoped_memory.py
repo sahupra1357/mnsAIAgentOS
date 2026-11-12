@@ -539,6 +539,9 @@ def _note(note: ScopedNote) -> JsonObject:
         entry["saved"] = saved[:10]
     if note.item.metadata.get(EXPIRES_AT):
         entry["expires"] = note.item.metadata[EXPIRES_AT][:10]
+    if note.item.metadata.get("source_run"):
+        # The run the note comes from: previous_runs(run_id=...) shows what that run did.
+        entry["from_run"] = note.item.metadata["source_run"][:12]
     return entry
 
 

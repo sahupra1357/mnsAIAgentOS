@@ -554,13 +554,17 @@ class AgentOrchestrator:
             head = next((i for i, m in enumerate(initial_messages) if m.role is not Role.SYSTEM),
                         len(initial_messages))
             initial_messages.insert(head, Message(role=Role.SYSTEM, content=PLANNER_INSTRUCTIONS))
+        guarded: list[Any] = []  # guard decisions on stored text, recorded once the run exists
         found = None
         if link and parent_run_id is None and not enqueue and not any(m.role is Role.ASSISTANT for m in initial_messages):
             found = await self._find_link(tenant, initial_messages)
             if found is not None:
                 first_user = next((i for i, m in enumerate(initial_messages) if m.role is Role.USER),
                                   len(initial_messages))
-                initial_messages.insert(first_user, Message(role=Role.SYSTEM, content=linked_block(found)))
+                # A user-role harness message, like recalled notes: what an earlier run
+                # wrote is data, and a system message is merged into the system prompt.
+                initial_messages.insert(first_user, Message(
+                    role=Role.USER, content=self._stored_text(linked_block(found), guarded)))
         recalled: list[Any] = []
         if (self._memory is not None and self._memory.settings.recall and parent_run_id is None
                 and not any(m.role is Role.ASSISTANT for m in initial_messages)):
@@ -571,7 +575,8 @@ class AgentOrchestrator:
                 # a system message would be merged into the system prompt by the adapters.
                 first_user = next((i for i, m in enumerate(initial_messages) if m.role is Role.USER),
                                   len(initial_messages))
-                initial_messages.insert(first_user, Message(role=Role.USER, content=recall_block(recalled)))
+                initial_messages.insert(first_user, Message(
+                    role=Role.USER, content=self._stored_text(recall_block(recalled), guarded)))
         if self._guardrails is not None and self._guardrails.uses_canary:
             _add_canary(initial_messages)
         if self._settings.current_date_note and parent_run_id is None:
@@ -667,7 +672,22 @@ class AgentOrchestrator:
             await self._checkpoint(run, [event], RunEvent(
                 run_id=run.id, type=EventType.MEMORY_RECALLED, payload=_recall_payload(recalled),
                 created_at=now))
+        guard_events = [e for decision in guarded
+                        for e in self._guard_events(run, decision, extra={"stored": True})]
+        if guard_events:
+            await self._checkpoint(run, [event], *guard_events)
         return run
+
+    def _stored_text(self, text: str, decisions: list[Any]) -> str:
+        """Stored text on its way into a conversation (recalled notes, an earlier run's
+        handoff), scanned as tool output is: injected instructions and hidden characters are
+        handled by ``[guardrails.tools]``. The decision is appended to ``decisions``."""
+
+        if self._guardrails is None:
+            return text
+        decision = self._guardrails.check_tool_output(text)
+        decisions.append(decision)
+        return str(decision.text)
 
     async def _recall(
         self, messages: Sequence[Message], who: RunScope, exclude: Sequence[str] = ()
@@ -1668,10 +1688,13 @@ class AgentOrchestrator:
                 added, RunScope(run_id=run.id, tenant=run.tenant, end_user=run.end_user), exclude=shown)
             if recalled:
                 # Its own message before the user's, so the request stays the latest message.
-                added.insert(0, Message(role=Role.USER, content=recall_block(recalled)))
+                checked: list[Any] = []
+                added.insert(0, Message(role=Role.USER, content=self._stored_text(recall_block(recalled), checked)))
                 recall_events.append(RunEvent(
                     run_id=run.id, type=EventType.MEMORY_RECALLED, step=run.step_count, created_at=now,
                     payload={**_recall_payload(recalled), "message": True}))
+                recall_events += [e for decision in checked
+                                  for e in self._guard_events(run, decision, extra={"stored": True})]
         run.status = RunStatus.RUNNING
         run.completed_at = None
         run.error = None

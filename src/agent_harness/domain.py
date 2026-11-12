@@ -848,6 +848,8 @@ class RunHandoff:
     files: tuple[str, ...] = ()
     summary: str = ""
     error: str | None = None
+    # The run held untrusted tool output, so its answer and summary may repeat it.
+    tainted: bool = False
 
 
 class HandoffStore(Protocol):
