@@ -125,6 +125,27 @@ prefix, so the context view must keep its prefix stable:
 - **Size:** keep `max_output_tokens` well below the smallest window. The summary sits in
   the pinned head; if the head no longer fits, the run fails with
   `ContextWindowExceededError`.
+- **Two sizes, kept apart (Phase 42).** The server counts a model's thinking against
+  `max_tokens`, and some deployments cannot turn thinking off (GLM on the shared Modal
+  endpoint ignored every switch). So:
+  - **The summary's size** is `ContextSummarizer.summary_tokens`: at least
+    `max_output_tokens`, more for a long range or a long previous summary, at most
+    `max_share` (0.06) of the profile's input budget and a third of one summary request.
+    The request states it ("Length: at most N characters"). A summary that comes back
+    over it gets one rewrite request (`tighten_request`), then is cut at a line end
+    (`shortened` in the event).
+  - **The request's output room** is for thinking plus the summary. `complete_whole`
+    (`orchestration/side_call.py`) starts at the summary's size and asks again with more
+    room when the reply ends with `finish_reason = length` (four times when nothing
+    fitted, twice otherwise), up to the profile's `parameters.max_tokens`. The room that
+    worked is remembered for the profile (`output_room_tokens` in the event).
+  - **A cut-off reply is never stored.** Still cut off at the ceiling, the range is
+    summarized in two halves; if that fails too, the event says `cut off` and the view
+    omits.
+  - **Failures in a row** wait 3 steps, then 6, 12, … before the next attempt.
+  - Memory extraction (`save_from_turn`) uses the same call; `memory_saved` has `cut_off`
+    when no reply came back whole.
+  A scripted summary model that answers with `finish_reason = length` is now asked again.
 
 ## Testing
 

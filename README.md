@@ -1064,7 +1064,8 @@ output schema are offered `create_plan` but are not asked to plan. A successful 
 the run into a planned run (`plan_created` with `auto: true`). With
 `auto_reminder_after_steps = 6`, a turn that has made 6 tool-calling steps without a plan,
 or whose context was summarized, gets one `[Plan]` reminder: plan and give the reading to
-a subagent, or answer from what it has.
+a subagent, or answer from what it has. A run that was reminded twice and never planned is
+not reminded again.
 
 **Finishing.** With `[orchestrator] final_answer_on_last_step = true`, the answer step of a
 finished plan is sent with `tool_choice = "none"`, so the model writes the answer instead
@@ -1324,7 +1325,8 @@ them. `enabled = false` turns it off (omitted turns are then dropped with a note
 [summarization]
 enabled = true            # the default
 profile = "fast"          # profile or route that writes summaries; empty = the run's own
-max_output_tokens = 1024  # keep well below the smallest context_window
+max_output_tokens = 1024  # the least a summary may be; a long range gets more, up to max_share
+max_share = 0.06          # the most of a profile's input budget one summary may take
 max_input_chars = 0       # 0 = size the transcript from the summarizing profile's window
 ```
 
