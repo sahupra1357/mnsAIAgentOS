@@ -118,6 +118,12 @@ class CompleteWholeTests(unittest.IsolatedAsyncioTestCase):
                                      room=OutputRoom(), key=("p", "summary"))
         self.assertEqual(client.rooms, [512, 2048, 3000])
         self.assertTrue(reply.cut_off)
+        # The next call starts at the ceiling: one request to learn it still does not fit.
+        room = OutputRoom()
+        await complete_whole(client, self.request, answer_tokens=512, ceiling=3000, room=room, key=("p", "s"))
+        await complete_whole(client, self.request, answer_tokens=512, ceiling=3000, room=room, key=("p", "s"))
+        self.assertEqual(client.rooms[-1:], [3000])
+        self.assertEqual(len(client.rooms), 3 + 3 + 1)
 
     async def test_a_model_that_does_not_think_is_asked_once(self) -> None:
         client = Thinking(thinking=0)
@@ -229,18 +235,74 @@ class SummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(e.payload["ok"] for e in summaries))
         self.assertEqual(finished.context_summary.content, "Looked up one more query.")
 
-    async def test_failures_in_a_row_wait_longer_each_time(self) -> None:
+    async def test_old_failures_do_not_keep_a_run_from_summarizing(self) -> None:
+        # Live run, 2026-11-12: eight failures from before the fix were still in the run's
+        # events. A wait that doubled with each one came to 192 steps, and 168 more messages
+        # were dropped unsummarized while the context asked for a summary at every step.
+        attempts = {"n": 0}
+
+        def fixed_after_eight(request: ModelRequest) -> ModelResponse:
+            attempts["n"] += 1
+            if attempts["n"] <= 8:
+                raise RuntimeError("summarizer down")
+            return ModelResponse(content="SUMMARY: looked up the earlier queries.",
+                                 finish_reason=FinishReason.STOP, usage=Usage(100, 20))
+
+        finished, summaries = await self.run_with(SummaryModel(lookups(36), fixed_after_eight))
+        self.assertEqual(finished.status, RunStatus.COMPLETED)
+        failed = [e.step for e in summaries if not e.payload["ok"]]
+        written = [e.step for e in summaries if e.payload["ok"]]
+        self.assertEqual(len(failed), 8)
+        self.assertTrue(written, "the summarizer was never asked again")
+        self.assertLessEqual(written[0] - failed[-1], 3)  # a few steps, however many failures came before
+        self.assertIsNotNone(finished.context_summary)
+
+    async def test_a_new_message_ends_the_delay(self) -> None:
+        store = InMemoryRunStore()
+        down = {"on": True}
+
+        def summarize(request: ModelRequest) -> ModelResponse:
+            if down["on"]:
+                raise RuntimeError("summarizer down")
+            return ModelResponse(content="SUMMARY: looked up the earlier queries.",
+                                 finish_reason=FinishReason.STOP, usage=Usage(100, 20))
+
+        model = SummaryModel(lookups(12) + [answer("again")], summarize)
+        orchestrator = AgentOrchestrator(models=model, tools=BulkyTools(), store=store, context=small_builder(),
+                                         summarizer=ContextSummarizer())
+        run = await orchestrator.create_run(model_profile="small", messages=[SYSTEM, TASK],
+                                            budget=RunBudget(max_steps=40))
+        first = await orchestrator.run(run.id)
+        events = list(await store.list_events(run.id))
+        last_failure = [e for e in events if e.type is EventType.CONTEXT_SUMMARIZED][-1]
+        self.assertFalse(last_failure.payload["ok"])
+        self.assertLess(first.step_count - last_failure.step, 3)  # the delay would still hold
+        down["on"] = False
+        await orchestrator.continue_run(run.id, "And now?")
+        finished = await orchestrator.run(run.id)
+        self.assertEqual(finished.step_count, first.step_count + 1)
+        self.assertIsNotNone(finished.context_summary)  # tried on the very next step
+
+    async def test_nothing_more_is_dropped_without_an_attempt(self) -> None:
         def down(request: ModelRequest) -> ModelResponse:
             raise RuntimeError("summarizer down")
 
-        model = SummaryModel(lookups(30), down)
-        finished, summaries = await self.run_with(model)
-        self.assertEqual(finished.status, RunStatus.COMPLETED)
-        steps = [e.step for e in summaries]
-        gaps = [b - a for a, b in zip(steps, steps[1:])]
-        self.assertTrue(gaps, "expected more than one attempt")
-        self.assertEqual(gaps, sorted(gaps))
-        self.assertGreaterEqual(gaps[-1], 2 * gaps[0])  # 3 steps, then 6, 12: not every third step for ever
+        store = InMemoryRunStore()
+        finished, summaries = await self.run_with(SummaryModel(lookups(30), down), store=store)
+        self.assertEqual(finished.status, RunStatus.COMPLETED)  # a broken summarizer never fails the run
+        events = list(await store.list_events(finished.id))
+        attempted = {e.step for e in summaries}
+        omitted = 0
+        grew = []
+        for event in events:
+            if event.type is EventType.MODEL_RESPONDED and event.payload.get("ok"):
+                now = (event.payload.get("context") or {}).get("omitted_messages", 0)
+                if now > omitted:
+                    grew.append(event.step)
+                omitted = now
+        self.assertTrue(grew)
+        self.assertEqual([step for step in grew if step not in attempted], [])
+        self.assertLess(len(summaries), finished.step_count)  # and still not at every step
 
     async def test_a_summary_over_its_size_limit_is_rewritten_shorter(self) -> None:
         summarizer = ContextSummarizer(max_output_tokens=64)

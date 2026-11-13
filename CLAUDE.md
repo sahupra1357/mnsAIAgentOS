@@ -1102,7 +1102,7 @@ From the first long live chat (run `58cf397f`, 2026-11-11, 36 turns on `modal_sh
    original archived; `explain_refusal` names the check in the reply.
 3. **Summaries came back empty or cut off** (9 of 11 failed; the two stored were cut mid-sentence; 53 messages
    were then omitted unsummarized). The request's output room grows until the reply is whole; the summary's
-   size follows the range; a cut-off reply is never stored; failures in a row wait 3, 6, 12… steps.
+   size follows the range; a cut-off reply is never stored.
 4. **Note extraction returned nothing** (25 of 33 calls ended at the 512-token cap). Same call; `memory_saved`
    has `cut_off`; a refused turn is not mined for notes.
 5. **The guard model was down** and every turn waited 20 s for it: the pause doubles up to 15 minutes.
@@ -1110,6 +1110,14 @@ From the first long live chat (run `58cf397f`, 2026-11-11, 36 turns on `modal_sh
 7. **Taint prompts:** `/ui` shows the reason and an "Approve for this turn" button (`rest_of_turn`);
    `ApprovalRequest.reason`.
 8. **Root config:** `modal.com` and `huggingface.co` in `allowed_hosts`.
+
+**Phase 43 – The context decides when to summarize** [context-management] — on `phase-43-summary-retry`
+Phase 42 made the wait after a failed summary double with each failure in a row. The count came from the run's
+stored events, so the long chat, continued after the fix, was refused a summary for 192 steps on the strength
+of eight failures from the night before, and 168 more messages were omitted unsummarized. Now: whether to
+summarize is the context's question alone; a failure delays the next attempt by 3 steps, a new user message
+ends the delay, and a view that would drop more than the last request did gets an attempt regardless. A reply
+still cut off at the ceiling makes the next call start there.
 
 Not fixed, measured: the endpoint drops its prompt cache within a minute of idle time (the same 38,634-token
 prompt reused 38,592 tokens after 10 s and none after 60 s, with the affinity header). That is why 20 of 25

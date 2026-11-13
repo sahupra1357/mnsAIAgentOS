@@ -133,10 +133,15 @@ async def _perform_model_turn(
         status_block = Message(role=Role.USER, content=status) if status else None
         reserve = tuple(m for m in (hook_context, status_block) if m is not None)
         view = self._build_view(run, specs, events, reserve)
-        if self._summarizer is not None and self._compaction.should_compact(run, view):
-            span = self._compaction_range(run, view)
-            if span is not None and await self._summarize(run, events, view, span=span):
-                view = self._build_view(run, specs, events, reserve)
+        if self._summarizer is not None:
+            # The context decides: at the policy's threshold, and in any case when this view
+            # leaves out more than the last request did. Messages are not dropped
+            # unsummarized without one attempt, whatever an earlier failure delayed.
+            dropping = view.omitted_messages > _last_omitted(events)
+            if dropping or self._compaction.should_compact(run, view):
+                span = self._compaction_range(run, view)
+                if span is not None and await self._summarize(run, events, view, span=span, force=dropping):
+                    view = self._build_view(run, specs, events, reserve)
         def make_request(view: ContextView) -> ModelRequest:
             request_messages = view.messages
             if hook_context is not None:
@@ -427,37 +432,38 @@ async def _summarize(
     view: ContextView,
     *,
     span: tuple[int, int] | None = None,
+    force: bool = False,
 ) -> bool:
     """Replace the omitted range with a persisted summary; True if one was written.
 
     The summary is a model call: its usage counts against the run budget,
     and the result is stored on the run and in a ``context_summarized``
     event, so a resumed run reuses it instead of regenerating it. Failures
-    never fail the run: the view falls back to plain omission. A range that failed is
-    asked for again only after a wait that doubles with each failure in a row, so a
-    summary that cannot be written does not cost a model call every few steps.
+    never fail the run: the view falls back to plain omission.
+
+    Whether a summary is needed is the context's question alone (the caller asked it). A
+    failure only delays the next attempt, by ``_SUMMARY_RETRY_STEPS`` steps, so a
+    summarizer that is down is not called at every step. The delay ends with the user's
+    next message, and ``force`` (the view is about to drop more messages) ignores it.
+    The delay is never longer: a wait that grew with each failure once kept a run from
+    summarizing for 192 steps on the strength of failures recorded before a fix.
     """
 
     assert self._summarizer is not None
     start, target = span if span is not None else (view.omitted_from, view.omitted_through)
     if start is None or target is None or target <= start:
         return False
-    early = not isinstance(self._compaction, DefaultCompactionPolicy)
-    failures, last_failure = 0, None
+    last_failure, new_message = None, False
     for event in reversed(events):
-        if event.type is EventType.CONTEXT_SUMMARIZED:
-            if event.payload.get("ok") is not False:
-                break
-            failures += 1
-            last_failure = last_failure or event
-    if last_failure is not None:
-        if last_failure.payload.get("covers") == target:
-            return False
-        # A policy that compacts early has a new target at every step: after a failure it
-        # waits instead of calling the model each time (3 steps, then 6, 12, ...).
-        wait = _SUMMARY_RETRY_STEPS * 2 ** min(failures - 1, 6)
-        if early and run.step_count - last_failure.step < wait:
-            return False
+        if event.type is EventType.USER_MESSAGE_ADDED:
+            new_message = True
+        elif event.type is EventType.CONTEXT_SUMMARIZED:
+            if event.payload.get("ok") is False:
+                last_failure = event
+            break
+    if (last_failure is not None and not force and not new_message
+            and run.step_count - last_failure.step < _SUMMARY_RETRY_STEPS):
+        return False
     # A range too long for one request is summarized in several, each continuing the
     # last (a summarizer without chunks(), e.g. a custom one, gets one request).
     if hasattr(self._summarizer, "chunks"):
@@ -643,6 +649,16 @@ async def _summary_within_limit(
     work.shortened = True
     cut = content[:limit]
     return cut[: cut.rfind("\n")] if "\n" in cut[limit // 2:] else cut
+
+
+def _last_omitted(events: Sequence[RunEvent]) -> int:
+    """How many messages the last answered request left out (0: none, or no request yet)."""
+
+    for event in reversed(events):
+        if event.type is EventType.MODEL_RESPONDED and event.payload.get("ok") is True:
+            context = event.payload.get("context")
+            return int(context.get("omitted_messages", 0)) if isinstance(context, Mapping) else 0
+    return 0
 
 
 def _total(values: Sequence[Any]) -> Any:
