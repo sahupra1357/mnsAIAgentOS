@@ -302,8 +302,22 @@ class EarlyCompactionTests(unittest.TestCase):
         self.assertIs(run.status, RunStatus.COMPLETED)
         failed = [e for e in events if e.type is EventType.CONTEXT_SUMMARIZED and not e.payload.get("ok")]
         self.assertGreaterEqual(len(failed), 1)
+        # A failure delays the next attempt by three steps, unless the view is about to
+        # leave out more messages than the last request did: then it is tried at once.
+        omitted_before: dict[int, int] = {}
+        last = 0
+        for event in events:
+            if event.type is EventType.MODEL_REQUESTED:
+                omitted_before[event.step] = last
+            if event.type is EventType.MODEL_RESPONDED and event.payload.get("ok"):
+                last = (event.payload.get("context") or {}).get("omitted_messages", 0)
+        answered = {e.step: (e.payload.get("context") or {}).get("omitted_messages", 0)
+                    for e in events if e.type is EventType.MODEL_RESPONDED and e.payload.get("ok")}
         steps = [e.step for e in failed]
-        self.assertTrue(all(later - earlier >= 3 for earlier, later in zip(steps, steps[1:])))
+        for earlier, later in zip(steps, steps[1:]):
+            self.assertTrue(later - earlier >= 3 or answered[later] > omitted_before[later],
+                            f"retried at step {later} after {earlier} with nothing new to drop")
+        self.assertLess(len(failed), run.step_count)  # not at every step
         # The view still says what was dropped, without a summary.
         self.assertIn("[Earlier tool calls", "\n".join(m.content for m in model.requests[-1].messages))
 

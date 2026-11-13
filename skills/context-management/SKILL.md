@@ -142,7 +142,11 @@ prefix, so the context view must keep its prefix stable:
   - **A cut-off reply is never stored.** Still cut off at the ceiling, the range is
     summarized in two halves; if that fails too, the event says `cut off` and the view
     omits.
-  - **Failures in a row** wait 3 steps, then 6, 12, … before the next attempt.
+  - **The context decides when to summarize (Phase 43).** A failure delays the next attempt by
+    3 steps and no more, the user's next message ends the delay, and a view that would leave out
+    more messages than the last request did is given an attempt regardless (`force`). Never make
+    the delay grow with the failure count: it reads the run's stored events, so it outlives a
+    restart and a fix (a doubling wait locked one run out of summarizing for 192 steps).
   - Memory extraction (`save_from_turn`) uses the same call; `memory_saved` has `cut_off`
     when no reply came back whole.
   A scripted summary model that answers with `finish_reason = length` is now asked again.

@@ -73,5 +73,8 @@ async def complete_whole(
                 room.learned(key, now)
             return SideReply(response, tuple(usages), now, False)
         if now >= limit or len(usages) >= MAX_ROOM_ATTEMPTS:
+            # Start the next call here too: it will not fit in less, and finding that out
+            # again costs a request each time.
+            room.learned(key, now)
             return SideReply(response, tuple(usages), now, True)
         now = min(limit, now * (2 if response.content.strip() else 4))
